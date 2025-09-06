@@ -1,21 +1,58 @@
-// GET /fein-auth/by-league?leagueId=...&season=2025
-app.get('/fein-auth/by-league', async (req, res) => {
+// fein-auth/by-league.js — PUBLIC: list leagues (optionally filtered by season or leagueId)
+import { Router } from "express";
+import { query } from "../lib/db.js"; // adjust path if your db helper lives elsewhere
+
+const router = Router();
+
+// Allow GET and preflight
+router.options("/", (_req, res) => res.sendStatus(204));
+
+router.get("/", async (req, res) => {
   try {
-    const leagueIdRaw = (req.query.leagueId ?? '').toString().trim();
-    const seasonRaw   = (req.query.season   ?? '').toString().trim();
-    if (!leagueIdRaw || !seasonRaw) return bad(res, 400, 'leagueId, season required');
+    const season   = (req.query.season ?? "").toString().trim();
+    const leagueId = (req.query.leagueId ?? "").toString().trim();
 
-    const leagueId = BigInt(leagueIdRaw).toString();
-    const season   = Number(seasonRaw);
+    let rows = [];
+    if (leagueId) {
+      rows = await query(
+        `SELECT league_id AS "leagueId",
+                season::int      AS season,
+                COALESCE(name,'')   AS name,
+                COALESCE(owner,'')  AS owner,
+                COALESCE(size, NULL)::int AS size
+           FROM leagues
+          WHERE league_id = $1
+          ORDER BY season DESC`,
+        [leagueId]
+      );
+    } else if (season) {
+      rows = await query(
+        `SELECT league_id AS "leagueId",
+                season::int      AS season,
+                COALESCE(name,'')   AS name,
+                COALESCE(owner,'')  AS owner,
+                COALESCE(size, NULL)::int AS size
+           FROM leagues
+          WHERE season = $1
+          ORDER BY name NULLS LAST, league_id`,
+        [season]
+      );
+    } else {
+      rows = await query(
+        `SELECT league_id AS "leagueId",
+                season::int      AS season,
+                COALESCE(name,'')   AS name,
+                COALESCE(owner,'')  AS owner,
+                COALESCE(size, NULL)::int AS size
+           FROM leagues
+          ORDER BY season DESC, name NULLS LAST, league_id`
+      );
+    }
 
-    const q = `
-      select league_id, team_id, season, name, handle, league_size
-      from public.fein_teams
-      where league_id = $1::bigint and season = $2::int
-      order by team_id
-      limit 100
-    `;
-    const { rows } = await pool.query(q, [leagueId, season]);
-    ok(res, { rows });
-  } catch (e) { bad(res, 500, String(e)); }
+    res.json({ ok: true, count: rows.length, leagues: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: "by-league failed", detail: String(err) });
+  }
 });
+
+export default router;
