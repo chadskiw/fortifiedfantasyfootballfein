@@ -1,10 +1,9 @@
-// fein-auth/by-league.js — PUBLIC: list leagues (optionally filtered by season or leagueId)
-import { Router } from "express";
-import { query } from "../lib/db.js"; // adjust path if your db helper lives elsewhere
+// PUBLIC endpoint — anyone can view leagues
+const { Router } = require("express");
+const { query } = require("../lib/db");
 
 const router = Router();
 
-// Allow GET and preflight
 router.options("/", (_req, res) => res.sendStatus(204));
 
 router.get("/", async (req, res) => {
@@ -55,4 +54,4 @@ router.get("/", async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;
