@@ -1,6 +1,6 @@
-// PUBLIC endpoint — anyone can view leagues
+// src/fein-auth/by-league.js
 const { Router } = require("express");
-const { query } = require("../lib/db");
+const { query } = require("../lib/db"); // adjust path if your db helper differs
 
 const router = Router();
 
@@ -14,36 +14,33 @@ router.get("/", async (req, res) => {
     let rows = [];
     if (leagueId) {
       rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
+        `SELECT DISTINCT league_id, season::int, league_size,
+                MAX(name)   AS name,
+                MAX(handle) AS handle
+           FROM fein_teams
           WHERE league_id = $1
+          GROUP BY league_id, season, league_size
           ORDER BY season DESC`,
         [leagueId]
       );
     } else if (season) {
       rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
+        `SELECT DISTINCT league_id, season::int, league_size,
+                MAX(name)   AS name,
+                MAX(handle) AS handle
+           FROM fein_teams
           WHERE season = $1
+          GROUP BY league_id, season, league_size
           ORDER BY name NULLS LAST, league_id`,
         [season]
       );
     } else {
       rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
+        `SELECT DISTINCT league_id, season::int, league_size,
+                MAX(name)   AS name,
+                MAX(handle) AS handle
+           FROM fein_teams
+          GROUP BY league_id, season, league_size
           ORDER BY season DESC, name NULLS LAST, league_id`
       );
     }
