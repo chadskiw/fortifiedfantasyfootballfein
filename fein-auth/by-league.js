@@ -19,10 +19,6 @@ router.get("/", async (req, res) => {
     const where = [];
     const params = [];
 
-    if (leagueId) {
-      params.push(leagueId);
-      where.push(`league_id = $${params.length}`);
-    }
     if (hasSeason) {
       params.push(season);
       where.push(`season::int = $${params.length}`);
