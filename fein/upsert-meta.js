@@ -68,7 +68,7 @@ await (async () => {
   await pool.query(`alter table fein_meta add column if not exists s2   text;`);
   await pool.query(`create index if not exists fein_meta_season_size_idx on fein_meta(season, league_size);`);
   await pool.query(`create index if not exists fein_meta_league_idx on fein_meta(league_id);`);
-  -- // partial index for creds lookups
+   // partial index for creds lookups
   await pool.query(`
     create index if not exists fein_meta_creds_idx
       on fein_meta(league_id, season, updated_at)
