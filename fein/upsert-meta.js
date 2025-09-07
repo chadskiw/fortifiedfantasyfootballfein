@@ -14,8 +14,8 @@
 //   DATABASE_URL     (required)
 //   FEIN_AUTH_KEY    (optional; if set, required for POST /fein/upsert-meta and GET /fein-auth/creds)
 
-import express from "express";
-import { Pool } from "pg";
+const express = require("express");
+const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 const DB_URL = process.env.DATABASE_URL;
