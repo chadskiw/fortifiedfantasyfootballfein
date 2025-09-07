@@ -1,27 +1,54 @@
-// CommonJS entry for Render
-const express = require("express");
-const cors = require("cors");
-const morgan = require("morgan");
+// Minimal Express service exposing /fein/upsert-meta
+// No DB here—just echoes back so you can verify the route exists.
 
-const feinAuthRouter = require("./fein-auth"); // this is the router you just fixed
-const byLeagueRouter = require("./fein-auth/by-league");
+import express from "express";
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: "*", methods: ["GET", "OPTIONS"] }));
+// CORS + JSON
 app.use(express.json());
-app.use(morgan("tiny"));
-
-app.get(["/", "/healthz"], (req, res) => {
-  res.json({ ok: true, service: "fein-auth-service" });
+app.use((req, res, next) => {
+  res.set({
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type,x-fein-key"
+  });
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
 });
 
-// Mount routers
-app.use("/api/fein-auth", feinAuthRouter);
-app.use("/api/fein-auth/by-league", byLeagueRouter);
+// Health
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// 404 fallback
-app.use((req, res) => res.status(404).json({ ok: false, error: "Not found", path: req.path }));
+// Optional GET so you can hit it in a browser
+app.get("/fein/upsert-meta", (_req, res) => {
+  res.json({
+    ok: true,
+    hint: "POST JSON here to upsert team meta",
+    expect: {
+      leagueId: "12345",
+      teamId: "7",
+      season: "2025",
+      leagueSize: 12,
+      teamName: "Team Name",
+      owner: "Owner",
+      fb_groups: ["Name", "@handle", "Group A"]
+    }
+  });
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening on :${PORT}`));
+// The POST your CF Pages function will call
+app.post("/fein/upsert-meta", (req, res) => {
+  const b = req.body || {};
+  if (!b.leagueId || !b.teamId || !b.season) {
+    return res.status(400).json({ ok: false, error: "leagueId, teamId, season required" });
+  }
+  // TODO: upsert into your DB here.
+  res.json({ ok: true, stored: true, row: b });
+});
+
+// Start
+app.listen(PORT, () => {
+  console.log(`fein-auth-service listening on :${PORT}`);
+});
