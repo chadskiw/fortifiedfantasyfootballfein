@@ -46,19 +46,24 @@ router.get("/", async (req, res) => {
 
     // extra safety: post-filter
     const filtered = hasSize ? rows.filter(r => Number(r.league_size) === size) : rows;
-
-    res.json({
-      ok: true,
-      filters: {
-        season: hasSeason ? season : null,
-        leagueId: leagueId || null,
-        size: hasSize ? size : null
+    return new Response(JSON.stringify({ ok: true, rows }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "Content-Security-Policy":
+          "default-src 'none'; base-uri 'self'; frame-ancestors 'self'; object-src 'none'"
       },
-      count: filtered.length,
-      leagues: filtered
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: "by-league failed", detail: String(err) });
+    return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+      status: 500,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "Content-Security-Policy":
+          "default-src 'none'; base-uri 'self'; frame-ancestors 'self'; object-src 'none'"
+      },
+    });
   }
 });
 
