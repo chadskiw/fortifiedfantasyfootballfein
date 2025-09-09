@@ -1,4 +1,4 @@
-import { q } from './_db.js';
+import { q } from '../../db.js';
 import { json, onOptions } from './_cors.js';
 
 const WRITE_KEY = (process.env.FEIN_AUTH_KEY || '').trim();
