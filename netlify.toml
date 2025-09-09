@@ -4,10 +4,20 @@
 
 [[redirects]]
   from = "/api/fein-auth/by-league"
-  to = "/.netlify/functions/fein-auth-by-league"
+  to   = "/.netlify/functions/fein-auth-by-league"
   status = 200
 
 [[redirects]]
   from = "/api/fein-auth/pool"
-  to = "/.netlify/functions/fein-auth-pool"
+  to   = "/.netlify/functions/fein-auth-pool"
+  status = 200
+
+[[redirects]]
+  from = "/api/fein-auth/upsert-meta"
+  to   = "/.netlify/functions/fein-auth-upsert-meta"
+  status = 200
+
+[[redirects]]
+  from = "/api/fein-auth/creds"
+  to   = "/.netlify/functions/fein-auth-creds"
   status = 200
