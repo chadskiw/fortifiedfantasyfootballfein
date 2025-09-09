@@ -1,6 +1,6 @@
-// src/routes/feinReact.js
-import express from 'express';
-import { tx, one, all } from '../db.js';
+// src/routes/feinReact.js (CommonJS)
+const express = require('express');
+const { tx, one, all } = require('../db');
 
 const router = express.Router();
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://fortifiedfantasy.com';
