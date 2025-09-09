@@ -1,36 +1,55 @@
 const express = require('express');
 const feinAuthRouter = require('./routes/fein-auth');
+const feinReact = require('./routes/feinReact');
 
 const app = express();
 app.use(express.json());
 
-// CORS
+// ---- CORS (GLOBAL) — put this BEFORE any routes ----
 const ALLOWED = [
   'https://fortifiedfantasy.com',
-  'https://fortifiedfantasy4.pages.dev/',
+  'https://fortifiedfantasy4.pages.dev', // no trailing slash
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
-function isAllowed(origin){ return !!origin && ALLOWED.includes(origin); }
+
+function normalizeOrigin(o) { return o ? o.replace(/\/$/, '') : ''; }
+function isAllowed(origin) {
+  const o = normalizeOrigin(origin);
+  return o && ALLOWED.includes(o);
+}
+
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
+  const origin = normalizeOrigin(req.headers.origin);
+  // Methods/headers you accept
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'content-type,x-fein-key,x-espn-swid,x-espn-s2');
-  if (isAllowed(origin)) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Access-Control-Allow-Credentials', 'true'); res.setHeader('Vary','Origin'); }
-  else { res.setHeader('Access-Control-Allow-Origin', '*'); }
+  // If you ever read response headers in frontend, expose them:
+  // res.setHeader('Access-Control-Expose-Headers', 'content-type');
+
+  if (isAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  } else {
+    // If you need credentials, you cannot use "*". If not, "*" is fine.
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
-// Health
+// ---- Health
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'fein-auth-service' }));
 
-// Mount router at BOTH paths
+// ---- Routes
+app.use('/api/fein/react', feinReact);
 app.use('/fein-auth', feinAuthRouter);
 app.use('/api/fein-auth', feinAuthRouter);
 
-// 404
+// ---- 404
 app.use((req, res) => res.status(404).json({ ok:false, error:'Not Found', path:req.path }));
 
 const PORT = process.env.PORT || 3000;
