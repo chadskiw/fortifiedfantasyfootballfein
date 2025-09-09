@@ -3,8 +3,8 @@
   functions = "netlify/functions"
 
 [[redirects]]
-  from = "/api/fein-auth"
-  to = "/.netlify/functions"
+  from = "/api/fein-auth/by-league"
+  to = "/.netlify/functions/fein-auth-by-league"
   status = 200
 
 [[redirects]]
