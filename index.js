@@ -7,6 +7,7 @@ app.use(express.json());
 // CORS
 const ALLOWED = [
   'https://fortifiedfantasy.com',
+  'https://fortifiedfantasy4.pages.dev/',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
