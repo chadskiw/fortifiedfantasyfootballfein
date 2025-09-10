@@ -128,6 +128,164 @@ router.get('/react', async (req, res) => {
     return ok(res, { counts });
   } catch (e) { return boom(res, e); }
 });
+// --- helpers for list endpoint ---
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const encCur = (o) => Buffer.from(JSON.stringify(o)).toString('base64');
+const decCur = (c) => { try { return JSON.parse(Buffer.from(String(c||''), 'base64').toString('utf8')); } catch { return null; } };
+
+// Build an entity_key prefix from high-level filters (kind/season/leagueId/etc)
+function buildPrefix({ kind, season, leagueId, teamId, playerId, nflAbbr }) {
+  const K = (s||'').toLowerCase();
+  if (kind === 'team') {
+    if (season && leagueId && teamId) return `fflteam:${season}:${leagueId}:${teamId}`;
+    if (season && leagueId)          return `fflteam:${season}:${leagueId}:`;
+    if (season)                      return `fflteam:${season}:`;
+    return `fflteam:`;
+  }
+  if (kind === 'league') {
+    if (season && leagueId) return `fflleague:${season}:${leagueId}`;
+    if (season)             return `fflleague:${season}:`;
+    return `fflleague:`;
+  }
+  if (kind === 'player') {
+    if (playerId) return `fflplayer:${playerId}`;
+    return `fflplayer:`;
+  }
+  if (kind === 'pro') {
+    if (nflAbbr) return `nflteam:${String(nflAbbr).toUpperCase()}`;
+    return `nflteam:`;
+  }
+  return ''; // no kind -> no prefix constraint
+}
+
+// GET /api/fein/react/list
+router.get('/react/list', async (req, res) => {
+  try {
+    await resolveTables();
+    stampHeaders(res);
+
+    const kind       = String(req.query.kind || '').trim().toLowerCase(); // team|league|player|pro
+    const season     = String(req.query.season || '').trim();
+    const leagueId   = String(req.query.leagueId || '').trim();
+    const teamId     = String(req.query.teamId || '').trim();
+    const playerId   = String(req.query.playerId || '').trim();
+    const nflAbbr    = String(req.query.nflAbbr || '').trim();
+    const ekeyPrefix = String(req.query.ekey_prefix || '').trim();
+    const type       = String(req.query.type || '').trim().toLowerCase(); // fire|fish|trash
+    const minTotal   = Number.isFinite(Number(req.query.min_total)) ? Number(req.query.min_total) : 0;
+    const updatedAfter = String(req.query.updated_after || '').trim(); // ISO ts or date
+    const search     = String(req.query.search || '').trim(); // substring on entity_key
+
+    // sorting
+    const sort = String(req.query.sort || 'updated').trim().toLowerCase(); // updated|fire|fish|trash|total
+    const dir  = String(req.query.dir || 'desc').trim().toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const limit = clamp(parseInt(req.query.limit,10) || 500, 1, 1000);
+
+    // cursor (keyset pagination: order by updated_at DESC/ASC + entity_key ASC)
+    const cursor = decCur(req.query.cursor);
+    const orderUpdated = (sort === 'updated');
+    const sortCol = (sort === 'fire' || sort === 'fish' || sort === 'trash') ? sort
+                  : (sort === 'total') ? 'total'
+                  : 'updated_at';
+
+    const where = [];
+    const params = [];
+    let pi = 1;
+
+    // prefix logic
+    const computedPrefix = ekeyPrefix || buildPrefix({ kind, season, leagueId, teamId, playerId, nflAbbr });
+    if (computedPrefix) {
+      // exact match if the prefix is a full key (no trailing colon) and matches known shapes
+      if (/^(fflteam:\d+:\d+:\d+|fflleague:\d+:\d+|fflplayer:\d+|nflteam:[A-Z]{2,3})$/.test(computedPrefix)) {
+        where.push(`entity_key = $${pi++}`); params.push(computedPrefix);
+      } else {
+        where.push(`entity_key LIKE $${pi++}`); params.push(`${computedPrefix}%`);
+      }
+    }
+
+    // type filter (only rows where that counter > 0)
+    if (type === 'fire' || type === 'fish' || type === 'trash') {
+      where.push(`${type} > 0`);
+    }
+
+    // updated_after filter
+    if (updatedAfter) {
+      where.push(`updated_at > $${pi++}`); params.push(updatedAfter);
+    }
+
+    // min_total filter
+    if (minTotal > 0) {
+      where.push(`(fire + fish + trash) >= $${pi++}`); params.push(minTotal);
+    }
+
+    // search substring on entity_key
+    if (search) {
+      where.push(`entity_key ILIKE $${pi++}`); params.push(`%${search}%`);
+    }
+
+    // keyset pagination (respecting the ORDER used below)
+    if (cursor && cursor.updated_at && cursor.entity_key) {
+      // We always keep entity_key ASC as tiebreaker, so:
+      // If dir=DESC on updated_at: (updated_at < cur) OR (updated_at = cur AND entity_key > cur_key)
+      // If dir=ASC  on updated_at: (updated_at > cur) OR (updated_at = cur AND entity_key > cur_key)
+      if (orderUpdated) {
+        const cmp = (dir === 'DESC')
+          ? `(updated_at < $${pi} OR (updated_at = $${pi} AND entity_key > $${pi+1}))`
+          : `(updated_at > $${pi} OR (updated_at = $${pi} AND entity_key > $${pi+1}))`;
+        where.push(cmp);
+        params.push(cursor.updated_at, cursor.entity_key);
+        pi += 2;
+      } else {
+        // when sorting by fire/fish/trash/total, fall back to updated_at cursor to keep pagination predictable
+        const cmp = (dir === 'DESC')
+          ? `(updated_at < $${pi} OR (updated_at = $${pi} AND entity_key > $${pi+1}))`
+          : `(updated_at > $${pi} OR (updated_at = $${pi} AND entity_key > $${pi+1}))`;
+        where.push(cmp);
+        params.push(cursor.updated_at, cursor.entity_key);
+        pi += 2;
+      }
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // safe ORDER BY (only allow whitelisted columns)
+    const orderSql = (() => {
+      if (sortCol === 'total') {
+        return `ORDER BY (fire + fish + trash) ${dir}, entity_key ASC`;
+      }
+      if (sortCol === 'fire' || sortCol === 'fish' || sortCol === 'trash') {
+        return `ORDER BY ${sortCol} ${dir}, updated_at DESC, entity_key ASC`;
+      }
+      // default: updated_at
+      return `ORDER BY updated_at ${dir}, entity_key ASC`;
+    })();
+
+    const sql = `
+      SELECT entity_key, fire, fish, trash, updated_at,
+             (fire + fish + trash) AS total
+      FROM ${TABLES.totals}
+      ${whereSql}
+      ${orderSql}
+      LIMIT ${limit}
+    `;
+
+    const rows = await query(sql, params).then(r => r.rows || []);
+
+    let next_cursor = null;
+    if (rows.length === limit) {
+      const last = rows[rows.length - 1];
+      next_cursor = encCur({ updated_at: last.updated_at, entity_key: last.entity_key });
+    }
+
+    return ok(res, {
+      count: rows.length,
+      next_cursor,
+      items: rows
+    });
+  } catch (e) {
+    return boom(res, e);
+  }
+});
 
 // ----------------------------------------------------------------------------
 // POST /api/fein/react { entity_key, type, inc }
