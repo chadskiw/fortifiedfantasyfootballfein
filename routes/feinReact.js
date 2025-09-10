@@ -1,6 +1,6 @@
 const express = require('express');
 const { tx, one, all } = require('../db');
-const { getRedis } = require('../redis');
+//const { getRedis } = require('../redis');
 
 const router = express.Router();
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://fortifiedfantasy.com';
@@ -43,7 +43,7 @@ router.get('/:entity_key', async (req, res) => {
     if (!entity_key) return bad(res, 'Missing entity_key');
 
     // Try Redis first
-    const rPromise = getRedis();
+    //const rPromise = getRedis();
     const r = rPromise ? await rPromise : null;
     if (r) {
       const h = await r.hGetAll(rk.total(entity_key));
@@ -73,7 +73,7 @@ router.post('/', async (req, res) => {
 
     // ---- rate limit (cheap) -------------------------------------------------
     // Simple token: 10 ops per 5s per (user, entity, type)
-    const rPromise = getRedis();
+    //const rPromise = getRedis();
     const r = rPromise ? await rPromise : null;
     if (r) {
       const rateKey = rk.rate(u, entity_key, t);
