@@ -1,5 +1,5 @@
 const express = require('express');
-const { tx, one, all } = require('../db');
+const { tx, one, all } = require('../src/db');
 //const { getRedis } = require('../redis');
 
 const router = express.Router();
