@@ -318,12 +318,62 @@ router.get('/league-opponents', async (req, res) => {
 });
 
 /** LEAGUE-WIDE: rosters (players only) for ALL teams */
+// helpers (put near top of file)
+const isSwid = v => /^\{[0-9A-F-]+\}$/i.test(s(v).trim());
+
+// fetch best-known handles for a set of swids from fein_meta
+async function bestHandlesFromFeinMeta(swids = []) {
+  const list = dedup(swids).filter(Boolean);
+  if (!list.length) return {};
+  // Use most recent non-empty, non-swid-looking handle per swid
+  const sql = `
+    SELECT DISTINCT ON (swid) swid, handle
+    FROM fein_meta
+    WHERE swid = ANY($1::text[])
+      AND handle IS NOT NULL AND handle <> ''
+      AND handle !~* '^\\{[0-9A-F-\\-]+\\}$'
+    ORDER BY swid, updated_at DESC
+  `;
+  const rows = await query(sql, [list]).then(r => r.rows);
+  const out = {};
+  for (const r of rows) {
+    const h = s(r.handle).trim();
+    if (h) out[s(r.swid).trim()] = h;
+  }
+  return out;
+}
+
+// write back learned handles into current league rows (handle only)
+async function backfillHandlesIntoFeinMeta({ season, leagueId, teams, ownersMap }) {
+  if (!Array.isArray(teams) || !teams.length) return;
+  const tasks = [];
+  for (const T of teams) {
+    const owners = Array.isArray(T?.team?.owners) ? T.team.owners : [];
+    if (!owners.length) continue;
+    // pick first owner with a non-swid handle
+    const got = owners.map(x => ({ swid: s(x).trim(), name: s(ownersMap?.[x] || '').trim() }))
+                      .find(o => o.name && !isSwid(o.name));
+    if (!got) continue;
+
+    // only fill if missing/empty or currently a swid-looking string
+    tasks.push(query(`
+      UPDATE fein_meta
+         SET handle = $5, updated_at = now()
+       WHERE season    = $1
+         AND league_id = $2
+         AND team_id   = $3
+         AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-\\-]+\\}$')
+    `, [String(season), String(leagueId), String(T.team.id), got.swid, got.name]));
+  }
+  if (tasks.length) await Promise.allSettled(tasks);
+}
+
 router.get('/league-rosters', async (req, res) => {
   try {
     const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
     const season   = s(req.query.season   || req.query.year).trim();
     const week     = n(req.query.week || req.query.scoringPeriodId);
-    const usingTeamId = s(req.query.usingTeamId || req.query.teamId || '').trim(); // optional creds chooser
+    const usingTeamId = s(req.query.usingTeamId || req.query.teamId || '').trim();
 
     if (!leagueId || !season || !week) {
       return bad(res, 'leagueId, season, week required');
@@ -332,8 +382,7 @@ router.get('/league-rosters', async (req, res) => {
     const { swid, s2 } = await getCreds({ leagueId, teamId: usingTeamId, season });
     if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league' });
 
-    // Make sure your url builder includes mMembers; if not, we’ll fallback fetch below.
-    const url = espnLeagueUrlAll({ season, leagueId, week }); // should include ?view=mTeam&mRoster&mMembers
+    const url = espnLeagueUrlAll({ season, leagueId, week }); // include ?view=mTeam&view=mRoster&view=mMembers
     const headers = {
       'accept': 'application/json',
       'cookie': `espn_s2=${s2}; SWID=${swid}`,
@@ -350,34 +399,28 @@ router.get('/league-rosters', async (req, res) => {
     const data  = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
 
-    // --- ownersMap from mMembers (with graceful fallback) ---
+    // ---- ownersMap from ESPN mMembers (if present) ----
     const ownersMap = {};
-    const pushMembers = (arr=[]) => {
+    const takeMembers = (arr=[]) => {
       for (const m of arr) {
-        const name =
-          m?.displayName ||
-          m?.nickname ||
-          [m?.firstName, m?.lastName].filter(Boolean).join(' ') ||
-          'Owner';
-        if (m?.id) ownersMap[m.id] = name;
+        const name = s(m?.displayName || m?.nickname || [m?.firstName, m?.lastName].filter(Boolean).join(' ')).trim();
+        if (m?.id && name) ownersMap[m.id] = name;
       }
     };
+    if (Array.isArray(data.members)) takeMembers(data.members);
+    else if (data.membersMap && typeof data.membersMap === 'object') takeMembers(Object.values(data.membersMap));
 
-    if (Array.isArray(data.members)) {
-      pushMembers(data.members);
-    } else if (data.membersMap && typeof data.membersMap === 'object') {
-      pushMembers(Object.values(data.membersMap));
+    // ---- gather all SWIDs referenced by teams ----
+    const allSwids = dedup(teams.flatMap(T => Array.isArray(T?.owners) ? T.owners : []));
+
+    // ---- fill gaps from our own history (fein_meta) ----
+    const missing = allSwids.filter(id => !ownersMap[id] || isSwid(ownersMap[id]) || ownersMap[id].toLowerCase() === 'owner');
+    if (missing.length) {
+      const learned = await bestHandlesFromFeinMeta(missing);
+      Object.assign(ownersMap, learned);
     }
 
-    // If still empty, fetch mMembers explicitly as a fallback
-    if (!Object.keys(ownersMap).length) {
-      const memUrl =
-        `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mMembers`;
-      const mem = await fetchJson(memUrl, { headers }).catch(()=>null);
-      if (mem?.ok && Array.isArray(mem.data?.members)) pushMembers(mem.data.members);
-    }
-
-    // Normalize per team
+    // ---- normalize each team + players ----
     const out = teams.map(T => {
       const entries = T?.roster?.entries || [];
       const players = entries.map(e => {
@@ -407,20 +450,28 @@ router.get('/league-rosters', async (req, res) => {
         abbrev: T.abbrev || null,
         name: (T.location && T.nickname) ? `${T.location} ${T.nickname}` : (T.nickname || T.location || T.name || null),
         logo: T.logo || null,
-        owners: T.owners || [] // SWID array; FE will map via ownersMap
+        owners: T.owners || [] // SWID array; FE maps via ownersMap
       };
-
       return { team: teamMeta, players };
+    });
+
+    // ---- write back learned owner names into fein_meta for this league ----
+    await backfillHandlesIntoFeinMeta({
+      season,
+      leagueId,
+      teams: out,
+      ownersMap
     });
 
     return ok(res, {
       meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null },
-      ownersMap,   // ← now defined & filled with ESPN handles
+      ownersMap,   // FE will render handle(s) from here
       teams: out
     });
 
   } catch (e) { return boom(res, e); }
 });
+
 
 
 module.exports = router;
