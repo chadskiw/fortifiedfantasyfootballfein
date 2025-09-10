@@ -1,9 +1,12 @@
 const express = require('express');
 const feinAuthRouter = require('./routes/fein-auth');
 const feinReact = require('./routes/feinReact');
+const espnProxy = require('./routes/espn-proxy');
+const espnOpponents = require('./routes/espn-opponents');
 
 const app = express();
 app.use(express.json());
+
 
 // ---- CORS (GLOBAL) — put this BEFORE any routes ----
 const ALLOWED = [
@@ -48,6 +51,8 @@ app.get('/health', (_req, res) => res.json({ ok: true, service: 'fein-auth-servi
 app.use('/api/fein/react', feinReact);
 app.use('/fein-auth', feinAuthRouter);
 app.use('/api/fein-auth', feinAuthRouter);
+app.use('/espn', espnProxy);
+app.use('/espn', espnOpponents);
 
 // ---- 404
 app.use((req, res) => res.status(404).json({ ok:false, error:'Not Found', path:req.path }));
