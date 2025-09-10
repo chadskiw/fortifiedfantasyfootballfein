@@ -24,6 +24,21 @@ function ensureBracedSwid(w) {
   if (/^\{.*\}$/.test(t)) return t;
   return `{${t.replace(/^\{|\}$/g, '')}}`;
 }
+// === SAFE OWNER SANITIZER (Unicode aware) ================================
+// Allow letters, numbers, combining marks + a few common punctuation chars.
+const OWNER_SAFE = /[^\p{L}\p{N}\p{M} .,'&()\-]/gu;
+function cleanOwner(raw) {
+  return String(raw ?? '')
+    .replace(OWNER_SAFE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// If you ever need to build a RegExp from dynamic text (you do not here),
+// use this (kept for future-proofing):
+function reEscape(s = '') {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
@@ -366,6 +381,7 @@ router.get('/league-opponents', async (req, res) => {
 });
 
 /** LEAGUE-WIDE: rosters (players only) for ALL teams (+ ownersMap + backfill handles) */
+/** LEAGUE-WIDE: rosters (players only) for ALL teams (+ ownersMap + backfill handles) */
 router.get('/league-rosters', async (req, res) => {
   try {
     const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
@@ -397,25 +413,40 @@ router.get('/league-rosters', async (req, res) => {
     const data  = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
 
-    // ---- ownersMap from ESPN mMembers (if present) ----
+    // ---- ownersMap from ESPN mMembers (if present), CLEANED ----
     const ownersMap = {};
     const takeMembers = (arr=[]) => {
       for (const m of arr) {
-        const name = s(m?.displayName || m?.nickname || [m?.firstName, m?.lastName].filter(Boolean).join(' ')).trim();
-        if (m?.id && name) ownersMap[m.id] = name;
+        const rawName =
+          m?.displayName ??
+          m?.nickname ??
+          [m?.firstName, m?.lastName].filter(Boolean).join(' ');
+        const name = cleanOwner(rawName);
+        const id   = s(m?.id).trim();
+        if (id && name) ownersMap[id] = name; // id is SWID-like without braces
       }
     };
-    if (Array.isArray(data.members)) takeMembers(data.members);
-    else if (data.membersMap && typeof data.membersMap === 'object') takeMembers(Object.values(data.membersMap));
+    if (Array.isArray(data.members)) {
+      takeMembers(data.members);
+    } else if (data.membersMap && typeof data.membersMap === 'object') {
+      takeMembers(Object.values(data.membersMap));
+    }
 
     // ---- gather all SWIDs referenced by teams ----
     const allSwids = dedup(teams.flatMap(T => Array.isArray(T?.owners) ? T.owners : []));
 
     // ---- fill gaps from our own history (fein_meta) ----
-    const missing = allSwids.filter(id => !ownersMap[id] || isSwid(ownersMap[id]) || ownersMap[id].toLowerCase() === 'owner');
+    const missing = allSwids.filter(id => {
+      const v = ownersMap[id];
+      return !v || isSwid(v) || v.toLowerCase() === 'owner';
+    });
     if (missing.length) {
       const learned = await bestHandlesFromFeinMeta(missing);
-      Object.assign(ownersMap, learned);
+      // clean learned handles too, then merge
+      for (const [k, v] of Object.entries(learned)) {
+        const cleaned = cleanOwner(v);
+        if (cleaned) ownersMap[k] = cleaned;
+      }
     }
 
     // ---- normalize each team + players ----
@@ -454,20 +485,27 @@ router.get('/league-rosters', async (req, res) => {
     });
 
     // ---- write back learned owner names into fein_meta for this league ----
+    // (use the cleaned version)
+    const cleanedOwnersMap = {};
+    for (const [k, v] of Object.entries(ownersMap)) {
+      const vv = cleanOwner(v);
+      if (vv) cleanedOwnersMap[k] = vv;
+    }
     await backfillHandlesIntoFeinMeta({
       season,
       leagueId,
       teams: out,
-      ownersMap
+      ownersMap: cleanedOwnersMap
     });
 
     return ok(res, {
       meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null },
-      ownersMap,   // FE will render handle(s) from here
+      ownersMap: cleanedOwnersMap,   // FE will render handle(s) from here
       teams: out
     });
 
   } catch (e) { return boom(res, e); }
 });
+
 
 module.exports = router;
