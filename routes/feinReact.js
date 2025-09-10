@@ -44,7 +44,7 @@ router.get('/:entity_key', async (req, res) => {
 
     // Try Redis first
     //const rPromise = getRedis();
-    const r = rPromise ? await rPromise : null;
+    const r = null;
     if (r) {
       const h = await r.hGetAll(rk.total(entity_key));
       if (h && Object.keys(h).length) {
@@ -74,7 +74,7 @@ router.post('/', async (req, res) => {
     // ---- rate limit (cheap) -------------------------------------------------
     // Simple token: 10 ops per 5s per (user, entity, type)
     //const rPromise = getRedis();
-    const r = rPromise ? await rPromise : null;
+    const r = null;
     if (r) {
       const rateKey = rk.rate(u, entity_key, t);
       const cur = await r.incr(rateKey);
