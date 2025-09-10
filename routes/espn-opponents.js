@@ -199,9 +199,16 @@ router.get('/roster-players', async (req, res) => {
       }
     });
 
-    if (!espn.ok) {
-      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
-    }
+    const flat = String(req.query.flat || '') === '1';
+if (flat) {
+  const byTeamId = {};
+  for (const row of out) byTeamId[String(row.team.id)] = row.players;
+  return ok(res, {
+    meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null, flat: true },
+    playersByTeamId: byTeamId
+  });
+}
+
 
     const data = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
