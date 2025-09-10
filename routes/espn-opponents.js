@@ -1,7 +1,7 @@
 // routes/espn-opponents.js
 // Fortified Fantasy — safe proxies for opponents + rosters (players only)
-// Adds league-wide endpoints that use ONE valid team’s creds for the league.
-// Depends on: ../src/db exporting `query` and Postgres table `fein_meta` with swid/s2.
+// Uses ONE valid team’s creds in a league, pulled from fein_meta.
+// Depends on: ../src/db exporting `query` and PG table `fein_meta` (with swid/s2/handle).
 
 const express = require('express');
 const { query } = require('../src/db');
@@ -16,6 +16,7 @@ const boom = (res, err)  => res.status(500).json({ ok: false, error: String(err?
 
 const s = v => (v == null ? '' : String(v));
 const n = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
+const dedup = (arr = []) => Array.from(new Set(arr.flat().map(x => s(x).trim()).filter(Boolean)));
 
 function ensureBracedSwid(w) {
   const t = s(w).trim();
@@ -31,7 +32,7 @@ async function fetchJson(url, opts = {}) {
     const data = JSON.parse(text);
     if (!res.ok) return { ok:false, status:res.status, error:'Non-200 from upstream', data };
     return { ok:true, status:res.status, data };
-  } catch (e) {
+  } catch {
     return { ok:false, status:res.status, error:'Invalid JSON from upstream', data:text.slice(0,1000) };
   }
 }
@@ -87,13 +88,13 @@ async function getCreds({ leagueId, teamId, season }) {
   return { swid:'', s2:'' };
 }
 
-// ESPN league URL with matchup + team + roster views.
+// ESPN league URL with matchup + team + roster + members views.
 function espnLeagueUrl({ season, leagueId, week, forTeamId }) {
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const sp = new URLSearchParams();
   if (week) sp.set('scoringPeriodId', String(week));
   if (forTeamId) sp.set('forTeamId', String(forTeamId));
-  ['mMatchup','mTeam','mRoster','kona_player_info'].forEach(v => sp.append('view', v));
+  ['mMatchup','mTeam','mRoster','mMembers','kona_player_info'].forEach(v => sp.append('view', v));
   return `${base}?${sp.toString()}`;
 }
 
@@ -102,14 +103,71 @@ function espnLeagueUrlAll({ season, leagueId, week }) {
   return espnLeagueUrl({ season, leagueId, week, forTeamId: null });
 }
 
-// Normalize abbrevs
+// Normalize NFL team abbrevs
 const TEAM_NORM = { JAC: 'JAX', WAS: 'WSH', OAK: 'LV', SD: 'LAC', STL: 'LAR', LA: 'LAR' };
 function normAbbr(a) {
   const t = String(a||'').toUpperCase().replace(/[^A-Z]/g,'');
   return TEAM_NORM[t] || t || null;
 }
 
+// owner handle helpers
+const isSwid = v => /^\{[0-9A-F-]+\}$/i.test(s(v).trim());
+
+// fetch best-known handles for a set of swids from fein_meta
+async function bestHandlesFromFeinMeta(swids = []) {
+  const list = dedup(swids);
+  if (!list.length) return {};
+  // Use most recent non-empty, non-swid-looking handle per swid
+  const sql = `
+    SELECT DISTINCT ON (swid) swid, handle
+    FROM fein_meta
+    WHERE swid = ANY($1::text[])
+      AND handle IS NOT NULL AND handle <> ''
+      AND handle !~* '^\\{[0-9A-F-\\-]+\\}$'
+    ORDER BY swid, updated_at DESC
+  `;
+  const rows = await query(sql, [list]).then(r => r.rows);
+  const out = {};
+  for (const r of rows) {
+    const h = s(r.handle).trim();
+    if (h) out[s(r.swid).trim()] = h;
+  }
+  return out;
+}
+
+// write back learned handles into current league rows (handle only)
+async function backfillHandlesIntoFeinMeta({ season, leagueId, teams, ownersMap }) {
+  if (!Array.isArray(teams) || !teams.length) return;
+  const tasks = [];
+  for (const T of teams) {
+    const owners = Array.isArray(T?.team?.owners) ? T.team.owners : [];
+    if (!owners.length) continue;
+    // pick first owner with a non-swid handle
+    const got = owners
+      .map(x => ({ swid: s(x).trim(), name: s(ownersMap?.[x] || '').trim() }))
+      .find(o => o.name && !isSwid(o.name));
+    if (!got) continue;
+
+    // only fill if missing/empty or currently a swid-looking string
+    tasks.push(
+      query(
+        `
+        UPDATE fein_meta
+           SET handle = $4, updated_at = now()
+         WHERE season    = $1
+           AND league_id = $2
+           AND team_id   = $3
+           AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-\\-]+\\}$')
+        `,
+        [String(season), String(leagueId), String(T.team.id), got.name]
+      )
+    );
+  }
+  if (tasks.length) await Promise.allSettled(tasks);
+}
+
 /* -------------------------------- ROUTES -------------------------------- */
+
 /** SINGLE-TEAM: opponent for week */
 router.get('/opponent', async (req, res) => {
   try {
@@ -199,16 +257,9 @@ router.get('/roster-players', async (req, res) => {
       }
     });
 
-    const flat = String(req.query.flat || '') === '1';
-if (flat) {
-  const byTeamId = {};
-  for (const row of out) byTeamId[String(row.team.id)] = row.players;
-  return ok(res, {
-    meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null, flat: true },
-    playersByTeamId: byTeamId
-  });
-}
-
+    if (!espn.ok) {
+      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
+    }
 
     const data = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
@@ -303,10 +354,7 @@ router.get('/league-opponents', async (req, res) => {
         owners: TT.owners || []
       } || null;
 
-      return {
-        team: meta(t),
-        opponent: meta(opp)
-      };
+      return { team: meta(t), opponent: meta(opp) };
     });
 
     return ok(res, {
@@ -317,57 +365,7 @@ router.get('/league-opponents', async (req, res) => {
   } catch (e) { return boom(res, e); }
 });
 
-/** LEAGUE-WIDE: rosters (players only) for ALL teams */
-// helpers (put near top of file)
-const isSwid = v => /^\{[0-9A-F-]+\}$/i.test(s(v).trim());
-
-// fetch best-known handles for a set of swids from fein_meta
-async function bestHandlesFromFeinMeta(swids = []) {
-  const list = dedup(swids).filter(Boolean);
-  if (!list.length) return {};
-  // Use most recent non-empty, non-swid-looking handle per swid
-  const sql = `
-    SELECT DISTINCT ON (swid) swid, handle
-    FROM fein_meta
-    WHERE swid = ANY($1::text[])
-      AND handle IS NOT NULL AND handle <> ''
-      AND handle !~* '^\\{[0-9A-F-\\-]+\\}$'
-    ORDER BY swid, updated_at DESC
-  `;
-  const rows = await query(sql, [list]).then(r => r.rows);
-  const out = {};
-  for (const r of rows) {
-    const h = s(r.handle).trim();
-    if (h) out[s(r.swid).trim()] = h;
-  }
-  return out;
-}
-
-// write back learned handles into current league rows (handle only)
-async function backfillHandlesIntoFeinMeta({ season, leagueId, teams, ownersMap }) {
-  if (!Array.isArray(teams) || !teams.length) return;
-  const tasks = [];
-  for (const T of teams) {
-    const owners = Array.isArray(T?.team?.owners) ? T.team.owners : [];
-    if (!owners.length) continue;
-    // pick first owner with a non-swid handle
-    const got = owners.map(x => ({ swid: s(x).trim(), name: s(ownersMap?.[x] || '').trim() }))
-                      .find(o => o.name && !isSwid(o.name));
-    if (!got) continue;
-
-    // only fill if missing/empty or currently a swid-looking string
-    tasks.push(query(`
-      UPDATE fein_meta
-         SET handle = $5, updated_at = now()
-       WHERE season    = $1
-         AND league_id = $2
-         AND team_id   = $3
-         AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-\\-]+\\}$')
-    `, [String(season), String(leagueId), String(T.team.id), got.swid, got.name]));
-  }
-  if (tasks.length) await Promise.allSettled(tasks);
-}
-
+/** LEAGUE-WIDE: rosters (players only) for ALL teams (+ ownersMap + backfill handles) */
 router.get('/league-rosters', async (req, res) => {
   try {
     const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
@@ -382,7 +380,7 @@ router.get('/league-rosters', async (req, res) => {
     const { swid, s2 } = await getCreds({ leagueId, teamId: usingTeamId, season });
     if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league' });
 
-    const url = espnLeagueUrlAll({ season, leagueId, week }); // include ?view=mTeam&view=mRoster&view=mMembers
+    const url = espnLeagueUrlAll({ season, leagueId, week }); // includes mMembers
     const headers = {
       'accept': 'application/json',
       'cookie': `espn_s2=${s2}; SWID=${swid}`,
@@ -471,7 +469,5 @@ router.get('/league-rosters', async (req, res) => {
 
   } catch (e) { return boom(res, e); }
 });
-
-
 
 module.exports = router;
