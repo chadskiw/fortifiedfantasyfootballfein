@@ -48,7 +48,7 @@ app.use((req, res, next) => {
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'fein-auth-service' }));
 
 // ---- Routes
-app.use('/api/fein/react', feinReact);
+app.use('/api/fein', feinReact);
 app.use('/fein-auth', feinAuthRouter);
 app.use('/api/fein-auth', feinAuthRouter);
 app.use('/espn', espnProxy);
