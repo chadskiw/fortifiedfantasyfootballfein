@@ -1,5 +1,5 @@
 const express = require('express');
-const { q } = require('../db');
+const { q } = require('../src/db');
 const { readAuthFromRequest } = require('../auth');
 
 const router = express.Router();
