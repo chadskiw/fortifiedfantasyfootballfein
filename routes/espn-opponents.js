@@ -137,8 +137,9 @@ async function bestHandlesFromFeinMeta(swids = []) {
     SELECT DISTINCT ON (swid) swid, handle
     FROM fein_meta
     WHERE swid = ANY($1::text[])
-      AND handle IS NOT NULL AND handle <> ''
-      AND handle !~* '^\\{[0-9A-F-\\-]+\\}$'
+AND handle IS NOT NULL AND handle <> ''
+AND handle !~* '^\\{[0-9A-F-]+\\}$'
+
     ORDER BY swid, updated_at DESC
   `;
   const rows = await query(sql, [list]).then(r => r.rows);
@@ -172,7 +173,7 @@ async function backfillHandlesIntoFeinMeta({ season, leagueId, teams, ownersMap 
          WHERE season    = $1
            AND league_id = $2
            AND team_id   = $3
-           AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-\\-]+\\}$')
+AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-]+\\}$')
         `,
         [String(season), String(leagueId), String(T.team.id), got.name]
       )
