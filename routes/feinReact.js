@@ -135,7 +135,6 @@ const decCur = (c) => { try { return JSON.parse(Buffer.from(String(c||''), 'base
 
 // Build an entity_key prefix from high-level filters (kind/season/leagueId/etc)
 function buildPrefix({ kind, season, leagueId, teamId, playerId, nflAbbr }) {
-  const K = (s||'').toLowerCase();
   if (kind === 'team') {
     if (season && leagueId && teamId) return `fflteam:${season}:${leagueId}:${teamId}`;
     if (season && leagueId)          return `fflteam:${season}:${leagueId}:`;
