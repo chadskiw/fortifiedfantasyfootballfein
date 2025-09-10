@@ -332,23 +332,50 @@ router.get('/league-rosters', async (req, res) => {
     const { swid, s2 } = await getCreds({ leagueId, teamId: usingTeamId, season });
     if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league' });
 
-    const url = espnLeagueUrlAll({ season, leagueId, week });
-    const espn = await fetchJson(url, {
-      headers: {
-        'accept': 'application/json',
-        'cookie': `espn_s2=${s2}; SWID=${swid}`,
-        'referer': `https://fantasy.espn.com/football/league?leagueId=${leagueId}`,
-        'origin': 'https://fantasy.espn.com',
-        'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
-      }
-    });
+    // Make sure your url builder includes mMembers; if not, we’ll fallback fetch below.
+    const url = espnLeagueUrlAll({ season, leagueId, week }); // should include ?view=mTeam&mRoster&mMembers
+    const headers = {
+      'accept': 'application/json',
+      'cookie': `espn_s2=${s2}; SWID=${swid}`,
+      'referer': `https://fantasy.espn.com/football/league?leagueId=${leagueId}`,
+      'origin': 'https://fantasy.espn.com',
+      'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
+    };
 
+    const espn = await fetchJson(url, { headers });
     if (!espn.ok) {
       return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
     }
 
-    const data = espn.data || {};
+    const data  = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
+
+    // --- ownersMap from mMembers (with graceful fallback) ---
+    const ownersMap = {};
+    const pushMembers = (arr=[]) => {
+      for (const m of arr) {
+        const name =
+          m?.displayName ||
+          m?.nickname ||
+          [m?.firstName, m?.lastName].filter(Boolean).join(' ') ||
+          'Owner';
+        if (m?.id) ownersMap[m.id] = name;
+      }
+    };
+
+    if (Array.isArray(data.members)) {
+      pushMembers(data.members);
+    } else if (data.membersMap && typeof data.membersMap === 'object') {
+      pushMembers(Object.values(data.membersMap));
+    }
+
+    // If still empty, fetch mMembers explicitly as a fallback
+    if (!Object.keys(ownersMap).length) {
+      const memUrl =
+        `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mMembers`;
+      const mem = await fetchJson(memUrl, { headers }).catch(()=>null);
+      if (mem?.ok && Array.isArray(mem.data?.members)) pushMembers(mem.data.members);
+    }
 
     // Normalize per team
     const out = teams.map(T => {
@@ -378,20 +405,22 @@ router.get('/league-rosters', async (req, res) => {
       const teamMeta = {
         id: T.id,
         abbrev: T.abbrev || null,
-        name: T.location && T.nickname ? `${T.location} ${T.nickname}` : (T.nickname || T.location || T.name || null),
+        name: (T.location && T.nickname) ? `${T.location} ${T.nickname}` : (T.nickname || T.location || T.name || null),
         logo: T.logo || null,
-        owners: T.owners || []
+        owners: T.owners || [] // SWID array; FE will map via ownersMap
       };
 
       return { team: teamMeta, players };
     });
 
     return ok(res, {
-      meta: { leagueId, season:Number(season), week:Number(week), usingTeamId: usingTeamId || null },
+      meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null },
+      ownersMap,   // ← now defined & filled with ESPN handles
       teams: out
     });
 
   } catch (e) { return boom(res, e); }
 });
+
 
 module.exports = router;
