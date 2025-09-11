@@ -298,7 +298,7 @@ router.get('/roster-players', async (req, res) => {
         name,
         positionId: Number.isFinite(posId) ? posId : null,
         lineupSlotId: Number.isFinite(lineupSlotId) ? lineupSlotId : null,
-        proTeamAbbr: proTeamId,
+        proTeamId: proTeamId,
         injuryStatus: p?.injuryStatus || null,
         proj
       };
@@ -458,7 +458,7 @@ router.get('/league-rosters', async (req, res) => {
         const name = p?.fullName || `${p?.firstName||''} ${p?.lastName||''}`.trim();
         const lineupSlotId = Number(e?.lineupSlotId);
         const posId = Number(p?.defaultPositionId);
-        const pro = normAbbr(p?.proTeamAbbreviation || p?.proTeamAbbr);
+        const proTeamId = Number(p?.proTeamId);
         let proj = 0;
         if (Array.isArray(p?.stats) && Number.isFinite(week)) {
           const row = p.stats.find(s => Number(s?.scoringPeriodId) === Number(week) && Number(s?.statSourceId) === 1);
@@ -469,7 +469,7 @@ router.get('/league-rosters', async (req, res) => {
           name,
           positionId: Number.isFinite(posId) ? posId : null,
           lineupSlotId: Number.isFinite(lineupSlotId) ? lineupSlotId : null,
-          proTeamAbbr: pro,
+          proTeamId: proTeamId,
           injuryStatus: p?.injuryStatus || null,
           proj
         };
