@@ -287,7 +287,7 @@ router.get('/roster-players', async (req, res) => {
       const name = p?.fullName || `${p?.firstName||''} ${p?.lastName||''}`.trim();
       const lineupSlotId = Number(e?.lineupSlotId);
       const posId = Number(p?.defaultPositionId);
-      const pro = normAbbr(p?.proTeamAbbr || p?.teamAbbr);
+      const proTeamId = Number(p?.proTeamId);
       let proj = 0;
       if (Array.isArray(p?.stats)) {
         const row = p.stats.find(s => Number(s?.scoringPeriodId) === Number(week) && Number(s?.statSourceId) === 1);
@@ -298,7 +298,7 @@ router.get('/roster-players', async (req, res) => {
         name,
         positionId: Number.isFinite(posId) ? posId : null,
         lineupSlotId: Number.isFinite(lineupSlotId) ? lineupSlotId : null,
-        proTeamAbbr: pro,
+        proTeamAbbr: proTeamId,
         injuryStatus: p?.injuryStatus || null,
         proj
       };
