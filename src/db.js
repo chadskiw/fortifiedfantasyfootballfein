@@ -1,41 +1,29 @@
 // src/db.js
 const { Pool } = require('pg');
 
+// Prefer sslmode=require in the URL; this is a belt-and-suspenders fallback.
+const isRender = /render\.com/.test(process.env.DATABASE_URL || '');
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: false },
+  ssl: isRender ? { rejectUnauthorized: false } : undefined
 });
 
-async function query(text, params = []) {
-  return pool.query(text, params);
+pool.on('error', (err) => {
+  // eslint-disable-next-line no-console
+  console.error('PG pool error', err);
+});
+
+async function q(text, params) {
+  const start = Date.now();
+  const res = await pool.query(text, params);
+  res.durationMs = Date.now() - start;
+  return res;
 }
 
-async function one(text, params = []) {
-  const r = await pool.query(text, params);
-  return r.rows[0] || null;
+// Simple health probe
+async function ping() {
+  const r = await q('select 1 as ok');
+  return r.rows[0]?.ok === 1;
 }
 
-async function all(text, params = []) {
-  const r = await pool.query(text, params);
-  return r.rows;
-}
-
-async function tx(fn) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const q    = (t, p) => client.query(t, p);
-    const oneQ = async (t, p) => { const r = await client.query(t, p); return r.rows[0] || null; };
-    const allQ = async (t, p) => { const r = await client.query(t, p); return r.rows; };
-    const val  = await fn({ q, one: oneQ, all: allQ });
-    await client.query('COMMIT');
-    return val;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
-}
-
-module.exports = { query, one, all, tx };
+module.exports = { pool, q, ping };
