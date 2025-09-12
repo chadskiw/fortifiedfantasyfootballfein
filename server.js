@@ -24,6 +24,11 @@ const ALLOWED = [
   'http://127.0.0.1:5173',
 ];
 const isAllowed = (origin) => origin && ALLOWED.includes(origin);
+// server.js (snippet)
+const path = require('path');
+app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
+  setHeaders: (res, p) => { if (p.endsWith('.js')) res.type('application/javascript'); }
+}));
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -57,6 +62,7 @@ app.use('/api/fein/react', feinReact);
 // Mount same router on both paths your frontend might call
 app.use('/api/fein-auth', feinAuthRouter);
 app.use('/fein-auth', feinAuthRouter);
+app.use('/api/espn-auth', feinAuthRouter);                 // ALIAS for legacy callers
 
 // ===== 404 fallback =====
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not Found', path: req.path }));
