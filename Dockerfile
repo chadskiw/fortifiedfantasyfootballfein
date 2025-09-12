@@ -6,4 +6,4 @@ COPY src ./src
 COPY .env.example ./.
 ENV NODE_ENV=production
 EXPOSE 5050
-CMD ["node", "src/server.js"]
+CMD ["node", "server.js"]
