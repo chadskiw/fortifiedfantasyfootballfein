@@ -6,19 +6,10 @@ function get(key) {
   if (!TTL) return undefined;
   const hit = store.get(key);
   if (!hit) return undefined;
-  if (hit.exp && Date.now() > hit.exp) {
-    store.delete(key);
-    return undefined;
-  }
+  if (hit.exp && Date.now() > hit.exp) { store.delete(key); return undefined; }
   return hit.value;
 }
-
-function set(key, value) {
-  if (!TTL) return;
-  const exp = TTL > 0 ? Date.now() + TTL * 1000 : 0;
-  store.set(key, { value, exp });
-}
-
+function set(key, value) { if (!TTL) return; store.set(key, { value, exp: Date.now() + TTL*1000 }); }
 function del(key) { store.delete(key); }
 function clear() { store.clear(); }
 
