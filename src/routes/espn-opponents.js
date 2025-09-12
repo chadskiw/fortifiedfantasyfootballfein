@@ -1,0 +1,512 @@
+// routes/espn-opponents.js
+// Fortified Fantasy — safe proxies for opponents + rosters (players only)
+// Uses ONE valid team’s creds in a league, pulled from fein_meta.
+// Depends on: ../src/db exporting `query` and PG table `fein_meta` (with swid/s2/handle).
+
+const express = require('express');
+const { query } = require('../src/db');
+
+const router = express.Router();
+
+/* ------------------------------- helpers -------------------------------- */
+
+const ok   = (res, data) => res.json({ ok: true, ...data });
+const bad  = (res, msg)  => res.status(400).json({ ok: false, error: msg || 'Bad request' });
+const boom = (res, err)  => res.status(500).json({ ok: false, error: String(err?.message || err) });
+
+const s = v => (v == null ? '' : String(v));
+const n = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
+const dedup = (arr = []) => Array.from(new Set(arr.flat().map(x => s(x).trim()).filter(Boolean)));
+
+function ensureBracedSwid(w) {
+  const t = s(w).trim();
+  if (!t) return '';
+  if (/^\{.*\}$/.test(t)) return t;
+  return `{${t.replace(/^\{|\}$/g, '')}}`;
+}
+// === SAFE OWNER SANITIZER (Unicode aware) ================================
+// Allow letters, numbers, combining marks + a few common punctuation chars.
+const OWNER_SAFE = /[^\p{L}\p{N}\p{M} .,'&()\-]/gu;
+function cleanOwner(raw) {
+  return String(raw ?? '')
+    .replace(OWNER_SAFE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// If you ever need to build a RegExp from dynamic text (you do not here),
+// use this (kept for future-proofing):
+function reEscape(s = '') {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function fetchJson(url, opts = {}) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    const data = JSON.parse(text);
+    if (!res.ok) return { ok:false, status:res.status, error:'Non-200 from upstream', data };
+    return { ok:true, status:res.status, data };
+  } catch {
+    return { ok:false, status:res.status, error:'Invalid JSON from upstream', data:text.slice(0,1000) };
+  }
+}
+
+// Pull best creds for a given league/team, with season preference.
+// If teamId is omitted, returns the most recent valid creds in that league (optionally for season).
+async function getCreds({ leagueId, teamId, season }) {
+  const lid = s(leagueId).trim();
+  const tid = s(teamId).trim();
+  const yr  = s(season).trim();
+
+  const tries = [];
+  if (lid && tid && yr) {
+    tries.push({ sql: `
+      SELECT swid, s2 FROM fein_meta
+      WHERE league_id = $1 AND team_id = $2 AND season = $3
+        AND swid IS NOT NULL AND s2 IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `, params: [lid, tid, yr] });
+  }
+  if (lid && tid) {
+    tries.push({ sql: `
+      SELECT swid, s2 FROM fein_meta
+      WHERE league_id = $1 AND team_id = $2
+        AND swid IS NOT NULL AND s2 IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `, params: [lid, tid] });
+  }
+  if (lid && yr) {
+    tries.push({ sql: `
+      SELECT swid, s2 FROM fein_meta
+      WHERE league_id = $1 AND season = $2
+        AND swid IS NOT NULL AND s2 IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `, params: [lid, yr] });
+  }
+  if (lid) {
+    tries.push({ sql: `
+      SELECT swid, s2 FROM fein_meta
+      WHERE league_id = $1
+        AND swid IS NOT NULL AND s2 IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `, params: [lid] });
+  }
+
+  for (const t of tries) {
+    const rows = await query(t.sql, t.params).then(r => r.rows);
+    const r = rows?.[0];
+    if (r?.swid && r?.s2) {
+      return { swid: ensureBracedSwid(r.swid), s2: s(r.s2) };
+    }
+  }
+  return { swid:'', s2:'' };
+}
+
+// ESPN league URL with matchup + team + roster + members views.
+function espnLeagueUrl({ season, leagueId, week, forTeamId }) {
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const sp = new URLSearchParams();
+  if (week) sp.set('scoringPeriodId', String(week));
+  if (forTeamId) sp.set('forTeamId', String(forTeamId));
+  ['mMatchup','mTeam','mRoster','mMembers','kona_player_info'].forEach(v => sp.append('view', v));
+  return `${base}?${sp.toString()}`;
+}
+
+// Same, but no forTeamId (pull league-wide in one go when creds allow)
+function espnLeagueUrlAll({ season, leagueId, week }) {
+  return espnLeagueUrl({ season, leagueId, week, forTeamId: null });
+}
+
+// Normalize NFL team abbrevs
+const TEAM_NORM = { JAC: 'JAX', WAS: 'WSH', OAK: 'LV', SD: 'LAC', STL: 'LAR', LA: 'LAR' };
+function normAbbr(a) {
+  const t = String(a||'').toUpperCase().replace(/[^A-Z]/g,'');
+  return TEAM_NORM[t] || t || null;
+}
+
+// owner handle helpers
+const isSwid = v => /^\{[0-9A-F-]+\}$/i.test(s(v).trim());
+
+// fetch best-known handles for a set of swids from fein_meta
+async function bestHandlesFromFeinMeta(swids = []) {
+  const list = dedup(swids);
+  if (!list.length) return {};
+  // Use most recent non-empty, non-swid-looking handle per swid
+  const sql = `
+    SELECT DISTINCT ON (swid) swid, handle
+    FROM fein_meta
+    WHERE swid = ANY($1::text[])
+AND handle IS NOT NULL AND handle <> ''
+AND handle !~* '^\\{[0-9A-F-]+\\}$'
+
+    ORDER BY swid, updated_at DESC
+  `;
+  const rows = await query(sql, [list]).then(r => r.rows);
+  const out = {};
+  for (const r of rows) {
+    const h = s(r.handle).trim();
+    if (h) out[s(r.swid).trim()] = h;
+  }
+  return out;
+}
+
+// write back learned handles into current league rows (handle only)
+async function backfillHandlesIntoFeinMeta({ season, leagueId, teams, ownersMap }) {
+  if (!Array.isArray(teams) || !teams.length) return;
+  const tasks = [];
+  for (const T of teams) {
+    const owners = Array.isArray(T?.team?.owners) ? T.team.owners : [];
+    if (!owners.length) continue;
+    // pick first owner with a non-swid handle
+    const got = owners
+      .map(x => ({ swid: s(x).trim(), name: s(ownersMap?.[x] || '').trim() }))
+      .find(o => o.name && !isSwid(o.name));
+    if (!got) continue;
+
+    // only fill if missing/empty or currently a swid-looking string
+    tasks.push(
+      query(
+        `
+        UPDATE fein_meta
+           SET handle = $4, updated_at = now()
+         WHERE season    = $1
+           AND league_id = $2
+           AND team_id   = $3
+AND (handle IS NULL OR handle = '' OR handle ~* '^\\{[0-9A-F-]+\\}$')
+        `,
+        [String(season), String(leagueId), String(T.team.id), got.name]
+      )
+    );
+  }
+  if (tasks.length) await Promise.allSettled(tasks);
+}
+
+/* -------------------------------- ROUTES -------------------------------- */
+
+/** SINGLE-TEAM: opponent for week */
+router.get('/opponent', async (req, res) => {
+  try {
+    const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
+    const teamId   = s(req.query.teamId   || req.query.tid).trim();
+    const season   = s(req.query.season   || req.query.year).trim();
+    const week     = n(req.query.week || req.query.scoringPeriodId);
+
+    if (!leagueId || !teamId || !season || !week) {
+      return bad(res, 'leagueId, teamId, season, week required');
+    }
+
+    const { swid, s2 } = await getCreds({ leagueId, teamId, season });
+    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that team/league' });
+
+    const url = espnLeagueUrl({ season, leagueId, week, forTeamId: teamId });
+    const espn = await fetchJson(url, {
+      headers: {
+        'accept': 'application/json',
+        'cookie': `espn_s2=${s2}; SWID=${swid}`,
+        'referer': `https://fantasy.espn.com/football/team?leagueId=${leagueId}`,
+        'origin': 'https://fantasy.espn.com',
+        'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
+      }
+    });
+
+    if (!espn.ok) {
+      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
+    }
+
+    const data = espn.data || {};
+    const teams = Array.isArray(data.teams) ? data.teams : [];
+    const schedule = Array.isArray(data.schedule) ? data.schedule : [];
+
+    const match = schedule.find(m =>
+      Number(m?.matchupPeriodId) === Number(week) &&
+      (String(m?.home?.teamId) === String(teamId) || String(m?.away?.teamId) === String(teamId))
+    );
+
+    if (!match) {
+      return ok(res, { meta: { leagueId, season:Number(season), week:Number(week), teamId }, opponent: null });
+    }
+
+    const isHome = String(match?.home?.teamId) === String(teamId);
+    const opponentId = String(isHome ? match?.away?.teamId : match?.home?.teamId);
+
+    const t = teams.find(t => String(t?.id) === opponentId) || null;
+    const opponent = t ? {
+      id: t.id,
+      abbrev: t.abbrev || null,
+      name: t.location && t.nickname ? `${t.location} ${t.nickname}` : (t.nickname || t.location || t.name || null),
+      logo: t.logo || null,
+      owners: t.owners || [],
+    } : { id: Number(opponentId) };
+
+    return ok(res, {
+      meta: { leagueId, teamId, season:Number(season), week:Number(week) },
+      opponent
+    });
+
+  } catch (e) { return boom(res, e); }
+});
+
+/** SINGLE-TEAM: roster (players only) */
+router.get('/roster-players', async (req, res) => {
+  try {
+    const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
+    const teamId   = s(req.query.teamId   || req.query.tid).trim();
+    const season   = s(req.query.season   || req.query.year).trim();
+    const week     = n(req.query.week || req.query.scoringPeriodId);
+
+    if (!leagueId || !teamId || !season || !week) {
+      return bad(res, 'leagueId, teamId, season, week required');
+    }
+
+    const { swid, s2 } = await getCreds({ leagueId, teamId, season });
+    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that team/league' });
+
+    const url = espnLeagueUrl({ season, leagueId, week, forTeamId: teamId });
+    const espn = await fetchJson(url, {
+      headers: {
+        'accept': 'application/json',
+        'cookie': `espn_s2=${s2}; SWID=${swid}`,
+        'referer': `https://fantasy.espn.com/football/team?leagueId=${leagueId}`,
+        'origin': 'https://fantasy.espn.com',
+        'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
+      }
+    });
+
+    if (!espn.ok) {
+      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
+    }
+
+    const data = espn.data || {};
+    const teams = Array.isArray(data.teams) ? data.teams : [];
+    const me = teams.find(t => String(t?.id) === String(teamId)) || null;
+    const entries = me?.roster?.entries || [];
+
+    const players = entries.map(e => {
+      const p = e?.playerPoolEntry?.player || e?.player || {};
+      const name = p?.fullName || `${p?.firstName||''} ${p?.lastName||''}`.trim();
+      const lineupSlotId = Number(e?.lineupSlotId);
+      const posId = Number(p?.defaultPositionId);
+      const proTeamId = Number(p?.proTeamId);
+      let proj = 0;
+      if (Array.isArray(p?.stats)) {
+        const row = p.stats.find(s => Number(s?.scoringPeriodId) === Number(week) && Number(s?.statSourceId) === 1);
+        proj = Number.isFinite(row?.appliedTotal) ? Number(row.appliedTotal) : 0;
+      }
+      return {
+        playerId: Number(p?.id),
+        name,
+        positionId: Number.isFinite(posId) ? posId : null,
+        lineupSlotId: Number.isFinite(lineupSlotId) ? lineupSlotId : null,
+        proTeamId: proTeamId,
+        injuryStatus: p?.injuryStatus || null,
+        proj
+      };
+    });
+
+    return ok(res, {
+      meta: { leagueId, teamId, season:Number(season), week:Number(week) },
+      players
+    });
+
+  } catch (e) { return boom(res, e); }
+});
+
+/** LEAGUE-WIDE: opponents for week (for ALL teams) */
+router.get('/league-opponents', async (req, res) => {
+  try {
+    const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
+    const season   = s(req.query.season   || req.query.year).trim();
+    const week     = n(req.query.week || req.query.scoringPeriodId);
+    const usingTeamId = s(req.query.usingTeamId || req.query.teamId || '').trim(); // optional creds chooser
+
+    if (!leagueId || !season || !week) {
+      return bad(res, 'leagueId, season, week required');
+    }
+
+    const { swid, s2 } = await getCreds({ leagueId, teamId: usingTeamId, season });
+    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league' });
+
+    const url = espnLeagueUrlAll({ season, leagueId, week });
+    const espn = await fetchJson(url, {
+      headers: {
+        'accept': 'application/json',
+        'cookie': `espn_s2=${s2}; SWID=${swid}`,
+        'referer': `https://fantasy.espn.com/football/league?leagueId=${leagueId}`,
+        'origin': 'https://fantasy.espn.com',
+        'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
+      }
+    });
+
+    if (!espn.ok) {
+      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
+    }
+
+    const data = espn.data || {};
+    const teams = Array.isArray(data.teams) ? data.teams : [];
+    const schedule = Array.isArray(data.schedule) ? data.schedule : [];
+
+    // Build map of teamId -> opponentId for the requested week
+    const opponents = {};
+    const matchups = schedule.filter(m => Number(m?.matchupPeriodId) === Number(week));
+    for (const m of matchups) {
+      const homeId = Number(m?.home?.teamId);
+      const awayId = Number(m?.away?.teamId);
+      if (Number.isFinite(homeId) && Number.isFinite(awayId)) {
+        opponents[String(homeId)] = awayId;
+        opponents[String(awayId)] = homeId;
+      }
+    }
+
+    // Shape output with light meta for each team + opponent meta if available
+    const teamsOut = teams.map(t => {
+      const oppId = opponents[String(t.id)] ?? null;
+      const opp = oppId != null ? teams.find(x => Number(x.id) === Number(oppId)) : null;
+      const meta = (TT) => TT && {
+        id: TT.id,
+        abbrev: TT.abbrev || null,
+        name: TT.location && TT.nickname ? `${TT.location} ${TT.nickname}` : (TT.nickname || TT.location || TT.name || null),
+        logo: TT.logo || null,
+        owners: TT.owners || []
+      } || null;
+
+      return { team: meta(t), opponent: meta(opp) };
+    });
+
+    return ok(res, {
+      meta: { leagueId, season:Number(season), week:Number(week), usingTeamId: usingTeamId || null },
+      teams: teamsOut
+    });
+
+  } catch (e) { return boom(res, e); }
+});
+
+/** LEAGUE-WIDE: rosters (players only) for ALL teams (+ ownersMap + backfill handles) */
+/** LEAGUE-WIDE: rosters (players only) for ALL teams (+ ownersMap + backfill handles) */
+router.get('/league-rosters', async (req, res) => {
+  try {
+    const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
+    const season   = s(req.query.season   || req.query.year).trim();
+    const week     = n(req.query.week || req.query.scoringPeriodId);
+    const usingTeamId = s(req.query.usingTeamId || req.query.teamId || '').trim();
+
+    if (!leagueId || !season || !week) {
+      return bad(res, 'leagueId, season, week required');
+    }
+
+    const { swid, s2 } = await getCreds({ leagueId, teamId: usingTeamId, season });
+    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league' });
+
+    const url = espnLeagueUrlAll({ season, leagueId, week }); // includes mMembers
+    const headers = {
+      'accept': 'application/json',
+      'cookie': `espn_s2=${s2}; SWID=${swid}`,
+      'referer': `https://fantasy.espn.com/football/league?leagueId=${leagueId}`,
+      'origin': 'https://fantasy.espn.com',
+      'user-agent': 'Mozilla/5.0 FortifiedFantasy/1.0'
+    };
+
+    const espn = await fetchJson(url, { headers });
+    if (!espn.ok) {
+      return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
+    }
+
+    const data  = espn.data || {};
+    const teams = Array.isArray(data.teams) ? data.teams : [];
+
+    // ---- ownersMap from ESPN mMembers (if present), CLEANED ----
+    const ownersMap = {};
+    const takeMembers = (arr=[]) => {
+      for (const m of arr) {
+        const rawName =
+          m?.displayName ??
+          m?.nickname ??
+          [m?.firstName, m?.lastName].filter(Boolean).join(' ');
+        const name = cleanOwner(rawName);
+        const id   = s(m?.id).trim();
+        if (id && name) ownersMap[id] = name; // id is SWID-like without braces
+      }
+    };
+    if (Array.isArray(data.members)) {
+      takeMembers(data.members);
+    } else if (data.membersMap && typeof data.membersMap === 'object') {
+      takeMembers(Object.values(data.membersMap));
+    }
+
+    // ---- gather all SWIDs referenced by teams ----
+    const allSwids = dedup(teams.flatMap(T => Array.isArray(T?.owners) ? T.owners : []));
+
+    // ---- fill gaps from our own history (fein_meta) ----
+    const missing = allSwids.filter(id => {
+      const v = ownersMap[id];
+      return !v || isSwid(v) || v.toLowerCase() === 'owner';
+    });
+    if (missing.length) {
+      const learned = await bestHandlesFromFeinMeta(missing);
+      // clean learned handles too, then merge
+      for (const [k, v] of Object.entries(learned)) {
+        const cleaned = cleanOwner(v);
+        if (cleaned) ownersMap[k] = cleaned;
+      }
+    }
+
+    // ---- normalize each team + players ----
+    const out = teams.map(T => {
+      const entries = T?.roster?.entries || [];
+      const players = entries.map(e => {
+        const p = e?.playerPoolEntry?.player || e?.player || {};
+        const name = p?.fullName || `${p?.firstName||''} ${p?.lastName||''}`.trim();
+        const lineupSlotId = Number(e?.lineupSlotId);
+        const posId = Number(p?.defaultPositionId);
+        const proTeamId = Number(p?.proTeamId);
+        let proj = 0;
+        if (Array.isArray(p?.stats) && Number.isFinite(week)) {
+          const row = p.stats.find(s => Number(s?.scoringPeriodId) === Number(week) && Number(s?.statSourceId) === 1);
+          proj = Number.isFinite(row?.appliedTotal) ? Number(row.appliedTotal) : 0;
+        }
+        return {
+          playerId: Number(p?.id),
+          name,
+          positionId: Number.isFinite(posId) ? posId : null,
+          lineupSlotId: Number.isFinite(lineupSlotId) ? lineupSlotId : null,
+          proTeamId: proTeamId,
+          injuryStatus: p?.injuryStatus || null,
+          proj
+        };
+      });
+
+      const teamMeta = {
+        id: T.id,
+        abbrev: T.abbrev || null,
+        name: (T.location && T.nickname) ? `${T.location} ${T.nickname}` : (T.nickname || T.location || T.name || null),
+        logo: T.logo || null,
+        owners: T.owners || [] // SWID array; FE maps via ownersMap
+      };
+      return { team: teamMeta, players };
+    });
+
+    // ---- write back learned owner names into fein_meta for this league ----
+    // (use the cleaned version)
+    const cleanedOwnersMap = {};
+    for (const [k, v] of Object.entries(ownersMap)) {
+      const vv = cleanOwner(v);
+      if (vv) cleanedOwnersMap[k] = vv;
+    }
+    await backfillHandlesIntoFeinMeta({
+      season,
+      leagueId,
+      teams: out,
+      ownersMap: cleanedOwnersMap
+    });
+
+    return ok(res, {
+      meta: { leagueId, season: Number(season), week: Number(week), usingTeamId: usingTeamId || null },
+      ownersMap: cleanedOwnersMap,   // FE will render handle(s) from here
+      teams: out
+    });
+
+  } catch (e) { return boom(res, e); }
+});
+
+
+module.exports = router;
