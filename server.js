@@ -57,7 +57,6 @@ app.use('/api/fein/react', feinReact);
 // Mount same router on both paths your frontend might call
 app.use('/api/fein-auth', feinAuthRouter);
 app.use('/fein-auth', feinAuthRouter);
-app.use('/api/espn-auth', feinAuthRouter);                 // ALIAS for legacy callers
 
 // ===== 404 fallback =====
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not Found', path: req.path }));
