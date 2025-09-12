@@ -1,5 +1,6 @@
-// routes/fein-auth.js  (DROP-IN)
-// CommonJS; depends on ../src/db exporting `query` and ../auth exporting `readAuthFromRequest`
+// routes/fein-auth.js
+// CommonJS; keeps your existing endpoints and adds same-origin auth cookie flows
+// Requires: app has cookie-parser middleware mounted
 
 const express = require('express');
 const { query } = require('../src/db');
@@ -8,7 +9,7 @@ const { readAuthFromRequest } = require('../auth');
 const router = express.Router();
 const WRITE_KEY = (process.env.FEIN_AUTH_KEY || '').trim();
 
-// Helpers
+/* ----------------------------- small utils ------------------------------ */
 const ok   = (res, data) => res.json({ ok: true, ...data });
 const bad  = (res, msg)  => res.status(400).json({ ok: false, error: msg || 'Bad request' });
 const boom = (res, err)  => res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -17,7 +18,106 @@ const s = v => (v == null ? '' : String(v));
 const n = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
 const dedup = arr => Array.from(new Set((arr || []).flat().map(x => s(x).trim()).filter(Boolean)));
 
-// ---------------------------------------------------------------------------
+function ensureBracedSWID(v) {
+  const t = s(v).trim();
+  if (!t) return '';
+  if (/^\{.*\}$/.test(t)) return t.toUpperCase();
+  return `{${t.replace(/^\{|\}$/g, '').toUpperCase()}}`;
+}
+const cleanS2 = v => s(v).trim();
+
+/* --------------------------- cookie helpers ----------------------------- */
+// NOTE: In dev over http, set SECURE_COOKIES=false
+const SECURE_COOKIES = String(process.env.SECURE_COOKIES ?? 'true') !== 'false';
+const ONE_YEAR = 1000 * 60 * 60 * 24 * 365;
+
+const BASE_COOKIE = {
+  httpOnly: true,
+  secure:   SECURE_COOKIES,
+  sameSite: SECURE_COOKIES ? 'lax' : 'lax',
+  path:     '/',
+};
+
+function setHelper(res, on) {
+  res.cookie('fein_has_espn', on ? '1' : '', {
+    path: '/',
+    sameSite: 'lax',
+    secure: SECURE_COOKIES,
+    maxAge: on ? ONE_YEAR : 0,
+  });
+}
+
+function setAuthCookies(res, { swid, s2 }) {
+  res.cookie('SWID', swid,   { ...BASE_COOKIE, maxAge: ONE_YEAR });
+  res.cookie('espn_s2', s2,  { ...BASE_COOKIE, maxAge: ONE_YEAR });
+  setHelper(res, true);
+}
+
+function clearAuthCookies(res, req) {
+  // Clear normal host cookies
+  res.clearCookie('SWID',      { ...BASE_COOKIE });
+  res.clearCookie('espn_s2',   { ...BASE_COOKIE });
+  res.clearCookie('fein_has_espn', { path: '/' });
+
+  // Belt & suspenders: try common variants that may have been set previously
+  const hosts = [req.hostname];
+  const parts = req.hostname.split('.');
+  if (parts.length >= 2) hosts.push('.' + parts.slice(-2).join('.'));
+  const paths = ['/', '/fein', '/fein/'];
+
+  const past = new Date(0).toUTCString();
+  for (const d of hosts) {
+    for (const p of paths) {
+      res.append('Set-Cookie', `fein_has_espn=; Expires=${past}; Max-Age=0; Path=${p}; Domain=${d}; SameSite=Lax;${SECURE_COOKIES ? ' Secure;' : ''}`);
+      res.append('Set-Cookie', `fein_has_espn=; Expires=${past}; Max-Age=0; Path=${p}; SameSite=Lax;${SECURE_COOKIES ? ' Secure;' : ''}`);
+    }
+  }
+}
+
+/* ========================== NEW: AUTH ENDPOINTS ===========================
+   Same-origin cookie setter/clearer used by the interceptor & bookmarklet.
+   Mount path: app.use('/api/fein-auth', routerFromThisFile)
+=========================================================================== */
+
+// GET /api/fein-auth?swid=&s2=&to=
+router.get('/', (req, res) => {
+  const swid = ensureBracedSWID(req.query.swid);
+  const s2   = cleanS2(req.query.s2);
+  const to   = req.query.to ? String(req.query.to) : null;
+
+  if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing swid/s2' });
+  setAuthCookies(res, { swid, s2 });
+
+  if (to) return res.redirect(to);
+  return res.json({ ok:true });
+});
+
+// POST /api/fein-auth  { swid, s2, to? }
+router.post('/', express.json(), (req, res) => {
+  const swid = ensureBracedSWID(req.body?.swid);
+  const s2   = cleanS2(req.body?.s2);
+  const to   = req.body?.to ? String(req.body.to) : null;
+
+  if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing swid/s2' });
+  setAuthCookies(res, { swid, s2 });
+  return res.json({ ok:true, to });
+});
+
+// DELETE /api/fein-auth
+router.delete('/', (req, res) => {
+  clearAuthCookies(res, req);
+  return res.json({ ok:true, cleared:true });
+});
+
+// GET /api/fein-auth/status  -> { ok:true, authed:boolean }
+router.get('/status', (req, res) => {
+  const authed = Boolean(req.cookies?.SWID && req.cookies?.espn_s2);
+  if (authed) setHelper(res, true); // keep helper cookie in sync
+  return res.json({ ok:true, authed });
+});
+
+/* ======================= YOUR EXISTING ENDPOINTS ======================== */
+
 // GET /fein-auth/by-league?season=2025&size=12[&leagueId=...]
 router.get('/by-league', async (req, res) => {
   try {
@@ -43,7 +143,6 @@ router.get('/by-league', async (req, res) => {
   } catch (e) { return boom(res, e); }
 });
 
-// ---------------------------------------------------------------------------
 // GET /fein-auth/pool?size=12[&season=2025]
 router.get('/pool', async (req, res) => {
   try {
@@ -66,7 +165,6 @@ router.get('/pool', async (req, res) => {
   } catch (e) { return boom(res, e); }
 });
 
-// ---------------------------------------------------------------------------
 // POST /fein-auth/upsert-meta   (requires x-fein-key if FEIN_AUTH_KEY is set)
 router.post('/upsert-meta', async (req, res) => {
   try {
@@ -135,7 +233,6 @@ router.post('/upsert-meta', async (req, res) => {
   } catch (e) { return boom(res, e); }
 });
 
-// ---------------------------------------------------------------------------
 // GET /fein-auth/creds?leagueId=... [&season=...]
 router.get('/creds', async (req, res) => {
   try {

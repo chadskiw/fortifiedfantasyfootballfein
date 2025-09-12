@@ -3,8 +3,7 @@
 // Requires: ../src/db exports { query }, and your DB has fein_meta table w/ swid,s2.
 
 const express = require('express');
-const { query } = require('../src/db');
-
+const { query } = require('../src/db'); // <-- make sure this exists
 const router = express.Router();
 
 // ---------- helpers ----------
@@ -29,7 +28,7 @@ async function fetchJson(url, opts = {}) {
     const data = JSON.parse(text);
     if (!res.ok) return { ok:false, status:res.status, error:'Non-200 from upstream', data };
     return { ok:true, status:res.status, data };
-  } catch (e) {
+  } catch {
     return { ok:false, status:res.status, error:'Invalid JSON from upstream', data:text.slice(0,1000) };
   }
 }
@@ -41,7 +40,6 @@ async function getCreds({ leagueId, teamId, season }) {
   const yr  = s(season).trim();
 
   const trySQL = [];
-  const params = [];
 
   if (lid && tid && yr) {
     trySQL.push({
@@ -163,7 +161,9 @@ router.get('/opponent-roster', async (req, res) => {
 
     // 1) Get creds for THAT team (or best available)
     const { swid, s2 } = await getCreds({ leagueId, teamId, season });
-    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that team/league' });
+    if (!swid || !s2) {
+      return res.status(401).json({ ok:false, error:'Missing ESPN auth (no stored credentials)' });
+    }
 
     // 2) Hit ESPN
     const url = espnLeagueUrl({ season, leagueId, week, teamId });
@@ -181,7 +181,7 @@ router.get('/opponent-roster', async (req, res) => {
       return res.status(502).json({ ok:false, error:'Upstream (ESPN) error', status:espn.status, upstream:espn.data });
     }
 
-    // 3) Normalize (league endpoint returns league object with teams[] + roster content in team.roster)
+    // 3) Normalize
     const data = espn.data || {};
     const teams = Array.isArray(data.teams) ? data.teams : [];
     const t = teams.find(t => String(t?.id) === String(teamId)) || teams[0] || null;
@@ -195,7 +195,6 @@ router.get('/opponent-roster', async (req, res) => {
       record: t.record || null
     } : null;
 
-    // roster entries under t.roster?.entries
     const entries = t?.roster?.entries || [];
     const roster = entries.map(e => {
       const p = e?.playerPoolEntry?.player || e?.player || {};
@@ -203,7 +202,6 @@ router.get('/opponent-roster', async (req, res) => {
       const lineupSlotId = Number(e?.lineupSlotId);
       const display = p?.fullName || (p?.firstName || '') + ' ' + (p?.lastName || '');
       const proTeamAbbr = normAbbr(p?.proTeamAbbreviation || p?.proTeamAbbr);
-      // Projection this week if present:
       let proj = 0;
       const wk = Number(week);
       if (Array.isArray(p?.stats) && wk) {
@@ -230,12 +228,14 @@ router.get('/opponent-roster', async (req, res) => {
 });
 
 /**
- * GET /espn/free-agents-proxy?leagueId=...&season=...&week=...&teamId=...
+ * Shared handler for:
+ *   GET /espn/free-agents-proxy
+ *   GET /espn/free-agents         (alias)
  *
  * Uses the specified team’s creds (teamId/usingTeamId) to hit ESPN’s /players
  * and returns a simple normalized FA list. (No FMV math here).
  */
-router.get('/free-agents-proxy', async (req, res) => {
+async function handleFreeAgents(req, res) {
   try {
     const leagueId = s(req.query.leagueId || req.query.league || req.query.lid).trim();
     const season   = s(req.query.season || req.query.year).trim();
@@ -247,7 +247,9 @@ router.get('/free-agents-proxy', async (req, res) => {
     if (!leagueId || !season) return bad(res, 'leagueId, season required');
 
     const { swid, s2 } = await getCreds({ leagueId, teamId, season });
-    if (!swid || !s2) return res.status(401).json({ ok:false, error:'No stored ESPN creds for that league/team' });
+    if (!swid || !s2) {
+      return res.status(401).json({ ok:false, error:'Missing ESPN auth (no stored credentials)' });
+    }
 
     const url = espnPlayersUrl({ season, leagueId, week });
     const filter = defaultFAFilter({
@@ -278,7 +280,6 @@ router.get('/free-agents-proxy', async (req, res) => {
       const name = P?.fullName || `${P?.firstName||''} ${P?.lastName||''}`.trim();
       const pro = normAbbr(P?.proTeamAbbreviation || P?.proTeamAbbr);
       const posId = Number(P?.defaultPositionId);
-      // basic projection for the requested week (if present)
       let proj = 0;
       if (Array.isArray(P?.stats)) {
         const row = P.stats.find(s => Number(s?.scoringPeriodId) === Number(week) && Number(s?.statSourceId) === 1);
@@ -301,6 +302,10 @@ router.get('/free-agents-proxy', async (req, res) => {
       players: out
     });
   } catch (e) { return boom(res, e); }
-});
+}
+
+// Mount both paths to the same handler
+router.get('/free-agents-proxy', handleFreeAgents);
+router.get('/free-agents',        handleFreeAgents);
 
 module.exports = router;
