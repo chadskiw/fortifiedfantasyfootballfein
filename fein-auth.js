@@ -3,6 +3,12 @@ const express = require('express');
 const router = express.Router();
 // const { pool } = require('./db'); // if needed
 // const { readCredsFromHeaders } = require('./auth'); // if needed
+// routes/espn-proxy.js (add this near your free-agents-proxy route)
+router.get('/free-agents', async (req, res) => {
+  // just call the same handler as /free-agents-proxy
+  req.url = req.url.replace('/free-agents', '/free-agents-proxy');
+  return router.handle(req, res); // or copy the handler body directly
+});
 
 // GET /by-league?season=2025&size=10 or &leagueId=...
 router.get('/by-league', async (req, res) => {

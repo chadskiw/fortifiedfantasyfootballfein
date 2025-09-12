@@ -6,6 +6,8 @@ const espnOpponents = require('./routes/espn-opponents');
 
 const app = express();
 app.use(express.json());
+app.use('/api', require('./routes/espn-proxy'));
+// FEIN calls: GET /api/free-agents?leagueId=...&season=...&week=...&teamId=...
 
 
 // ---- CORS (GLOBAL) — put this BEFORE any routes ----
@@ -53,6 +55,8 @@ app.use('/fein-auth', feinAuthRouter);
 app.use('/api/fein-auth', feinAuthRouter);
 app.use('/espn', espnProxy);
 app.use('/espn', espnOpponents);
+// server/app.js
+app.use('/api/espn-auth', require('./routes/espn-auth'));
 
 // ---- 404
 app.use((req, res) => res.status(404).json({ ok:false, error:'Not Found', path:req.path }));
