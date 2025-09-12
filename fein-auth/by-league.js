@@ -1,65 +1,21 @@
-const { Router } = require("express");
-const { query } = require("../lib/db");
-
-const router = Router();
-
-router.options("/", (_req, res) => res.sendStatus(204));
-
-router.get("/", async (req, res) => {
+// GET /fein-auth/by-league?leagueId=...&season=2025
+app.get('/fein-auth/by-league', async (req, res) => {
   try {
-    const seasonQ  = (req.query.season   ?? "").toString().trim();
-    const leagueId = (req.query.leagueId ?? "").toString().trim();
-    const sizeStr  = (req.query.size     ?? req.query.leagueSize ?? "").toString().trim();
+    const leagueIdRaw = (req.query.leagueId ?? '').toString().trim();
+    const seasonRaw   = (req.query.season   ?? '').toString().trim();
+    if (!leagueIdRaw || !seasonRaw) return bad(res, 400, 'leagueId, season required');
 
-    const season = seasonQ ? Number(seasonQ) : null;
-    const size   = sizeStr ? Number(sizeStr) : null;
-    const hasSeason = Number.isInteger(season);
-    const hasSize   = Number.isInteger(size) && size > 0;
+    const leagueId = BigInt(leagueIdRaw).toString();
+    const season   = Number(seasonRaw);
 
-    const where = [];
-    const params = [];
-
-    if (hasSeason) {
-      params.push(season);
-      where.push(`season::int = $${params.length}`);
-    }
-    if (hasSize) {
-      params.push(size);
-      where.push(`league_size::int = $${params.length}`);
-    }
-
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    const rows = await query(
-      `SELECT
-         league_id,
-         season::int      AS season,
-         league_size::int AS league_size,
-         MAX(name)        AS name,
-         MAX(handle)      AS handle
-       FROM fein_teams
-       ${whereSql}
-       GROUP BY league_id, season, league_size
-       ORDER BY season DESC, name NULLS LAST, league_id`,
-      params
-    );
-
-    // extra safety: post-filter
-    const filtered = hasSize ? rows.filter(r => Number(r.league_size) === size) : rows;
-
-    res.json({
-      ok: true,
-      filters: {
-        season: hasSeason ? season : null,
-        leagueId: leagueId || null,
-        size: hasSize ? size : null
-      },
-      count: filtered.length,
-      leagues: filtered
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: "by-league failed", detail: String(err) });
-  }
+    const q = `
+      select league_id, team_id, season, name, handle, league_size
+      from public.fein_teams
+      where league_id = $1::bigint and season = $2::int
+      order by team_id
+      limit 100
+    `;
+    const { rows } = await pool.query(q, [leagueId, season]);
+    ok(res, { rows });
+  } catch (e) { bad(res, 500, String(e)); }
 });
-
-module.exports = router;

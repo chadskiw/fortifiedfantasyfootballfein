@@ -23,6 +23,7 @@ function json(body, status = 200, extra = {}) {
 export const onRequestOptions = async () => json({}, 204);
 
 export const onRequestGet = async ({ request }) => {
+  
   try {
     const u = new URL(request.url);
     const season   = u.searchParams.get('season') || '';

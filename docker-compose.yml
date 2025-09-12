@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "5050:5050"
+    environment:
+      - NODE_ENV=production
+      - PORT=5050
+      - CACHE_TTL_SECONDS=900
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+    restart: unless-stopped

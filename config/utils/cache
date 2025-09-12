@@ -1,0 +1,17 @@
+// Tiny TTL memory cache (swap to Redis later if needed)
+export function createCache({ ttlSeconds = 900 } = {}) {
+  const mem = new Map();
+  const set = (key, value) => mem.set(key, { value, ts: Date.now() });
+  const get = (key) => {
+    const rec = mem.get(key);
+    if (!rec) return null;
+    if (Date.now() - rec.ts > ttlSeconds * 1000) {
+      mem.delete(key);
+      return null;
+    }
+    return rec.value;
+  };
+  const del = (key) => mem.delete(key);
+  const clear = () => mem.clear();
+  return { set, get, del, clear };
+}
