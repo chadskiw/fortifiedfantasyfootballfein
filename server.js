@@ -1,14 +1,19 @@
 // server.js
 const express = require('express');
+const cookieParser = require('cookie-parser');             // NEW
 const feinAuthRouter = require('./routes/fein-auth');
 const feinReact = require('./routes/feinReact');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// If behind a proxy/HTTPS (Render/Heroku), this lets "secure" cookies set properly.
+app.set('trust proxy', 1);                                  // NEW
+
 // ===== Middleware =====
-app.use(express.json()); // <-- this is crucial for req.body
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());                                    // NEW
 
 // CORS (global)
 const ALLOWED = [
@@ -18,11 +23,20 @@ const ALLOWED = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
-function isAllowed(origin) { return origin && ALLOWED.includes(origin); }
+const isAllowed = (origin) => origin && ALLOWED.includes(origin);
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'content-type,x-fein-key,x-espn-swid,x-espn-s2');
+
+  // ALLOW DELETE (needed for logout)
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');   // CHANGED
+
+  // Add any custom headers you use
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'content-type,x-fein-key,x-espn-swid,x-espn-s2'
+  );
+
   if (isAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -30,6 +44,7 @@ app.use((req, res, next) => {
   } else {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
+
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
@@ -38,8 +53,11 @@ app.use((req, res, next) => {
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'fein-auth-service' }));
 
 app.use('/api/fein/react', feinReact);
-app.use('/fein-auth', feinAuthRouter);
+
+// Mount same router on both paths your frontend might call
 app.use('/api/fein-auth', feinAuthRouter);
+app.use('/fein-auth', feinAuthRouter);
+app.use('/api/espn-auth', feinAuthRouter);                 // ALIAS for legacy callers
 
 // ===== 404 fallback =====
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not Found', path: req.path }));
