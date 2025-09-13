@@ -1,53 +1,79 @@
 // src/cors.js
-const ALLOWED = new Set([
-  'https://fortifiedfantasy.com',
-  'https://fortifiedfantasy.pages.dev',
+
+// Build an allow-list from ENV plus sensible defaults
+const ENV_ALLOWED = (process.env.ALLOWED_ORIGINS || '').split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// Defaults you likely want in dev/prod
+const DEFAULT_ALLOWED = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
-  'http://localhost:3000'
-]);
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://fortifiedfantasy.com',
+  'https://fortifiedfantasy4.pages.dev',
+];
 
-// Optional: allow subdomains like fortifiedfantasy4.pages.dev
-function isAllowedOrigin(origin) {
+const ALLOWED = [...new Set([...DEFAULT_ALLOWED, ...ENV_ALLOWED])];
+
+// Wildcard tests for your domains
+function isWildcardAllowed(origin) {
   if (!origin) return false;
-  if (ALLOWED.has(origin)) return true;
   try {
     const u = new URL(origin);
-    // allow any subdomain of pages.dev for this project
-    if (u.hostname.endsWith('fortifiedfantasy.pages.dev')) return true;
-  } catch {}
+
+    // allow *.pages.dev (e.g., Cloudflare Pages preview/envs)
+    if (u.hostname.endsWith('.pages.dev')) return true;
+
+    // allow fortifiedfantasy.* (e.g., fortifiedfantasy.com, fortifiedfantasy.net)
+    if (u.hostname === 'fortifiedfantasy.com') return true;
+    if (u.hostname.startsWith('fortifiedfantasy.')) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin) return false; // curl/SSR without Origin header -> no CORS needed
+  if (ALLOWED.includes(origin)) return true;
+  if (isWildcardAllowed(origin)) return true;
+  // Allow "*" if explicitly configured
+  if (ALLOWED.includes('*')) return true;
   return false;
 }
 
-function setCORSHeaders(req, res) {
-  const origin = req.headers.origin;
-  if (origin && isAllowedOrigin(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin); // echo exact origin
+function corsMiddleware(req, res, next) {
+  // IMPORTANT: Only read req inside the middleware
+  const origin = req.headers?.origin;
+
+  // Always vary on Origin so caches don’t mix responses
+  res.setHeader('Vary', 'Origin');
+
+  if (isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Vary', 'Origin'); // important for caches
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+
+  // Methods + headers (broad but safe)
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+  );
   res.setHeader(
     'Access-Control-Allow-Headers',
-    [
-      'accept',
-      'accept-language',
-      'content-type',
-      'x-requested-with',
-      'x-espn-swid',
-      'x-espn-s2',
-      'x-fein-key',
-      'authorization'
-    ].join(', ')
+    'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key'
   );
-}
+  res.setHeader('Access-Control-Max-Age', '600'); // cache preflight 10m
 
-function corsMiddleware(req, res, next) {
-  setCORSHeaders(req, res);
+  // Handle preflight early
   if (req.method === 'OPTIONS') {
-    // Preflight: reply immediately with 204 + headers
+    // If Origin was allowed, return 204; otherwise still OK to end quietly
     return res.status(204).end();
   }
+
   next();
 }
 
