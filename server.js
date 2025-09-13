@@ -18,7 +18,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(corsMiddleware()); // call the factory to get the middleware
 app.use(limiter);          // use the exported limiter instance
 app.use('/api/espn-auth', require('./routes/fein-auth'));
-
+app.use('/api/platforms', require('./src/api/fein-auth'));
 // Static assets (if desired)
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
 
