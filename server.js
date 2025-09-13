@@ -8,6 +8,7 @@ const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 const platformRouter = require('./src/routes/platforms');
 const { ping } = require('./src/db');
+const requireEspnAuth = require('./src/middleware/requireEspnAuth');
 
 const app = express();
 app.disable('x-powered-by');
@@ -19,6 +20,7 @@ app.use(corsMiddleware); // call the factory to get the middleware
 app.use(rateLimit);          // <-- MUST be the function, not the module
 // Static assets (if desired)
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+app.use('/api/platforms/espn', requireEspnAuth, require('./src/routes/platforms-espn'));
 
 // Health
 app.get('/healthz', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
