@@ -1,27 +1,23 @@
 // api/platforms/index.js
-const express = require('express');
-const router = express.Router();
+// Returns platform adapters. No Express router logic here.
 
-/**
- * This file:      src/routes/platforms/index.js
- * Routers folder: /routers/*.js  (repo root)
- * Relative path:  ../../../routers/...
- */
+const path = require('path');
 
-// sanity
-router.get('/__alive', (_req, res) => res.json({ ok: true, scope: '/api/platforms' }));
+function loadLocal(relPath) {
+  return require(path.join(__dirname, relPath));
+}
 
-// ✅ Mount Express routers (NOT adapters)
-router.use('/espn',    require('../../src/routers/espnRouter'));
-router.use('/sleeper', require('../../src/routers/sleeperRouter'));
-router.use('/health',  require('../../src/routers/healthRouter'));
+const ADAPTERS = {
+  espn:    () => loadLocal('./espn'),     // -> api/platforms/espn/index.js (or espn.js)
+  sleeper: () => loadLocal('./sleeper'),
+  health:  () => loadLocal('./health'),
+};
 
-// optional helper
-router.get('/__routes', (_req, res) => {
-  res.json({
-    ok: true,
-    mounts: ['/api/platforms/espn','/api/platforms/sleeper','/api/platforms/health'],
-  });
-});
+function getAdapter(name) {
+  const key = String(name || '').toLowerCase();
+  const factory = ADAPTERS[key];
+  if (!factory) throw new Error(`Unknown platform adapter: ${name}`);
+  return factory(); // return the adapter object (functions), not a router
+}
 
-module.exports = router;
+module.exports = { getAdapter };
