@@ -15,9 +15,9 @@ const router = express.Router();
 router.get('/__alive', (_req, res) => res.json({ ok: true, scope: '/api/platforms' }));
 
 // Mount platform routers (ESPN/Sleeper/Health)
-router.use('/espn',    require('../../routers/espnRouter'));
-router.use('/sleeper', require('../../routers/sleeperRouter'));
-router.use('/health',  require('../../routers/healthRouter'));
+router.use('/espn',    require('../routers/espnRouter'));
+router.use('/sleeper', require('../routers/sleeperRouter'));
+router.use('/health',  require('../routers/healthRouter'));
 
 // Optional: list child routes for quick debugging
 router.get('/__routes', (_req, res) => {
