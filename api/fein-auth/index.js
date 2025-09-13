@@ -11,7 +11,7 @@ router.get('/__alive', (_req, res) =>
 const path = require('path');
 router.use(
   '/espn',
-  require(path.join(__dirname, '../../routers/espnRouter'))
+  require(path.join(__dirname, './src/routers/espnRouter'))
 );
 router.use(
   '/sleeper',
