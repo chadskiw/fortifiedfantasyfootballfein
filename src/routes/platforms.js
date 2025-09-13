@@ -14,8 +14,8 @@ router.get('/__alive', (_req, res) =>
 
 // ✅ Mount platform routers (Express routers, not adapters)
 router.use('/espn', require('../../routers/espnRouter'));
-router.use('/sleeper', require('../../routers/routers/sleeperRouter'));
-router.use('/health',  require('../../routers/routers/healthRouter'));
+router.use('/sleeper', require('../../routers/sleeperRouter'));
+router.use('/health',  require('../../routers/healthRouter'));
 
 // Optional: quick list of mounts
 router.get('/__routes', (_req, res) => {
