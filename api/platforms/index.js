@@ -1,23 +1,8 @@
-// api/platforms/index.js
-// Adapter registry: getAdapter('espn' | 'sleeper' | 'yahoo' | 'mfl')
+const express = require('express');
+const router = express.Router();
 
-const espn = require('./espn');
-const sleeper = require('./sleeper');
-const yahoo = require('./yahoo');
-const mfl = require('./mfl');
+router.use('/espn', require('../../../routers/espnRouter'));
+router.use('/sleeper', require('../../../routers/sleeperRouter'));
+router.use('/health', require('../../../routers/healthRouter'));
 
-const REGISTRY = {
-  espn,
-  sleeper,
-  yahoo,
-  mfl,
-};
-
-function getAdapter(platform) {
-  const key = String(platform || '').toLowerCase();
-  const adapter = REGISTRY[key];
-  if (!adapter) throw new Error(`Unsupported platform: ${platform}`);
-  return adapter;
-}
-
-module.exports = { getAdapter };
+module.exports = router;
