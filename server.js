@@ -5,7 +5,7 @@ const morgan = require('morgan');
 const path = require('path');
 
 const { corsMiddleware } = require('./src/cors');
-const { rateLimit } = require('./src/rateLimit');
+const { limiter } = require('./src/rateLimit');
 const platformRouter = require('./src/routes/platforms');
 const { ping } = require('./src/db');
 
@@ -15,8 +15,8 @@ app.disable('x-powered-by');
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(corsMiddleware);
-app.use(rateLimit);
+app.use(corsMiddleware()); // call the factory to get the middleware
+app.use(limiter);          // use the exported limiter instance
 app.use('/api/espn-auth', require('./routes/fein-auth'));
 
 // Static assets (if desired)
