@@ -1,40 +1,72 @@
-// server.js
-require('dotenv').config();
-const express = require('express');
-const morgan = require('morgan');
-const path = require('path');
+// src/cors.js
 
-const { corsMiddleware } = require('./src/cors');
-const { limiter } = require('./src/rateLimit');
-const platformRouter = require('./src/routes/platforms');
-const { ping } = require('./src/db');
+// Build allow-list from env + defaults
+const ENV_ALLOWED = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-const app = express();
-app.disable('x-powered-by');
+const DEFAULT_ALLOWED = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://fortifiedfantasy.com',
+  'https://fortifiedfantasy4.pages.dev',
+];
 
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use(corsMiddleware); // call the factory to get the middleware
-app.use(limiter);          // use the exported limiter instance
-app.use('/api/espn-auth', require('./routes/fein-auth'));
-app.use('/api/platforms', require('./src/api/fein-auth'));
-// Static assets (if desired)
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+const ALLOWED = [...new Set([...DEFAULT_ALLOWED, ...ENV_ALLOWED])];
 
-// Health
-app.get('/healthz', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
-app.get('/db/ping', async (_req, res) => {
-  try { res.json({ ok: await ping() }); }
-  catch (e) { res.status(500).json({ ok:false, error:e.message }); }
-});
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED.includes(origin)) return true;
 
-// Multi-platform API
-app.use('/api/platforms', platformRouter);
+  try {
+    const { hostname } = new URL(origin);
+    if (hostname.endsWith('.pages.dev')) return true;
+    if (hostname === 'fortifiedfantasy.com') return true;
+    if (hostname.startsWith('fortifiedfantasy.')) return true;
+  } catch {
+    /* ignore bad origins */
+  }
+  return false;
+}
 
-// 404 + errors
-app.use((req, res) => res.status(404).json({ ok:false, error:'Not found' }));
-app.use((err, _req, res, _next) => res.status(err.status || 500).json({ ok:false, error: err.message || 'Server error' }));
+// The real Express middleware (signature: req,res,next)
+function _cors(req, res, next) {
+  const origin = (req && req.headers && req.headers.origin) ? req.headers.origin : '';
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`FF Service on :${PORT}`));
+  res.setHeader('Vary', 'Origin');
+
+  if (isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key');
+  res.setHeader('Access-Control-Max-Age', '600');
+
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+}
+
+/**
+ * Export a wrapper that supports BOTH:
+ *   app.use(corsMiddleware);    // preferred
+ *   app.use(corsMiddleware());  // tolerated
+ */
+function corsMiddleware(...args) {
+  // If called with (req,res,next) by Express, route to _cors
+  if (args.length === 3 && typeof args[2] === 'function') {
+    return _cors(...args);
+  }
+  // If called with no args (factory style), return the middleware function
+  if (args.length === 0) {
+    return _cors;
+  }
+  // If someone passes anything else, still return the middleware
+  return _cors;
+}
+
+module.exports = { corsMiddleware, isAllowedOrigin };
