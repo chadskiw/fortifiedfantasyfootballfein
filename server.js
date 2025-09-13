@@ -15,7 +15,7 @@ app.disable('x-powered-by');
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(corsMiddleware()); // call the factory to get the middleware
+app.use(corsMiddleware); // call the factory to get the middleware
 app.use(limiter);          // use the exported limiter instance
 app.use('/api/espn-auth', require('./routes/fein-auth'));
 app.use('/api/platforms', require('./src/api/fein-auth'));
