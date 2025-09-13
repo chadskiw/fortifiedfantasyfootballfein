@@ -12,21 +12,14 @@ router.get('/__alive', (_req, res) => {
   res.json({ ok: true, scope: '/api/platforms/health' });
 });
 
-// Example DB/Service health check
+// Example extended health check
 router.get('/check', async (_req, res) => {
   try {
-    // TODO: if you have DB or external services, ping them here
-    res.json({
-      ok: true,
-      status: 'healthy',
-      ts: new Date().toISOString(),
-    });
+    // TODO: add DB or service checks if needed
+    res.json({ ok: true, status: 'healthy', ts: new Date().toISOString() });
   } catch (err) {
-    res.status(500).json({
-      ok: false,
-      error: err?.message || 'Health check failed',
-    });
+    res.status(500).json({ ok: false, error: err?.message || 'Health check failed' });
   }
 });
 
-module.exports = router;
+module.exports = router;   // <-- Important: CommonJS export
