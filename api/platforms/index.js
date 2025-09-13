@@ -12,9 +12,9 @@ const router = express.Router();
 router.get('/__alive', (_req, res) => res.json({ ok: true, scope: '/api/platforms' }));
 
 // ✅ Mount Express routers (NOT adapters)
-router.use('/espn',    require('../../../routers/espnRouter'));
-router.use('/sleeper', require('../../../routers/sleeperRouter'));
-router.use('/health',  require('../../../routers/healthRouter'));
+router.use('/espn',    require('/src/routers/espnRouter'));
+router.use('/sleeper', require('/src/routers/sleeperRouter'));
+router.use('/health',  require('/src/routers/healthRouter'));
 
 // optional helper
 router.get('/__routes', (_req, res) => {
