@@ -1,18 +1,26 @@
-// CommonJS router wrapper
-const { Router } = require("express");
-const byLeague = require("./by-league");
+// src/api/fein-auth/index.js
+const express = require('express');
+const router = express.Router();
 
-const router = Router();
+// sanity check
+router.get('/__alive', (_req, res) =>
+  res.json({ ok: true, scope: '/api/platforms' })
+);
 
-router.get("/", (req, res) => {
+// Mount Express routers
+router.use('/espn',    require('../routers/espnRouter'));
+router.use('/sleeper', require('../routers/sleeperRouter'));
+router.use('/health',  require('../routers/healthRouter'));
+
+router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
-    routes: [
-      { path: "/api/fein-auth/by-league?season=2025", public: true, desc: "List leagues (no auth)" }
-    ]
+    mounts: [
+      '/api/platforms/espn',
+      '/api/platforms/sleeper',
+      '/api/platforms/health',
+    ],
   });
 });
-
-router.use("/by-league", byLeague);
 
 module.exports = router;
