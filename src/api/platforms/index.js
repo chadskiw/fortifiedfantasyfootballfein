@@ -1,23 +1,52 @@
-// src\api\platforms\index.js
-// Returns platform adapters. No Express router logic here.
-
+// src/api/platforms/index.js
+const express = require('express');
 const path = require('path');
 
-function loadLocal(relPath) {
-  return require(path.join(__dirname, relPath));
+const router = express.Router();
+
+router.get('/__alive', (_req, res) =>
+  res.json({ ok: true, scope: '/api/platforms' })
+);
+
+// Helper: normalize whatever require() returns into a router function
+function asMiddleware(mod, label) {
+  if (typeof mod === 'function') return mod;
+  if (mod && typeof mod.default === 'function') return mod.default; // ESM default
+  if (mod && typeof mod.router === 'function') return mod.router;   // named export
+  throw new TypeError(
+    `${label} is not a valid Express router. ` +
+    `Export it as "module.exports = router" (CJS) or "export default router" (ESM).`
+  );
 }
 
-const ADAPTERS = {
-  espn:    () => loadLocal('./espn'),     // -> api/platforms/espn/index.js (or espn.js)
-  sleeper: () => loadLocal('./sleeper'),
-  health:  () => loadLocal('./health'),
-};
+// Require routers (CJS preferred)
+const espn = asMiddleware(
+  require(path.join(__dirname, '../../routers/espnRouter')),
+  'espnRouter'
+);
+const sleeper = asMiddleware(
+  require(path.join(__dirname, '../../routers/sleeperRouter')),
+  'sleeperRouter'
+);
+const health = asMiddleware(
+  require(path.join(__dirname, '../../routers/healthRouter')),
+  'healthRouter'
+);
 
-function getAdapter(name) {
-  const key = String(name || '').toLowerCase();
-  const factory = ADAPTERS[key];
-  if (!factory) throw new Error(`Unknown platform adapter: ${name}`);
-  return factory(); // return the adapter object (functions), not a router
-}
+// Mount them
+router.use('/espn', espn);
+router.use('/sleeper', sleeper);
+router.use('/health', health);
 
-module.exports = { getAdapter };
+router.get('/__routes', (_req, res) => {
+  res.json({
+    ok: true,
+    mounts: [
+      '/api/platforms/espn',
+      '/api/platforms/sleeper',
+      '/api/platforms/health',
+    ],
+  });
+});
+
+module.exports = router;
