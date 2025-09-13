@@ -4,7 +4,7 @@ const router = express.Router();
 
 // IMPORTANT: from <repo-root>/routers to <repo-root>/services/sleeper.js
 // If your file is services/sleeper.js, THIS is the right relative path:
-const sleeper = require('../services/sleeper');
+const sleeper = require('../../services/sleeper');
 
 // Health
 router.get('/__alive', (_req, res) => {
