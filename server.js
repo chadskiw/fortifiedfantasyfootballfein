@@ -1,40 +1,60 @@
-// server.js
-require('dotenv').config();
+// src/routes/platforms.js
+// Aggregates non-ESPN platform routers under /api/platforms/*
+// ESPN is mounted separately in server.js with auth gating:
+//   app.use('/api/platforms/espn', requireEspnAuth, require('./src/routes/platforms-espn'))
+
 const express = require('express');
-const morgan = require('morgan');
 const path = require('path');
 
-const { corsMiddleware } = require('./src/cors');
-const { rateLimit }      = require('./src/rateLimit');
-const platformRouter = require('./src/routes/platforms');
-const { ping } = require('./src/db');
-const requireEspnAuth = require('./src/middleware/requireEspnAuth');
+const router = express.Router();
 
-const app = express();
-app.disable('x-powered-by');
+/**
+ * Small interop so we can require routers whether they're CJS or ESM.
+ * - module.exports = router            -> function
+ * - module.exports = { router }        -> { router }
+ * - export default router              -> { default }
+ */
+function requireRouter(p) {
+  const mod = require(p);
+  if (typeof mod === 'function') return mod;
+  if (mod && typeof mod.router === 'function') return mod.router;
+  if (mod && typeof mod.default === 'function') return mod.default;
+  const keys = mod && typeof mod === 'object' ? Object.keys(mod) : String(mod);
+  throw new TypeError(`Expected an Express router from ${p} but got ${typeof mod} (${keys})`);
+}
 
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use(corsMiddleware); // call the factory to get the middleware
-app.use(rateLimit);          // <-- MUST be the function, not the module
-// Static assets (if desired)
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
-app.use('/api/platforms/espn', requireEspnAuth, require('./src/routes/platforms-espn'));
+router.get('/__alive', (_req, res) =>
+  res.json({ ok: true, scope: '/api/platforms', note: 'ESPN mounted separately' })
+);
 
-// Health
-app.get('/healthz', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
-app.get('/db/ping', async (_req, res) => {
-  try { res.json({ ok: await ping() }); }
-  catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+// 👇 Mount NON-ESPN platforms here
+router.use(
+  '/sleeper',
+  requireRouter(path.join(__dirname, '../../routers/sleeperRouter'))
+);
+
+router.use(
+  '/health',
+  requireRouter(path.join(__dirname, '../../routers/healthRouter'))
+);
+
+// If any code still hits /api/platforms/espn here, make it obvious it's the wrong place.
+router.use('/espn', (_req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: 'ESPN routes are mounted separately with auth. Use /api/platforms/espn/*',
+  });
 });
 
-// Multi-platform API
-app.use('/api/platforms', platformRouter);
+router.get('/__routes', (_req, res) => {
+  res.json({
+    ok: true,
+    mounts: [
+      // Reminder: ESPN is mounted in server.js at /api/platforms/espn
+      '/api/platforms/sleeper',
+      '/api/platforms/health',
+    ],
+  });
+});
 
-// 404 + errors
-app.use((req, res) => res.status(404).json({ ok:false, error:'Not found' }));
-app.use((err, _req, res, _next) => res.status(err.status || 500).json({ ok:false, error: err.message || 'Server error' }));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`FF Service on :${PORT}`));
+module.exports = router;
