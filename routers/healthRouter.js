@@ -22,4 +22,4 @@ router.get('/check', async (_req, res) => {
   }
 });
 
-module.exports = router;   // <-- Important: CommonJS export
+module.exports = router; // CommonJS export

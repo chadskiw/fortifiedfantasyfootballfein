@@ -1,5 +1,5 @@
 // src/routes/platforms.js
-// Aggregates non-ESPN platform routers under /api/platforms/*
+// Aggregates NON-ESPN platform routers under /api/platforms/*
 // ESPN is mounted separately in server.js with auth gating:
 //   app.use('/api/platforms/espn', requireEspnAuth, require('./src/routes/platforms-espn'))
 
@@ -8,37 +8,17 @@ const path = require('path');
 
 const router = express.Router();
 
-/**
- * Small interop so we can require routers whether they're CJS or ESM.
- * - module.exports = router            -> function
- * - module.exports = { router }        -> { router }
- * - export default router              -> { default }
- */
-function requireRouter(p) {
-  const mod = require(p);
-  if (typeof mod === 'function') return mod;
-  if (mod && typeof mod.router === 'function') return mod.router;
-  if (mod && typeof mod.default === 'function') return mod.default;
-  const keys = mod && typeof mod === 'object' ? Object.keys(mod) : String(mod);
-  throw new TypeError(`Expected an Express router from ${p} but got ${typeof mod} (${keys})`);
-}
-
+// Simple alive
 router.get('/__alive', (_req, res) =>
   res.json({ ok: true, scope: '/api/platforms', note: 'ESPN mounted separately' })
 );
 
-/* 👇 Mount NON-ESPN platforms here
-router.use(
-  '/sleeper',
-  requireRouter(path.join(__dirname, '../../routers/sleeperRouter'))
-);
+// ✅ Mount NON-ESPN platform routers with plain CommonJS require.
+//    Avoid wrappers/helpers that might return objects or use import().
+router.use('/health',  require(path.join(__dirname, '../../routers/healthRouter')));
+router.use('/sleeper', require(path.join(__dirname, '../../routers/sleeperRouter')));
 
-router.use(
-  '/health',
-  requireRouter(path.join(__dirname, '../../routers/healthRouter'))
-);
-*/
-// If any code still hits /api/platforms/espn here, make it obvious it's the wrong place.
+// Guard: if someone hits /api/platforms/espn here, make it obvious this is the wrong place.
 router.use('/espn', (_req, res) => {
   res.status(404).json({
     ok: false,
@@ -46,13 +26,14 @@ router.use('/espn', (_req, res) => {
   });
 });
 
+// Routes index for quick visibility
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
     mounts: [
-      // Reminder: ESPN is mounted in server.js at /api/platforms/espn
       '/api/platforms/sleeper',
       '/api/platforms/health',
+      // Reminder: /api/platforms/espn is mounted in server.js with requireEspnAuth
     ],
   });
 });

@@ -3,44 +3,26 @@ const express = require('express');
 const router = express.Router();
 
 /**
- * Sleeper Platform Router
+ * Sleeper Router
  * Scope: /api/platforms/sleeper
+ *
+ * Start minimal (alive + echo). Add real endpoints as you need:
+ *   GET /leagues?season=2025
+ *   GET /leagues/:leagueId/teams
+ *   GET /leagues/:leagueId/roster/:teamId
  */
 
 router.get('/__alive', (_req, res) => {
   res.json({ ok: true, scope: '/api/platforms/sleeper' });
 });
 
-// Example endpoint: GET /api/platforms/sleeper/leagues?season=2025
-router.get('/leagues', async (req, res) => {
-  try {
-    const season = Number(req.query.season) || new Date().getFullYear();
-    // TODO: hook into your Sleeper service/adapter
-    res.json({
-      ok: true,
-      platform: 'sleeper',
-      season,
-      leagues: [], // return actual data here
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err?.message || 'Failed' });
-  }
-});
-
-// Example endpoint: GET /api/platforms/sleeper/leagues/:leagueId/teams
-router.get('/leagues/:leagueId/teams', async (req, res) => {
-  try {
-    const { leagueId } = req.params;
-    // TODO: fetch teams from Sleeper
-    res.json({
-      ok: true,
-      platform: 'sleeper',
-      leagueId,
-      teams: [], // return actual teams here
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err?.message || 'Failed' });
-  }
+// Example placeholder (so you can verify the route mounts correctly)
+router.get('/echo', (req, res) => {
+  res.json({
+    ok: true,
+    q: req.query || {},
+    note: 'Sleeper echo endpoint',
+  });
 });
 
 module.exports = router;
