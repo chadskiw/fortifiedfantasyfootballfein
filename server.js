@@ -1,41 +1,31 @@
-// src/routes/platforms.js
-// Aggregates NON-ESPN platform routers under /api/platforms/*
-// ESPN is mounted separately in server.js with auth gating:
-//   app.use('/api/platforms/espn', requireEspnAuth, require('./src/routes/platforms-espn'))
-
+// server.js
+require('dotenv').config();
 const express = require('express');
-const path = require('path');
+const morgan  = require('morgan');
+const path    = require('path');
 
-const router = express.Router();
+const { corsMiddleware } = require('./src/cors');
+const { rateLimit }      = require('./src/rateLimit');
+const platformRouter     = require('./src/routes/platforms');
 
-// Simple alive
-router.get('/__alive', (_req, res) =>
-  res.json({ ok: true, scope: '/api/platforms', note: 'ESPN mounted separately' })
-);
+const app = express();
+app.disable('x-powered-by');
 
-// ✅ Mount NON-ESPN platform routers with plain CommonJS require.
-/*    Avoid wrappers/helpers that might return objects or use import().
-router.use('/health',  require(path.join(__dirname, '../../routersRouter')));
-router.use('/sleeper', require(path.join(__dirname, '../../routers/sleeperRouter')));
-*/
-// Guard: if someone hits /api/platforms/espn here, make it obvious this is the wrong place.
-router.use('/espn', (_req, res) => {
-  res.status(404).json({
-    ok: false,
-    error: 'ESPN routes are mounted separately with auth. Use /api/platforms/espn/*',
-  });
-});
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(corsMiddleware);
+app.use(rateLimit);
 
-// Routes index for quick visibility
-router.get('/__routes', (_req, res) => {
-  res.json({
-    ok: true,
-    mounts: [
-      //'/api/platforms/sleeper',
-      //'/api/platforms/health',
-      // Reminder: /api/platforms/espn is mounted in server.js with requireEspnAuth
-    ],
-  });
-});
+// static (optional)
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
 
-module.exports = router;
+// ✅ Mount all platform routes (currently only ESPN is active)
+app.use('/api/platforms', platformRouter);
+
+// health
+app.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+
+// start
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`FF Platform Service listening on :${port}`));
