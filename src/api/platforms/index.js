@@ -38,10 +38,10 @@ function asMiddleware(mod, label) {
 
 
 // Require routers (CJS preferred)
-const espn = asMiddleware(
-  require(path.join(__dirname, '../../src/routers/espnRouter')),
-  'espnRouter'
-);
+// from src/api/platforms/index.js
+const espnRouter = require('../../routers/espnRouter'); // adjust relative path
+router.use('/espn', espnRouter);
+
 /*
 const sleeper = asMiddleware(
   require(path.join(__dirname, '../../routers/sleeperRouter')),
@@ -53,12 +53,11 @@ const health = asMiddleware(
 );
 */
 // Mount them
-router.use('/espn', espn);
 /*
 router.use('/sleeper', sleeper);
 router.use('/health', health);
 */
-router.get('/__routes', (_req, res) => {
+espnRouter.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
     mounts: [
