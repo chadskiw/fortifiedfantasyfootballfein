@@ -14,10 +14,10 @@ router.get('/__alive', (_req, res) =>
 
 // 🚫 IMPORTANT: Avoid helpers that wrap/transform routers.
 // ✅ Mount CommonJS routers directly with require().
-
+/*
 router.use('/health', require(path.join(__dirname, '../../routers/healthRouter')));
 router.use('/sleeper', require(path.join(__dirname, '../../routers/sleeperRouter')));
-
+*/
 // Guard: if someone hits /api/platforms/espn here, make it obvious this is the wrong place.
 router.use('/espn', (_req, res) => {
   res.status(404).json({
@@ -26,7 +26,7 @@ router.use('/espn', (_req, res) => {
   });
 });
 
-// Simple routes index
+/* Simple routes index
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
@@ -36,6 +36,6 @@ router.get('/__routes', (_req, res) => {
       // Reminder: /api/platforms/espn is mounted in server.js with requireEspnAuth
     ],
   });
-});
+}); */
 
 module.exports = router;
