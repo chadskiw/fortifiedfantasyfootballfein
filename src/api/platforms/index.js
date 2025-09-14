@@ -7,7 +7,7 @@ const router = express.Router();
 router.get('/__alive', (_req, res) =>
   res.json({ ok: true, scope: '/api/platforms' })
 );
-const espnMod = require(path.join(__dirname, '../../src/routers/espnRouter'));
+const espnMod = require(path.join(__dirname, '../src/routers/espnRouter'));
 console.log('[espnRouter require]', {
   type: typeof espnMod,
   keys: espnMod && Object.keys(espnMod),
