@@ -2,10 +2,10 @@
 // ESPN adapter: all the goodies you need today.
 
 const BASE_LEAGUE = (season, leagueId) =>
-  `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
 
 const PLAYERS_URL = (season) =>
-  `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players`;
+  `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players`;
 
 function buildCookie(swid, s2) {
   const parts = [];
@@ -161,7 +161,7 @@ async function getFreeAgents({ season, leagueId, week, swid, s2, limit = 100 }) 
     },
   };
 
-  const url = `${PLAYERS_URL(season)}?scoringPeriodId=${Number(week) || 1}&view=kona_player_info`;
+  const url = `${PLAYERS_URL(season)}?scoringPeriodId=${Number(week) || 1}?view=mMatchupScore&view=mTeam&view=mSettings`;
   const res = await fetch(url, {
     method: 'GET',
     headers: {
