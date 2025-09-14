@@ -71,4 +71,4 @@ router.get('/__routes', (_req, res) => {
   });
 });
 
-export default router;
+module.exports = router;
