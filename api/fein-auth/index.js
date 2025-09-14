@@ -12,7 +12,7 @@ router.get('/__alive', (_req, res) =>
 // ✅ Mount Express routers (no nested require calls)
 router.use('/espn',    require(path.join(__dirname, '../../routers/espnRouter')));
 router.use('/sleeper', require(path.join(__dirname, '../../routers/sleeperRouter')));
-router.use('/health', require('../../routers/healthRouter'));
+router.use('/health',  require(path.join(__dirname, '../../routers/healthRouter')));
 
 // optional helper
 router.get('/__routes', (_req, res) => {

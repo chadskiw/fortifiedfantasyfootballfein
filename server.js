@@ -33,7 +33,10 @@ router.use(
   requireRouter(path.join(__dirname, '../../routers/sleeperRouter'))
 );
 
-router.use('/health', require('../../routers/healthRouter'));
+router.use(
+  '/health',
+  requireRouter(path.join(__dirname, '../../routers/healthRouter'))
+);
 
 // If any code still hits /api/platforms/espn here, make it obvious it's the wrong place.
 router.use('/espn', (_req, res) => {

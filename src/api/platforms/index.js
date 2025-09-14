@@ -28,7 +28,10 @@ const sleeper = asMiddleware(
   require(path.join(__dirname, '../../routers/sleeperRouter')),
   'sleeperRouter'
 );
-router.use('/health', require('../../routers/healthRouter'));
+const health = asMiddleware(
+  require(path.join(__dirname, '../../routers/healthRouter')),
+  'healthRouter'
+);
 
 // Mount them
 router.use('/espn', espn);
