@@ -64,6 +64,8 @@ router.get('/leagues/:leagueId/scoreboard', async (req, res) => {
   }
 });
 
+module.exports = router;
+
 router.get('/leagues/:leagueId/free-agents', async (req, res) => {
   try {
     const season = Number(req.query.season);

@@ -32,9 +32,9 @@ app.use('/api/platforms', platformRouter);
 // MOUNT the real ESPN routes:
 app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 */
-/* health
+// health
 app.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
-*/
+
 // start
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`FF Platform Service listening on :${port}`));
