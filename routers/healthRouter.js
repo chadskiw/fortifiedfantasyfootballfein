@@ -7,11 +7,11 @@ const router = express.Router();
  * Scope: /api/platforms/health
  */
 
-// GET /api/platforms/health/__alive
+/* GET /api/platforms/health/__alive
 router.get('/__alive', (_req, res) => {
   res.json({ ok: true, scope: '/api/platforms/health' });
 });
-
+*/
 // Example extended health check
 router.get('/check', async (_req, res) => {
   try {

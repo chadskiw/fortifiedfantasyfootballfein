@@ -79,17 +79,17 @@ await (async () => {
   console.error("[db] init failed:", e);
   process.exit(1);
 });
-
+/*
 app.get("/health", async (_req, res) => {
   try { await pool.query("select 1"); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e?.message || e) }); }
 });
-
+*/
 app.get("/fein", (_req, res) => {
   res.json({
     ok: true,
     routes: [
-      "GET  /health",
+    //  "GET  /health",
       "GET  /fein",
       "GET  /fein/upsert-meta",
       "POST /fein/upsert-meta",

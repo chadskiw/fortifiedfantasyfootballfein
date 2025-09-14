@@ -24,6 +24,7 @@ const espn = asMiddleware(
   require(path.join(__dirname, '../../routers/espnRouter')),
   'espnRouter'
 );
+/*
 const sleeper = asMiddleware(
   require(path.join(__dirname, '../../routers/sleeperRouter')),
   'sleeperRouter'
@@ -32,19 +33,22 @@ const health = asMiddleware(
   require(path.join(__dirname, '../../routers/healthRouter')),
   'healthRouter'
 );
-
+*/
 // Mount them
 router.use('/espn', espn);
+/*
 router.use('/sleeper', sleeper);
 router.use('/health', health);
-
+*/
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
     mounts: [
       '/api/platforms/espn',
+      /*
       '/api/platforms/sleeper',
       '/api/platforms/health',
+      */
     ],
   });
 });
