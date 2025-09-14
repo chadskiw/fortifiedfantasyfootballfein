@@ -10,8 +10,7 @@ router.get('/__alive', (_req, res) =>
 // Normalize routers regardless of CJS/ESM style
 router.use('/espn',    loadRouter('../../routers/espnRouter'));
 router.use('/sleeper', loadRouter('../../routers/sleeperRouter'));
-router.use('/health',  loadRouter('../../routers/healthRouter'));
-
+router.use('/health', require('../../routers/healthRouter'));
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
