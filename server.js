@@ -27,7 +27,7 @@ router.get('/__alive', (_req, res) =>
   res.json({ ok: true, scope: '/api/platforms', note: 'ESPN mounted separately' })
 );
 
-// 👇 Mount NON-ESPN platforms here
+/* 👇 Mount NON-ESPN platforms here
 router.use(
   '/sleeper',
   requireRouter(path.join(__dirname, '../../routers/sleeperRouter'))
@@ -37,7 +37,7 @@ router.use(
   '/health',
   requireRouter(path.join(__dirname, '../../routers/healthRouter'))
 );
-
+*/
 // If any code still hits /api/platforms/espn here, make it obvious it's the wrong place.
 router.use('/espn', (_req, res) => {
   res.status(404).json({
