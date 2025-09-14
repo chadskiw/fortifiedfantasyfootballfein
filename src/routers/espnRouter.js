@@ -1,142 +1,83 @@
 // src/routers/espnRouter.js
 const express = require('express');
+const espn = require('../api/platforms/espn'); // <- your adapter from src/api/platforms/espn.js
+
 const router = express.Router();
 
-const { getAdapter } = require('../api/platforms'); // points to /api/platforms/index.js
-
-/* ------------------------------ helpers ------------------------------ */
-function seasonOf(q) {
-  const n = Number(q.season);
-  return Number.isFinite(n) ? n : new Date().getUTCFullYear();
-}
-function weekOf(q) {
-  const n = Number(q.week);
-  return Number.isFinite(n) ? n : undefined;
-}
-function limitOf(q, def = 100) {
-  const n = Number(q.limit);
-  return Number.isFinite(n) ? n : def;
-}
-function readEspnCookies(req) {
-  const swid = req.headers['x-espn-swid'] || req.cookies?.SWID || req.cookies?.swid;
-  const s2   = req.headers['x-espn-s2']   || req.cookies?.espn_s2 || req.cookies?.S2;
-  return { swid, s2 };
-}
-
-/* ------------------------------ debug ------------------------------ */
-router.get('/__routes', (_req, res) => {
-  res.json({
-    ok: true,
-    routes: [
-      'GET /leagues?season=2025[&leagueId=,leagueId=...]',
-      'GET /leagues/:leagueId/teams?season=2025',
-      'GET /leagues/:leagueId/teams/:teamId/roster?season=2025&week=2',
-      'GET /leagues/:leagueId/matchups?season=2025&week=2',
-      'GET /leagues/:leagueId/scoreboard?season=2025&week=2',
-      'GET /leagues/:leagueId/freeagents?season=2025&week=2&limit=150',
-    ],
-  });
-});
-
-/* ------------------------------ routes ------------------------------ */
-// GET /api/platforms/espn/leagues?season=2025[&leagueId=,...]
-router.get('/leagues', async (req, res) => {
-  try {
-    const season = seasonOf(req.query);
-    const leagueIds = (req.query.leagueId || req.query.leagueIds || '')
-      .toString()
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
-    const out = await api.getLeagues({ season, ...cookies, leagueIds });
-
-    res.json({ ok: true, platform: 'espn', season, ...out });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
-  }
-});
+// sanity
+router.get('/', (_req, res) => res.json({ ok: true, platform: 'espn' }));
 
 // GET /api/platforms/espn/leagues/:leagueId/teams?season=2025
 router.get('/leagues/:leagueId/teams', async (req, res) => {
   try {
-    const { leagueId } = req.params;
-    const season = seasonOf(req.query);
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
+    const season = Number(req.query.season);
+    const leagueId = String(req.params.leagueId || '');
+    if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'Missing or invalid ?season' });
 
-    const out = await api.getTeams({ season, leagueId, ...cookies });
-    res.json({ ok: true, platform: 'espn', season, leagueId, ...out });
+    const swid = req.get('x-espn-swid');
+    const s2   = req.get('x-espn-s2');
+
+    const data = await espn.getTeams({ season, leagueId, swid, s2 });
+    return res.json({ ok:true, platform:'espn', ...data });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
+    return res.status(500).json({ ok:false, error: e?.message || 'Failed to fetch teams' });
   }
 });
 
-// GET /api/platforms/espn/leagues/:leagueId/teams/:teamId/roster?season=2025&week=2
-router.get('/leagues/:leagueId/teams/:teamId/roster', async (req, res) => {
+// (optional) more routes:
+router.get('/leagues/:leagueId/roster/:teamId', async (req, res) => {
   try {
+    const season = Number(req.query.season);
+    const week   = req.query.week ? Number(req.query.week) : undefined;
     const { leagueId, teamId } = req.params;
-    const season = seasonOf(req.query);
-    const week = weekOf(req.query);
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
-
-    const out = await api.getRoster({ season, leagueId, teamId, week, ...cookies });
-    res.json({ ok: true, platform: 'espn', season, leagueId, teamId, week, ...out });
+    const swid = req.get('x-espn-swid'); const s2 = req.get('x-espn-s2');
+    const data = await espn.getRoster({ season, leagueId, teamId, week, swid, s2 });
+    res.json({ ok:true, platform:'espn', ...data });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
+    res.status(500).json({ ok:false, error: e?.message || 'Failed to fetch roster' });
   }
 });
 
-// GET /api/platforms/espn/leagues/:leagueId/matchups?season=2025&week=2
 router.get('/leagues/:leagueId/matchups', async (req, res) => {
   try {
+    const season = Number(req.query.season);
+    const week   = req.query.week ? Number(req.query.week) : undefined;
     const { leagueId } = req.params;
-    const season = seasonOf(req.query);
-    const week = weekOf(req.query);
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
-
-    const out = await api.getMatchups({ season, leagueId, week, ...cookies });
-    res.json({ ok: true, platform: 'espn', season, leagueId, week, ...out });
+    const swid = req.get('x-espn-swid'); const s2 = req.get('x-espn-s2');
+    const data = await espn.getMatchups({ season, leagueId, week, swid, s2 });
+    res.json({ ok:true, platform:'espn', ...data });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
+    res.status(500).json({ ok:false, error: e?.message || 'Failed to fetch matchups' });
   }
 });
 
-// GET /api/platforms/espn/leagues/:leagueId/scoreboard?season=2025&week=2
 router.get('/leagues/:leagueId/scoreboard', async (req, res) => {
   try {
+    const season = Number(req.query.season);
+    const week   = req.query.week ? Number(req.query.week) : undefined;
     const { leagueId } = req.params;
-    const season = seasonOf(req.query);
-    const week = weekOf(req.query);
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
-
-    const out = await api.getScoreboard({ season, leagueId, week, ...cookies });
-    res.json({ ok: true, platform: 'espn', season, leagueId, week, ...out });
+    const swid = req.get('x-espn-swid'); const s2 = req.get('x-espn-s2');
+    const data = await espn.getScoreboard({ season, leagueId, week, swid, s2 });
+    res.json({ ok:true, platform:'espn', ...data });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
-  }
-});
-
-// GET /api/platforms/espn/leagues/:leagueId/freeagents?season=2025&week=2&limit=150
-router.get('/leagues/:leagueId/freeagents', async (req, res) => {
-  try {
-    const { leagueId } = req.params;
-    const season = seasonOf(req.query);
-    const week = weekOf(req.query);
-    const limit = limitOf(req.query, 100);
-    const api = getAdapter('espn');
-    const cookies = readEspnCookies(req);
-
-    const out = await api.getFreeAgents({ season, leagueId, week, limit, ...cookies });
-    res.json({ ok: true, platform: 'espn', season, leagueId, week, limit, ...out });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || 'Failed' });
+    res.status(500).json({ ok:false, error: e?.message || 'Failed to fetch scoreboard' });
   }
 });
 
 module.exports = router;
+
+router.get('/leagues/:leagueId/free-agents', async (req, res) => {
+  try {
+    const season = Number(req.query.season);
+    const week   = req.query.week ? Number(req.query.week) : undefined;
+    const limit  = req.query.limit ? Number(req.query.limit) : 100;
+    const { leagueId } = req.params;
+    const swid = req.get('x-espn-swid'); const s2 = req.get('x-espn-s2');
+    const data = await espn.getFreeAgents({ season, leagueId, week, swid, s2, limit });
+    res.json({ ok:true, platform:'espn', ...data });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.message || 'Failed to fetch free agents' });
+  }
+});
+
+module.exports = router; // <-- IMPORTANT: export the router (a function)
