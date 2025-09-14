@@ -1,4 +1,4 @@
-// api/platforms/espn.js
+// src/api/platforms/espn.js
 // ESPN adapter: all the goodies you need today.
 
 const BASE_LEAGUE = (season, leagueId) =>

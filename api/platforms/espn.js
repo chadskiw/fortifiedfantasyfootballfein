@@ -62,7 +62,7 @@ async function getLeagues({ season, swid, s2, leagueIds = [] }) {
       myTeamId: findMyTeamId(data),
       myTeamName: findMyTeamName(data),
       urls: {
-        web: `https://fantasy.espn.com/football/league?leagueId=${data.id}&seasonId=${season}`,
+        web: `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${data.id}/?view=mSettings&view=mTeam`,
         api: `${BASE_LEAGUE(season, leagueId)}`,
       },
     });
