@@ -9,8 +9,10 @@ function loadLocal(relPath) {
 
 const ADAPTERS = {
   espn:    () => loadLocal('./espn'),     // -> api/platforms/espn/index.js (or espn.js)
+  /*
   sleeper: () => loadLocal('./sleeper'),
   health:  () => loadLocal('./health'),
+  */
 };
 
 function getAdapter(name) {
