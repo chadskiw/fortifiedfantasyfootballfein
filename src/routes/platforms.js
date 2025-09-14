@@ -26,16 +26,15 @@ router.use('/espn', (_req, res) => {
   });
 });
 
-/* Simple routes index
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
     mounts: [
-      '/api/platforms/sleeper',
-      '/api/platforms/health',
+      //'/api/platforms/sleeper',
+      //'/api/platforms/health',
       // Reminder: /api/platforms/espn is mounted in server.js with requireEspnAuth
     ],
   });
-}); */
+}); 
 
 module.exports = router;
