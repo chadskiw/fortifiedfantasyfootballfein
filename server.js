@@ -125,6 +125,22 @@ app.get('/api/fein-auth/fein/meta/row', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+// --- Diagnostics (DB + creds echo)
+app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
+  const { Pool } = require('pg');
+  try {
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+    });
+    const r = await pool.query('SELECT 1 AS ok');
+    const fromHeaders = { swid: !!req.get('x-espn-swid'), s2: !!req.get('x-espn-s2') };
+    const fromCookies = { SWID: /SWID=/.test(req.headers.cookie || ''), espn_s2: /espn_s2=/.test(req.headers.cookie || '') };
+    res.json({ ok: true, db: r.rows[0], credsSeen: { headers: fromHeaders, cookies: fromCookies } });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:'db_error', code: e.code, message: e.message });
+  }
+});
 
 // --- Health
 app.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
