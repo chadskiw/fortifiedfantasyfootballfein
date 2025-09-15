@@ -39,6 +39,92 @@ app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 
 // --- Static AFTER APIs (so /api/* never hits the static handler)
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+// --- Quick-patch endpoints (bypass router wiring for now)
+const { upsertFeinMeta, getFeinMetaByKey } = require('./src/db/feinMeta');
+
+function readCookiesHeader(header = '') {
+  const out = {};
+  (header || '').split(/;\s*/).forEach(p => {
+    if (!p) return;
+    const i = p.indexOf('=');
+    const k = i < 0 ? p : p.slice(0, i);
+    const v = i < 0 ? '' : decodeURIComponent(p.slice(i + 1));
+    out[k] = v;
+  });
+  return out;
+}
+function normalizeSwid(raw = '') {
+  try {
+    const v = decodeURIComponent(raw);
+    // Ensure braces; ESPN expects {UUID}
+    if (!/^\{[0-9A-F-]{36}\}$/i.test(v) && /^\w/.test(v)) {
+      const n = v.replace(/^\{?/, '{').replace(/\}?$/, '}');
+      return n;
+    }
+    return v;
+  } catch { return raw; }
+}
+
+// POST /api/fein-auth/fein/meta/upsert
+app.post('/api/fein-auth/fein/meta/upsert', async (req, res) => {
+  try {
+    const season    = Number(req.body?.season);
+    const platform  = String(req.body?.platform || '').toLowerCase();
+    const league_id = String(req.body?.league_id || '').trim();
+    const team_id   = String(req.body?.team_id || '').trim();
+
+    if (!season || !platform || !league_id || !team_id) {
+      return res.status(400).json({ ok: false, error: 'Missing required fields' });
+    }
+    if (platform !== 'espn') {
+      return res.status(400).json({ ok: false, error: 'platform must be "espn"' });
+    }
+
+    const cookies = readCookiesHeader(req.headers.cookie || '');
+    const swidHdr = req.get('x-espn-swid') || req.body?.swid || cookies.SWID || '';
+    const s2Hdr   = req.get('x-espn-s2')   || req.body?.s2   || cookies.espn_s2 || '';
+
+    const swid = normalizeSwid(swidHdr.trim());
+    const s2   = decodeURIComponent((s2Hdr || '').trim());
+
+    if (!swid || !s2) {
+      return res.status(400).json({ ok: false, error: 'Missing swid/s2 credentials' });
+    }
+
+    const row = await upsertFeinMeta({
+      season, platform, league_id, team_id,
+      name: null, handle: null, league_size: null, fb_groups: null,
+      swid, espn_s2: s2,
+    });
+
+    return res.status(200).json({ ok: true, row });
+  } catch (err) {
+    console.error('[quickpatch upsert] error', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// GET /api/fein-auth/fein/meta/row?season=2025&platform=espn&leagueId=...&teamId=...
+app.get('/api/fein-auth/fein/meta/row', async (req, res) => {
+  try {
+    const season    = Number(req.query.season);
+    const platform  = String(req.query.platform || '').toLowerCase();
+    const league_id = String(req.query.leagueId || '').trim();
+    const team_id   = String(req.query.teamId || '').trim();
+
+    if (!season || !platform || !league_id || !team_id) {
+      return res.status(400).json({ ok: false, error: 'Missing required fields' });
+    }
+
+    const row = await getFeinMetaByKey({ season, platform, league_id, team_id });
+    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+
+    return res.json({ ok: true, row });
+  } catch (err) {
+    console.error('[quickpatch get row] error', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 // --- Health
 app.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
