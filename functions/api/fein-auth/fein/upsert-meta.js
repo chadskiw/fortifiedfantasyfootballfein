@@ -1,309 +1,135 @@
-// FEIN Auth/Meta Service (Express + Postgres)
-// Stores team meta AND ESPN creds (swid, s2) per (season, league, team)
-// Routes:
-//   GET  /health
-//   GET  /fein                          -> route list
-//   GET  /fein/upsert-meta              -> browser sanity check
-//   POST /fein/upsert-meta              -> UPSERT meta + (optionally) swid/s2  [requires x-fein-key if FEIN_AUTH_KEY set]
-//   GET  /fein-auth/by-league?season=&size=[&leagueId=]   -> rows for UI (NO creds)
-//   GET  /fein-auth/pool?size=[&season=]                  -> rows for UI (NO creds)
-//   GET  /fein-auth/creds?leagueId=&season=               -> { ok, swid, s2 }  [requires x-fein-key if FEIN_AUTH_KEY set]
-//
-// Env:
-//   PORT
-//   DATABASE_URL     (required)
-//   FEIN_AUTH_KEY    (optional; if set, required for POST /fein/upsert-meta and GET /fein-auth/creds)
+// functions/api/fein/upsert-meta.js
+// POST JSON: { leagueId, teamId, season, teamName?, owner?, leagueSize?, fbName?, fbGroup?, fbHandle? }
+// - Soft-fails: never 5xx to the browser; includes upstream status in the response.
+// - CORS-friendly and handles OPTIONS preflight.
 
-const express = require("express");
-const { Pool } = require("pg");
-
-const PORT = process.env.PORT || 3000;
-const DB_URL = process.env.DATABASE_URL;
-const WRITE_KEY = (process.env.FEIN_AUTH_KEY || "").trim();
-
-if (!DB_URL) {
-  console.error("DATABASE_URL is required");
-  process.exit(1);
-}
-
-const pool = new Pool({ connectionString: DB_URL, max: 3 });
-const app = express();
-
-// JSON + permissive CORS for CF Pages / localhost
-app.use(express.json({ limit: "256kb" }));
-app.use((req, res, next) => {
-  res.set({
+const API_BASE = ''; // same-origin
+function cors(extra = {}) {
+  return {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,x-fein-key"
-  });
-  if (req.method === "OPTIONS") return res.status(204).end();
-  next();
-});
-
-// helpers
-const s = (v) => (v == null ? "" : String(v));
-const n = (v) => { const x = Number(v); return Number.isFinite(x) ? x : null; };
-const dedup = (arr) => Array.from(new Set((arr || []).flat().map((x) => s(x).trim()).filter(Boolean)));
-
-// Ensure schema (incl. swid/s2) + helpful indexes
-await (async () => {
-  await pool.query(`
-    create table if not exists fein_meta (
-      season      text not null,
-      league_id   text not null,
-      team_id     text not null,
-      name        text,
-      handle      text,
-      league_size int,
-      fb_groups   jsonb,
-      swid        text,
-      s2          text,
-      updated_at  timestamptz not null default now(),
-      primary key (season, league_id, team_id)
-    );
-  `);
-  await pool.query(`alter table fein_meta add column if not exists fb_groups jsonb;`);
-  await pool.query(`alter table fein_meta add column if not exists swid text;`);
-  await pool.query(`alter table fein_meta add column if not exists s2   text;`);
-  await pool.query(`create index if not exists fein_meta_season_size_idx on fein_meta(season, league_size);`);
-  await pool.query(`create index if not exists fein_meta_league_idx on fein_meta(league_id);`);
-   // partial index for creds lookups
-  await pool.query(`
-    create index if not exists fein_meta_creds_idx
-      on fein_meta(league_id, season, updated_at)
-      where swid is not null and s2 is not null;
-  `);
-  console.log("[db] schema ready");
-})().catch(e => {
-  console.error("[db] init failed:", e);
-  process.exit(1);
-});
-/*
-app.get("/health", async (_req, res) => {
-  try { await pool.query("select 1"); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ ok: false, error: String(e?.message || e) }); }
-});
-*/
-app.get("/fein", (_req, res) => {
-  res.json({
-    ok: true,
-    routes: [
-    //  "GET  /health",
-      "GET  /fein",
-      "GET  /fein/upsert-meta",
-      "POST /fein/",
-      "GET  /fein-auth/by-league?season=&size=[&leagueId=]",
-      "GET  /fein-auth/pool?size=[&season=]",
-      "GET  /fein-auth/creds?leagueId=&season="
-    ]
-  });
-});
-
-// sanity GET
-app.get("/fein/upsert-meta", (_req, res) => {
-  res.json({
-    ok: true,
-    hint: "POST JSON here to upsert team meta (and optionally swid/s2)",
-    expect: {
-      leagueId: "12345",
-      teamId: "7",
-      season: "2025",
-      leagueSize: 12,
-      teamName: "Team Name",
-      owner: "Owner",
-      fbName: "Display Name",
-      fbHandle: "@handle",
-      fbGroup: ["Group A", "Group B"],
-      swid: "{...}", // optional
-      s2:   "..."    // optional
-    }
-  });
-});
-
-// auth gate (used for write and creds-read)
-function requireKey(req, res, next) {
-  if (!WRITE_KEY) return next();
-  const k = s(req.headers["x-fein-key"]).trim();
-  if (k && k === WRITE_KEY) return next();
-  return res.status(401).json({ ok: false, error: "Unauthorized (bad x-fein-key)" });
+    "access-control-allow-methods": "POST,GET,OPTIONS",
+    "access-control-allow-headers": "content-type,x-fein-key",
+    "cache-control": "no-store",
+    ...extra,
+  };
 }
 
-// UPSERT meta + optional creds
-app.post("/fein/upsert-meta", requireKey, async (req, res) => {
+// CF Pages Function: proxies POSTs to your Render service and forwards SWID/s2
+// Path: /api/fein/upsert-meta
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  });
+}
+
+function parseCookies(header = "") {
+  const out = {};
+  header.split(/; */).forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > 0) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1));
+  });
+  return out;
+}
+
+function normalizeSwid(v) {
+  const s = (v || "").trim();
+  if (!s) return "";
+  const un = s.replace(/^["']|["']$/g, ""); // strip quotes if any
+  if (/^\{.*\}$/.test(un)) return un;
+  return `{${un.replace(/^\{|\}$/g, "")}}`;
+}
+
+export async function onRequestGet({ request, env }) {
+  const u = new URL(request.url);
+  const leagueId = u.searchParams.get('leagueId');
+  const teamId   = u.searchParams.get('teamId');
+  const season   = u.searchParams.get('season');
+  if (leagueId && teamId && season) {
+    // forward as POST to upstream for convenience
+    const AUTH = (env.API_BASE || "https://fein-auth-service.onrender.com").replace(/\/+$/,"");
+    const headers = { 'content-type':'application/json', accept:'application/json' };
+    if (env.FEIN_AUTH_KEY) headers['x-fein-key'] = env.FEIN_AUTH_KEY;
+    const r = await fetch(`${AUTH}/fein/upsert-meta`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ leagueId, teamId, season })
+    });
+    return new Response(await r.text(), { status: r.status, headers: { 'content-type':'application/json' } });
+  }
+  return json({ ok:true, hint:'POST JSON here to upsert team meta (and optionally swid/s2)', expect:{ /* … */ } });
+
+}
+
+export async function onRequestPost({ request, env }) {
   try {
-    const b = req.body || {};
-    const leagueId   = s(b.leagueId || b.league_id).trim();
-    const teamId     = s(b.teamId   || b.team_id).trim();
-    const season     = s(b.season || new Date().getFullYear()).trim();
-    const leagueSize = n(b.leagueSize ?? b.league_size);
+ const AUTH = (env.API_BASE || "https://fein-auth-service.onrender.com").replace(/\/+$/,"");
+    const KEY  = (env.FEIN_AUTH_KEY || "").trim();
 
-    const name   = s(b.teamName ?? b.name).slice(0, 120);
-    const handle = s(b.owner    ?? b.handle).slice(0, 120);
+    const body = await request.json().catch(() => ({}));
 
-    const fb_groups = Array.isArray(b.fb_groups) ? b.fb_groups : dedup([b.fbName, b.fbHandle, b.fbGroup]);
+    // Pull creds from multiple places: body, headers, cookies (HttpOnly is fine server-side)
+    const h = request.headers;
+    const cookies = parseCookies(h.get("cookie") || "");
+    const swidFrom =
+      body.swid ||
+      h.get("x-espn-swid") ||
+      cookies.SWID ||
+      cookies.swid ||
+      "";
+    const s2From =
+      body.s2 ||
+      h.get("x-espn-s2") ||
+      cookies.espn_s2 ||
+      cookies.S2 ||
+      "";
 
-    // OPTIONAL creds — only store if present/non-empty
-    const swid = s(b.swid || b.SWID).trim();
-    const s2   = s(b.s2   || b.espn_s2).trim();
+    const swid = normalizeSwid(swidFrom);
+    const s2   = (s2From || "").trim();
 
-    if (!leagueId || !teamId || !season) {
-      return res.status(400).json({ ok: false, error: "leagueId, teamId, season required" });
+    // Forward payload (include swid/s2 only if present)
+    const payload = {
+      leagueId: body.leagueId,
+      teamId: body.teamId,
+      season: body.season,
+      leagueSize: body.leagueSize ?? body.league_size,
+      teamName: body.teamName ?? body.name,
+      owner: body.owner ?? body.handle,
+      // fb metadata (your Render service merges/dedups)
+      fbName: body.fbName,
+      fbHandle: body.fbHandle,
+      fbGroup: body.fbGroup,
+    };
+    if (swid) payload.swid = swid;
+    if (s2)   payload.s2   = s2;
+
+    // Basic validation before proxying
+    if (!payload.leagueId || !payload.teamId || !payload.season) {
+      return json({ ok:false, error:"leagueId, teamId, season required" }, 400);
     }
 
-    const sql = `
-      insert into fein_meta (season, league_id, team_id, name, handle, league_size, fb_groups, swid, s2, updated_at)
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
-      on conflict (season, league_id, team_id)
-      do update set
-        name        = coalesce(excluded.name, fein_meta.name),
-        league_size = coalesce(excluded.league_size, fein_meta.league_size),
+    const headers = {
+      "content-type": "application/json",
+      accept: "application/json",
+    };
+    if (KEY) headers["x-fein-key"] = KEY;
 
-        -- overwrite handle only if non-empty is provided
-        handle      = coalesce(nullif(excluded.handle, ''), fein_meta.handle),
+ const r = await fetch(`${AUTH}/api/fein-auth/upsert-meta`, {   // ✅ no /api prefix
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
 
-        -- merge/dedup fb_groups when provided, else keep existing
-        fb_groups   = case
-                        when excluded.fb_groups is not null and jsonb_array_length(excluded.fb_groups) > 0
-                          then (
-                            select jsonb_agg(distinct x)
-                            from jsonb_array_elements(coalesce(fein_meta.fb_groups, '[]'::jsonb) || excluded.fb_groups) as t(x)
-                          )
-                        else fein_meta.fb_groups
-                      end,
+    const text = await r.text();
+    let j; try { j = JSON.parse(text); } catch {}
 
-        -- overwrite creds only if non-empty values are provided
-        swid        = coalesce(nullif(excluded.swid, ''), fein_meta.swid),
-        s2          = coalesce(nullif(excluded.s2,   ''), fein_meta.s2),
-
-        updated_at  = now()
-      returning season, league_id, team_id, name, handle, league_size, fb_groups, s2, swid, updated_at
-    `;
-    const params = [
-      season, leagueId, teamId,
-      name || null,
-      handle || null,
-      leagueSize,
-      Array.isArray(fb_groups) ? JSON.stringify(dedup(fb_groups)) : null,
-      swid || null,
-      s2   || null
-    ];
-
-    const { rows } = await pool.query(sql, params);
-    res.json({ ok: true, row: rows[0] || null });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/* ---------- READ ROUTES for your UI (never expose swid/s2 here) ---------- */
-
-// /fein-auth/by-league?season=2025&size=12[&leagueId=...]
-app.get("/fein-auth/by-league", async (req, res) => {
-  try {
-    const season = s(req.query.season || "").trim();
-    const size   = n(req.query.size);
-    const league = s(req.query.leagueId || req.query.league_id || "").trim();
-    if (!season) return res.status(400).json({ ok: false, error: "season required" });
-    if (!size)   return res.status(400).json({ ok: false, error: "size required" });
-
-    const params = [season, size];
-    let sql = `
-      select season, league_id, team_id, name as team_name, handle,
-             league_size, fb_groups, updated_at
-      from fein_meta
-      where season = $1 and league_size = $2
-    `;
-    if (league) { sql += ` and league_id = $3`; params.push(league); }
-    sql += ` order by league_id, team_id`;
-
-    const { rows } = await pool.query(sql, params);
-    const shaped = rows.map(r => ({
-      league_id: r.league_id,
-      season: r.season,
-      league_size: r.league_size,
-      team_id: r.team_id,
-      name: r.team_name,
-      handle: r.handle,
-      fb_groups: r.fb_groups
-    }));
-    res.json({ ok: true, rows: shaped });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// /fein-auth/pool?size=12[&season=2025]
-app.get("/fein-auth/pool", async (req, res) => {
-  try {
-    const size = n(req.query.size);
-    if (!size) return res.status(400).json({ ok: false, error: "size required" });
-    const season = s(req.query.season || "").trim();
-
-    const params = [size];
-    let sql = `
-      select season, league_id, team_id, name as team_name, handle,
-             league_size, fb_groups, updated_at
-      from fein_meta
-      where league_size = $1
-    `;
-    if (season) { sql += ` and season = $2`; params.push(season); }
-    sql += ` order by season desc, league_id, team_id`;
-
-    const { rows } = await pool.query(sql, params);
-    const shaped = rows.map(r => ({
-      league_id: r.league_id,
-      season: r.season,
-      league_size: r.league_size,
-      team_id: r.team_id,
-      name: r.team_name,
-      handle: r.handle,
-      fb_groups: r.fb_groups
-    }));
-    res.json({ ok: true, rows: shaped });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/* ---------- SECURED CREDS READBACK for CF Pages fallback ---------- */
-// /fein-auth/creds?leagueId=&season=
-//  Returns the most recent (swid,s2) row saved for that league/season.
-//  Requires x-fein-key if FEIN_AUTH_KEY is set.
-app.get("/fein-auth/creds", requireKey, async (req, res) => {
-  try {
-    const leagueId = s(req.query.leagueId || req.query.league_id).trim();
-    const season   = s(req.query.season || req.query.year || "").trim();
-    if (!leagueId) return res.status(400).json({ ok: false, error: "leagueId required" });
-
-    let row;
-    if (season) {
-      const q = await pool.query(
-        `select swid, s2 from fein_meta
-         where league_id = $1 and season = $2 and swid is not null and s2 is not null
-         order by updated_at desc limit 1`,
-        [leagueId, season]
-      );
-      row = q.rows?.[0];
-    } else {
-      const q = await pool.query(
-        `select swid, s2 from fein_meta
-         where league_id = $1 and swid is not null and s2 is not null
-         order by updated_at desc limit 1`,
-        [leagueId]
-      );
-      row = q.rows?.[0];
+    if (!r.ok || j?.ok === false) {
+      return json({ ok:false, status:r.status, upstream: j || text.slice(0,300) }, 502);
     }
 
-    if (!row?.swid || !row?.s2) {
-      return res.status(404).json({ ok: false, error: "no stored creds" });
-    }
-    res.json({ ok: true, swid: row.swid, s2: row.s2 });
+    return json(j);
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    return json({ ok:false, error:String(e) }, 500);
   }
-});
-
-app.listen(PORT, () => {
-  console.log(`fein-auth-service listening on :${PORT}`);
-});
+}

@@ -1,75 +1,55 @@
-// Public route: anyone can list leagues (no auth required)
-// GET /api/fein-auth/by-league?season=2025
-// Optional: ?leagueId=1888700373 to fetch one
+// functions/api/fein-auth.js
+// Alias for /api/espn/link with the same behavior.
+// Supports: GET (status), POST (link), DELETE (unlink).
+// Accepts body keys: { swid, SWID, s2, espn_s2, to? }  -> sets cookies SWID + espn_s2
 
-import { query } from '../../../lib/db.js'; // adjust if your db helper differs
-
-function json(body, status = 200, extra = {}) {
-  return new Response(JSON.stringify(body, null, 2), {
+function json(data, status = 200, extra = {}) {
+  return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      // public CORS
-      'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET, OPTIONS',
-      'access-control-allow-headers': 'content-type',
-      ...extra,
-    },
+    headers: { "content-type": "application/json; charset=utf-8", ...extra },
   });
 }
+async function parseBody(req) { return req.json().catch(() => ({})); }
 
-// Minimal OPTIONS handler for CORS preflights
-export const onRequestOptions = async () => json({}, 204);
+function normSWID(raw) {
+  if (!raw) return "";
+  try { raw = decodeURIComponent(raw); } catch {}
+  raw = raw.trim();
+  if (!raw.startsWith("{")) raw = `{${raw.replace(/^\{?|\}?$/g, "")}}`;
+  return raw;
+}
+function setCookie(k, v, { days = 30 } = {}) {
+  const maxAge = days * 24 * 60 * 60;
+  return `${k}=${encodeURIComponent(v)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+}
+function clearCookie(k) {
+  return `${k}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+}
 
-export const onRequestGet = async ({ request }) => {
-  try {
-    const u = new URL(request.url);
-    const season   = u.searchParams.get('season') || '';
-    const leagueId = u.searchParams.get('leagueId');
-
-    // If you keep leagues in a table named `leagues`:
-    // columns (example): id, league_id, season, name, owner, size, created_at
-    // Adjust to your schema.
-    let rows;
-    if (leagueId) {
-      rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
-          WHERE league_id = $1`,
-        [leagueId]
-      );
-    } else if (season) {
-      rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
-          WHERE season = $1
-          ORDER BY name NULLS LAST, league_id`,
-        [season]
-      );
-    } else {
-      rows = await query(
-        `SELECT league_id AS "leagueId",
-                season::int      AS season,
-                COALESCE(name,'')   AS name,
-                COALESCE(owner,'')  AS owner,
-                COALESCE(size, NULL)::int AS size
-           FROM leagues
-          ORDER BY season DESC, name NULLS LAST, league_id`
-      );
-    }
-
-    return json({ ok: true, count: rows.length, leagues: rows });
-  } catch (err) {
-    // If DB isn’t wired yet, fail gracefully but keep the route public.
-    return json({ ok: false, error: 'by-league failed', detail: String(err) }, 500);
+export const onRequest = async ({ request }) => {
+  if (request.method === "GET") {
+    const ck = request.headers.get("cookie") || "";
+    const hasSWID = /(?:^|;\s*)SWID=/.test(ck);
+    const hasS2   = /(?:^|;\s*)espn_s2=/.test(ck);
+    return json({ ok: true, linked: hasSWID && hasS2, hasSWID, hasS2 });
   }
+
+  if (request.method === "DELETE") {
+    return json({ ok: true, cleared: true }, 200, {
+      "set-cookie": [clearCookie("SWID"), clearCookie("espn_s2")],
+    });
+  }
+
+  if (request.method !== "POST") {
+    return json({ ok:false, error: "Use POST to link, GET to check, DELETE to unlink." }, 405);
+  }
+
+  const body = await parseBody(request);
+  const swid = normSWID(body.SWID || body.swid || "");
+  const s2   = String(body.s2 || body.espn_s2 || "").trim();
+  if (!swid || !s2) return json({ ok:false, error:"Provide SWID and s2" }, 400);
+
+  return json({ ok:true, linked:true }, 200, {
+    "set-cookie": [ setCookie("SWID", swid), setCookie("espn_s2", s2) ],
+  });
 };
