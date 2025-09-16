@@ -1,7 +1,7 @@
 // src/db/feinMeta.js
 // src/db/feinMeta.js
 const { Pool } = require('pg');
-const { create: createId, dissect } = require('../lib/idCodec');
+const { create: createId, dissect } = require('../../lib/idCodec.js');
 
 // server/routes/fein-meta.js
 const express = require('express');
