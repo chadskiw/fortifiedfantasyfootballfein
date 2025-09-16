@@ -1,0 +1,6 @@
+/pool /api/pool 200
+/*    /js/utils
+/api/*   /api/:splat   200
+/*       /index.html   200
+/data/*           /data/:splat 200
+/fein/*           /fein/:splat 200

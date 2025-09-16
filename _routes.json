@@ -1,5 +1,14 @@
 {
   "version": 1,
   "include": ["/api/*"],
-  "exclude": []
+  "exclude": [
+    "/hard-core/*",
+    "/themes.css",
+    "/styles.css",
+    "/main.css",
+    "/team-picker.css",
+    "/favicon.ico",
+    "/manifest.webmanifest",
+    "/apple-touch-icon-180.png"
+  ]
 }
