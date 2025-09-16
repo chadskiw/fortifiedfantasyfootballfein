@@ -13,6 +13,11 @@ function buildCookie(swid, s2) {
   if (s2) parts.push(`espn_s2=${s2}`);
   return parts.join('; ');
 }
+// e.g. server/routes/platforms-espn.js
+router.get('/authcheck', (req, res) => {
+  const has = !!(req.cookies?.SWID && (req.cookies?.ESPN_S2 || req.cookies?.espn_s2));
+  res.json({ ok: has, authed: has });
+});
 
 async function espnGET(url, { swid, s2 } = {}) {
   const res = await fetch(url, {
