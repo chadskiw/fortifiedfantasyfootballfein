@@ -1,5 +1,8 @@
 // src/db/feinMeta.js
+// src/db/feinMeta.js
 const { Pool } = require('pg');
+const { create: createId, dissect } = require('../lib/idCodec');
+
 // server/routes/fein-meta.js
 const express = require('express');
 const router = express.Router();
@@ -30,14 +33,17 @@ async function upsertFeinMeta({
 }) {
   const updated_at = new Date().toISOString();
 
+  // 🔑 generate the canonical 21-digit id
+  const id = createId({ platform, season, leagueId: league_id, teamId: team_id });
+
   const sql = `
     INSERT INTO fein_meta (
-      season, platform, league_id, team_id,
+      id, season, platform, league_id, team_id,
       name, handle, league_size, fb_groups,
       swid, espn_s2, updated_at
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-    ON CONFLICT (season, platform, league_id, team_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    ON CONFLICT (id)
     DO UPDATE SET
       name        = COALESCE(EXCLUDED.name, fein_meta.name),
       handle      = COALESCE(EXCLUDED.handle, fein_meta.handle),
@@ -52,7 +58,7 @@ async function upsertFeinMeta({
   `;
 
   const params = [
-    season, platform, String(league_id), String(team_id),
+    id, season, platform, String(league_id), String(team_id),
     name, handle, league_size, fb_groups,
     swid, espn_s2, updated_at,
   ];
@@ -60,6 +66,7 @@ async function upsertFeinMeta({
   const { rows } = await pool.query(sql, params);
   return rows[0];
 }
+
 
 /** Fetch a specific row by its natural key. */
 async function getFeinMetaByKey({ season, platform = 'espn', league_id, team_id }) {
