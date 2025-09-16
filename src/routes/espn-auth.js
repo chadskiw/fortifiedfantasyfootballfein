@@ -44,32 +44,71 @@ function safeTarget(to) {
   return DEFAULT_RETURN;
 }
 
-// GET: from bookmarklet (?swid=&s2=&to=)
+/**
+ * Helper: read cookies safely even if cookie-parser isn't installed.
+ */
+function getCookieMap(req) {
+  if (req.cookies) return req.cookies; // if cookie-parser is in use
+  const raw = req.headers.cookie || '';
+  const map = {};
+  raw.split(/;\s*/).forEach(p => {
+    if (!p) return;
+    const i = p.indexOf('=');
+    const k = i < 0 ? p : p.slice(0, i);
+    const v = i < 0 ? '' : decodeURIComponent(p.slice(i + 1));
+    map[k] = v;
+  });
+  return map;
+}
+
+/**
+ * NEW: status check (GET with no swid/s2) — lets the client confirm auth
+ * and stamps the readable helper cookie if SWID & espn_s2 are present.
+ */
+router.get('/', (req, res, next) => {
+  // if bookmarklet params are present, fall through to your existing handler
+  const { swid, s2 } = req.query || {};
+  if (swid && s2) return next(); // continue to the existing GET handler below
+
+  const cookies = getCookieMap(req);
+  const hasSWID = !!cookies.SWID;
+  const hasS2   = !!(cookies.espn_s2 || cookies.ESPN_S2);
+
+  // if both are there, ensure the frontend-readable helper is stamped
+  if (hasSWID && hasS2) {
+    res.cookie('fein_has_espn', '1', { ...baseCookieOpts, httpOnly: false, maxAge: MAX_AGE });
+  }
+
+  return res.status(200).json({ ok: true, linked: hasSWID && hasS2, hasSWID, hasS2 });
+});
+
+
+/**
+ * EXISTING: GET from bookmarklet (?swid=&s2=&to=) — keep as is
+ */
 router.get('/', (req, res) => {
   let { swid, s2, to } = req.query || {};
   if (!swid || !s2) {
     return res.status(400).json({ ok: false, error: 'missing swid/s2' });
   }
 
-  // Normalize SWID braces/case — but DO NOT touch s2
   swid = normalizeSwid(swid);
 
-  // Wipe any prior variants (just in case)
-  res.clearCookie('SWID',     { ...baseCookieOpts });
-  res.clearCookie('espn_s2',  { ...baseCookieOpts });
-  res.clearCookie('fein_has_espn', { path: '/' });
+  res.clearCookie('SWID',            { ...baseCookieOpts });
+  res.clearCookie('espn_s2',         { ...baseCookieOpts });
+  res.clearCookie('fein_has_espn',   { path: '/' });
 
-  // Set fresh cookies
-  res.cookie('SWID',     swid, { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
-  res.cookie('espn_s2',  s2,   { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
-  res.cookie('fein_has_espn', '1', { path: '/', maxAge: MAX_AGE });  // readable flag
+  res.cookie('SWID',    swid, { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
+  res.cookie('espn_s2', s2,   { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
+  res.cookie('fein_has_espn', '1',   { ...baseCookieOpts, httpOnly: false, maxAge: MAX_AGE });
 
-  // Safe redirect (back to the exact FF page if provided)
   const target = safeTarget(to);
   return res.redirect(303, target);
 });
 
-// POST: from “Paste SWID & S2” fallback (JSON body)
+/**
+ * EXISTING: POST fallback — keep as is
+ */
 router.post('/', express.json(), (req, res) => {
   let { swid, s2, to } = req.body || {};
   if (!swid || !s2) {
@@ -77,24 +116,24 @@ router.post('/', express.json(), (req, res) => {
   }
   swid = normalizeSwid(swid);
 
-  res.clearCookie('SWID',     { ...baseCookieOpts });
-  res.clearCookie('espn_s2',  { ...baseCookieOpts });
-  res.clearCookie('fein_has_espn', { path: '/' });
+  res.clearCookie('SWID',            { ...baseCookieOpts });
+  res.clearCookie('espn_s2',         { ...baseCookieOpts });
+  res.clearCookie('fein_has_espn',   { path: '/' });
 
-  res.cookie('SWID',     swid, { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
-  res.cookie('espn_s2',  s2,   { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
-  res.cookie('fein_has_espn', '1', { path: '/', maxAge: MAX_AGE });
+  res.cookie('SWID',    swid, { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
+  res.cookie('espn_s2', s2,   { ...baseCookieOpts, httpOnly: true,  maxAge: MAX_AGE });
+  res.cookie('fein_has_espn', '1',   { ...baseCookieOpts, httpOnly: false, maxAge: MAX_AGE });
 
-  // For POST we return JSON (frontend can decide where to go next),
-  // but you can also 303 to safeTarget(to) if you prefer.
   return res.status(200).json({ ok: true, to: safeTarget(to) });
 });
 
-// DELETE: logout
+/**
+ * EXISTING: DELETE (logout) — keep as is
+ */
 router.delete('/', (req, res) => {
-  res.clearCookie('SWID',     { ...baseCookieOpts });
-  res.clearCookie('espn_s2',  { ...baseCookieOpts });
-  res.clearCookie('fein_has_espn', { path: '/' });
+  res.clearCookie('SWID',            { ...baseCookieOpts });
+  res.clearCookie('espn_s2',         { ...baseCookieOpts });
+  res.clearCookie('fein_has_espn',   { path: '/' });
   res.json({ ok: true, cleared: true });
 });
 
