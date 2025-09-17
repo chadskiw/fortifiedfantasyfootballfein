@@ -1,0 +1,56 @@
+// profile payload now: { username, adjectives: ['Bold','Blue'], noun: 'Cow', color:{key,hex}, codename? }
+const baseUsername = (profile?.username || 'Player').trim();
+const [adj1, adj2] = Array.isArray(profile?.adjectives) ? profile.adjectives.slice(0,2) : [null, null];
+const noun = profile?.noun || null;
+const codename = profile?.codename || (adj1 && adj2 && noun ? `the ${adj1} ${adj2} ${noun}` : null);
+const colorKey = profile?.color?.key || null;
+const colorHex = profile?.color?.hex || null;
+// from profile
+const adjectives = adjs.length ? adjs.slice(0,2) : null;
+
+await client.query(`
+  INSERT INTO users (
+    user_id, username, email, phone_e164, sig8,
+    color_key, color_hex, codename, adjectives, noun
+  )
+  VALUES ($1,$2,LOWER($3),$4,$5,$6,$7,$8,$9,$10)
+  ON CONFLICT (user_id) DO UPDATE SET
+    username    = COALESCE(EXCLUDED.username, users.username),
+    email       = COALESCE(LOWER(EXCLUDED.email), users.email),
+    phone_e164  = COALESCE(EXCLUDED.phone_e164, users.phone_e164),
+    color_key   = COALESCE(EXCLUDED.color_key, users.color_key),
+    color_hex   = COALESCE(EXCLUDED.color_hex, users.color_hex),
+    codename    = COALESCE(EXCLUDED.codename, users.codename),
+    adjectives  = COALESCE(EXCLUDED.adjectives, users.adjectives),
+    noun        = COALESCE(EXCLUDED.noun, users.noun),
+    updated_at  = now()
+`, [
+  userId, baseUsername, email || null, phone || null, sig8,
+  colorKey, colorHex, codename, adjectives ? JSON.stringify(adjectives) : null, noun
+]);
+// profile: { username, adjectives: ['Big','Blue'], noun: 'Cow', color:{key,hex}, codename? }
+const adjs = Array.isArray(profile?.adjectives)
+  ? profile.adjectives.map(s => String(s).trim()).filter(Boolean).slice(0, 2)
+  : null;
+
+await client.query(`
+  INSERT INTO users (
+    user_id, username, email, phone_e164, sig8,
+    color_key, color_hex, codename, adjectives, noun
+  )
+  VALUES ($1,$2,LOWER($3),$4,$5,$6,$7,$8,$9,$10)
+  ON CONFLICT (user_id) DO UPDATE SET
+    username    = COALESCE(EXCLUDED.username, users.username),
+    email       = COALESCE(LOWER(EXCLUDED.email), users.email),
+    phone_e164  = COALESCE(EXCLUDED.phone_e164, users.phone_e164),
+    color_key   = COALESCE(EXCLUDED.color_key, users.color_key),
+    color_hex   = COALESCE(EXCLUDED.color_hex, users.color_hex),
+    codename    = COALESCE(EXCLUDED.codename, users.codename),
+    adjectives  = COALESCE(EXCLUDED.adjectives, users.adjectives),
+    noun        = COALESCE(EXCLUDED.noun, users.noun),
+    updated_at  = now()
+  RETURNING user_id, username, email, phone_e164, sig8, color_key, color_hex, codename, adjectives, noun, updated_at
+`, [
+  userId, baseUsername, email || null, phone || null, sig8,
+  colorKey, colorHex, codename, adjs ? JSON.stringify(adjs) : null, noun
+]);
