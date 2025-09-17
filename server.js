@@ -10,6 +10,7 @@ const { rateLimit }      = require('./src/rateLimit');
 const platformRouter     = require('./src/routes/platforms');
 const espnRouter         = require('./routers/espnRouter');
 const feinAuthRouter     = require('./routes/fein-auth');
+const authRouter     = require('./routes/fein-auth');
 
 // (Optional) light gate so headers are present for ESPN platform routes only
 const requireEspnHeaders = (req, res, next) =>
@@ -32,7 +33,10 @@ app.use(corsMiddleware);
 app.use(rateLimit);
 
 // --- ✅ Mount API routers BEFORE any static or SPA fallback
-app.use('/api/fein-auth', feinAuthRouter);                 // same-origin cookie endpoints + meta upsert
+app.use('/api/fein-auth', feinAuthRouter);     
+// server.js
+app.use('/api/auth', require(authRouter));
+            // same-origin cookie endpoints + meta upsert
 app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 // If/when you restore other platforms aggregate router:
 // app.use('/api/platforms', platformRouter);
@@ -141,6 +145,8 @@ app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
     res.status(500).json({ ok:false, error:'db_error', code: e.code, message: e.message });
   }
 });
+
+
 
 // --- Health
 app.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
