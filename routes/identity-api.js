@@ -2,57 +2,51 @@
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
+const crypto = require('crypto');
 
-/* ---------- validators ---------- */
+/* ---------- DB ---------- */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+});
+
+/* ---------- utils ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
 
 function normalizeIdentifier(raw) {
   const v = String(raw || '').trim();
-  if (!v) return { type: null, value: '' };
-  if (EMAIL_RE.test(v)) return { type: 'email', value: v.toLowerCase() };
-  if (PHONE_RE.test(v)) {
-    const digits = v.replace(/[^\d]/g, '');
-    return { type: 'phone', value: digits.startsWith('1') && digits.length === 11 ? `+${digits}` : `+${digits}` };
-  }
-  return { type: 'username', value: v };
+  if (!v) return '';
+  if (EMAIL_RE.test(v)) return v.toLowerCase();
+  if (PHONE_RE.test(v)) return '+' + v.replace(/[^\d]/g, '');
+  return v; // username or other identifier
 }
 
-/* ---------- db (optional but supported) ---------- */
-let pool = null;
-if (process.env.DATABASE_URL && process.env.ID_INVITES_DB !== '0') {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
-  });
+function genCode() {
+  // 6-digit numeric (100000–999999)
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-async function ensureInviteTable() {
-  if (!pool) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ff_invite (
-      id BIGSERIAL PRIMARY KEY,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      identifier_type TEXT NOT NULL,
-      identifier_value TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'seeded'
-    );
-  `);
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS ff_invite_ident_uq
-    ON ff_invite(identifier_type, identifier_value);
-  `);
+function hashIp(ip) {
+  const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
+  return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
 }
 
-/* ---------- CORS preflight (your global middleware also handles it) ---------- */
+function firstLang(acceptLang = '') {
+  // "en-US,en;q=0.9" -> "en-US"
+  return (acceptLang.split(',')[0] || '').trim() || null;
+}
+
+/* ---------- CORS preflight (your global cors also handles it) ---------- */
 router.options('/request-code', (req, res) => {
-  res.set({
-    'Access-Control-Allow-Origin': req.headers.origin || 'https://fortifiedfantasy.com',
-    'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Allow-Headers': 'content-type',
-    'Access-Control-Allow-Methods': 'POST,OPTIONS',
-    'Vary': 'Origin',
-  });
+  const origin = req.headers.origin;
+  if (origin) {
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Credentials', 'true');
+  }
+  res.set('Access-Control-Allow-Headers', 'content-type');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.sendStatus(204);
 });
 
@@ -63,45 +57,58 @@ router.post('/request-code', async (req, res) => {
       return res.status(415).json({ ok:false, error:'unsupported_media_type' });
     }
 
-    const { identifier } = req.body || {};
-    if (!identifier || typeof identifier !== 'string') {
+    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
+    const idNorm = normalizeIdentifier(identifier);
+    if (!idNorm) {
       return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
     }
 
-    const norm = normalizeIdentifier(identifier);
-    if (!norm.type) {
-      return res.status(400).json({ ok:false, error:'bad_request', detail:'invalid identifier' });
-    }
+    const code = genCode();
 
-    if (pool) {
-      await ensureInviteTable();
-      // Idempotent seed
-      await pool.query(
-        `INSERT INTO ff_invite (identifier_type, identifier_value)
-         VALUES ($1,$2)
-         ON CONFLICT (identifier_type, identifier_value)
-         DO UPDATE SET status='seeded'`,
-        [norm.type, norm.value]
-      );
-    }
+    // metadata from headers / body
+    const source   = (utm_source   || req.query.utm_source   || null) ?? null;
+    const medium   = (utm_medium   || req.query.utm_medium   || null) ?? null;
+    const campaign = (utm_campaign || req.query.utm_campaign || null) ?? null;
 
-    // Cross-site cookie on auth domain (onrender)
+    const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
+    const referer  = req.get('referer') || null;
+    const ua       = req.get('user-agent') || null;
+    const iphash   = hashIp(req.ip);
+    const loc      = locale || firstLang(req.get('accept-language'));
+    const timezone = tz || null;
+
+    // Insert a NEW invite row (no migrations, no unique constraint assumptions)
+    const result = await pool.query(
+      `
+      INSERT INTO ff_invite
+        (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
+         user_agent, ip_hash, locale, tz, first_identifier)
+      VALUES
+        ($1, NOW(), $2, $3, $4, $5, $6,
+         $7, $8, $9, $10, $11)
+      RETURNING invite_id
+      `,
+      [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm]
+    );
+
+    // Cross-site cookie lives on THIS host (Render). Frontend calls with credentials: 'include'
     res.cookie('ff-interacted', '1', {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',  // required for cross-site + credentials
+      sameSite: 'none',
       path: '/',
       maxAge: 365*24*60*60*1000,
     });
 
-    // (Optional) send code; don't crash in dev
+    // TODO: send the code via email/SMS based on idNorm shape (non-fatal if provider unset)
     try {
-      // await sendEmailOrSms(norm.type, norm.value)
+      // if (EMAIL_RE.test(idNorm)) await sendEmail(idNorm, code);
+      // else if (idNorm.startsWith('+')) await sendSms(idNorm, code);
     } catch (e) {
-      console.warn('sendCode failed:', e?.message);
+      console.warn('send code failed:', e?.message);
     }
 
-    return res.status(200).json({ ok:true });
+    return res.status(200).json({ ok:true, invite_id: result.rows[0].invite_id });
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok:false, error:'server_error' });
