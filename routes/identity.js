@@ -1,79 +1,61 @@
-const express = require('express');
-const router = express.Router();
-const { query } = require('../src/db');
-const { makeCode, ensureInteracted } = require('./identity');
+// routes/identity.js
+// Helpers for FF identity cookie & codes (CommonJS)
 
-router.post('/request-code', async (req, res) => {
-  try {
-    const { code } = ensureInteracted(req, res);
-    const identifier = String(req.body?.identifier || '').trim();
-    const url = req.protocol + '://' + req.get('host') + req.originalUrl;
-    const ua = req.get('user-agent') || '';
+const COOKIE_NAME = 'ff-interacted';
+const HEADER_NAME = 'x-ff-id';
+const CODE_RE = /^[A-Z0-9]{8}$/;
 
-    // seed invite if missing
-    await query(`
-      INSERT INTO ff_invite (interacted_code, first_identifier, landing_url, user_agent)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (interacted_code) DO NOTHING
-    `, [code, identifier || null, url, ua]);
+// Generate 8-char A–Z0–9 code (crypto-safe)
+function makeCode(len = 8) {
+  const CH = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const { randomBytes } = require('crypto');
+  const buf = randomBytes(len);
+  let out = '';
+  for (let i = 0; i < len; i++) out += CH[buf[i] % CH.length];
+  return out;
+}
 
-    // set login_code on ff_member
-    const loginCode = makeCode(8);
-    await query(`
-      INSERT INTO ff_member (interacted_code, login_code, login_code_expires, last_event_type, last_seen_at)
-      VALUES ($1, $2, now() + interval '15 minutes', 'id.entered', now())
-      ON CONFLICT (interacted_code) DO UPDATE SET
-        login_code = EXCLUDED.login_code,
-        login_code_expires = EXCLUDED.login_code_expires,
-        last_event_type = 'id.entered',
-        last_seen_at = now()
-    `, [code, loginCode]);
+// Compute cookie options based on env + request
+function cookieOpts(req) {
+  const secure =
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https' ||
+    process.env.NODE_ENV === 'production';
 
-    // TODO: dispatch email/SMS with loginCode
-    res.json({ ok: true, sent: true });
-  } catch (e) {
-    console.error('[identity/request-code]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+  // Optional: set a parent domain for subdomain sharing
+  const domain = process.env.FF_COOKIE_DOMAIN || undefined; // e.g. ".fortifiedfantasy.com"
+
+  return {
+    httpOnly: false,        // readable by frontend (you want the browser to send it with uploads/forms)
+    sameSite: 'Lax',
+    secure,
+    domain,
+    path: '/',
+    maxAge: 1000 * 60 * 60 * 24 * 365 * 2, // 2 years
+  };
+}
+
+// Core helper used by your routes: ensures the cookie exists/valid
+function ensureInteracted(req, res) {
+  const hdr = (req.get(HEADER_NAME) || '').trim().toUpperCase();
+  const ck  = (req.cookies?.[COOKIE_NAME] || '').trim().toUpperCase();
+
+  // Prefer a valid cookie
+  if (ck && CODE_RE.test(ck)) {
+    // If a (different) valid header shows up, ignore it; the cookie is our source of truth.
+    return { code: ck, source: 'cookie' };
   }
-});
 
-router.post('/verify', async (req, res) => {
-  try {
-    const { code } = ensureInteracted(req, res);
-    const submitted = String(req.body?.code || '').trim();
-
-    // validate login code
-    const m = await query(`SELECT member_id, login_code, login_code_expires FROM ff_member WHERE interacted_code=$1`, [code]);
-    const row = m.rows[0];
-    if (!row || row.login_code !== submitted || (row.login_code_expires && new Date(row.login_code_expires) < new Date())) {
-      return res.status(400).json({ ok: false, error: 'invalid_or_expired' });
-    }
-
-    // stamp verified + link invite -> member + joined_at
-    const link = await query(`
-      WITH upd_member AS (
-        UPDATE ff_member
-        SET auth_verified_at = now(), login_code = NULL, last_event_type = 'join.verify', last_seen_at = now()
-        WHERE interacted_code = $1
-        RETURNING member_id
-      )
-      UPDATE ff_invite i
-      SET member_id = u.member_id,
-          joined_at = COALESCE(i.joined_at, now())
-      FROM upd_member u
-      WHERE i.interacted_code = $1
-      RETURNING u.member_id, i.joined_at
-    `, [code]);
-
-    // event
-    await query(`INSERT INTO ff_event (interacted_code, member_id, type) VALUES ($1, $2, 'verify.click')`,
-      [code, link.rows[0]?.member_id || row.member_id]);
-
-    res.json({ ok: true, memberId: link.rows[0]?.member_id || row.member_id });
-  } catch (e) {
-    console.error('[identity/verify]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+  // If no/invalid cookie, but a valid header exists, adopt it and set cookie
+  if (hdr && CODE_RE.test(hdr)) {
+    res.cookie(COOKIE_NAME, hdr, cookieOpts(req));
+    return { code: hdr, source: 'header' };
   }
-});
 
-module.exports = router;
+  // Otherwise generate a new code and set cookie
+  const fresh = makeCode(8);
+  res.cookie(COOKIE_NAME, fresh, cookieOpts(req));
+  return { code: fresh, source: 'generated' };
+}
+
+module.exports = { makeCode, ensureInteracted, COOKIE_NAME, HEADER_NAME, CODE_RE };

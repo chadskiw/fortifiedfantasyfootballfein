@@ -53,6 +53,12 @@ app.use('/api/identity', identityRouter);    // POST /api/identity/request-code,
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
 app.use('/api/auth', require(authRouter));
+
+// server.js
+const path = require('path');
+const express = require('express');
+
+
             // same-origin cookie endpoints + meta upsert
 app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 // If/when you restore other platforms aggregate router:

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../src/db');
-const { putThumbToR2 } = require('./r2');
+const { putThumbToR2 } = require('../middleware/r2');
 const { ensureInteracted } = require('./identity');
 
 // raw body for image uploads
