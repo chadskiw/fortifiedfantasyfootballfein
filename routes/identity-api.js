@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
 
-/* ---------- helpers ---------- */
+/* ---------- validators ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
 
@@ -13,23 +13,20 @@ function normalizeIdentifier(raw) {
   if (EMAIL_RE.test(v)) return { type: 'email', value: v.toLowerCase() };
   if (PHONE_RE.test(v)) {
     const digits = v.replace(/[^\d]/g, '');
-    const e164 = digits.length === 11 && digits.startsWith('1') ? `+${digits}` : `+${digits}`;
-    return { type: 'phone', value: e164 };
+    return { type: 'phone', value: digits.startsWith('1') && digits.length === 11 ? `+${digits}` : `+${digits}` };
   }
   return { type: 'username', value: v };
 }
 
-/* ---------- optional DB (guarded) ---------- */
+/* ---------- db (optional but supported) ---------- */
 let pool = null;
-const wantDb = !!process.env.DATABASE_URL && process.env.ID_INVITES_DB !== '0';
-if (wantDb) {
+if (process.env.DATABASE_URL && process.env.ID_INVITES_DB !== '0') {
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
   });
 }
 
-/* Ensure table exists (optional) */
 async function ensureInviteTable() {
   if (!pool) return;
   await pool.query(`
@@ -41,15 +38,19 @@ async function ensureInviteTable() {
       status TEXT NOT NULL DEFAULT 'seeded'
     );
   `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS ff_invite_ident_uq
+    ON ff_invite(identifier_type, identifier_value);
+  `);
 }
 
-/* ---------- CORS preflight for this router ---------- */
-router.options('*', (req, res) => {
-  // your global corsMiddleware also runs, but this makes OPTIONS explicit here
+/* ---------- CORS preflight (your global middleware also handles it) ---------- */
+router.options('/request-code', (req, res) => {
   res.set({
-    'Access-Control-Allow-Origin': 'https://fortifiedfantasy.com',
+    'Access-Control-Allow-Origin': req.headers.origin || 'https://fortifiedfantasy.com',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Allow-Headers': 'content-type',
+    'Access-Control-Allow-Methods': 'POST,OPTIONS',
     'Vary': 'Origin',
   });
   res.sendStatus(204);
@@ -72,28 +73,30 @@ router.post('/request-code', async (req, res) => {
       return res.status(400).json({ ok:false, error:'bad_request', detail:'invalid identifier' });
     }
 
-    // Seed invite if DB enabled
     if (pool) {
       await ensureInviteTable();
+      // Idempotent seed
       await pool.query(
-        `INSERT INTO ff_invite (identifier_type, identifier_value) VALUES ($1,$2)`,
+        `INSERT INTO ff_invite (identifier_type, identifier_value)
+         VALUES ($1,$2)
+         ON CONFLICT (identifier_type, identifier_value)
+         DO UPDATE SET status='seeded'`,
         [norm.type, norm.value]
       );
     }
 
-    // Set cross-site cookie on *this* host (onrender.com)
-    // (This cookie will NOT be sent to fortifiedfantasy.com; it lives on the auth service.)
+    // Cross-site cookie on auth domain (onrender)
     res.cookie('ff-interacted', '1', {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',   // required for cross-site fetch with credentials
+      sameSite: 'none',  // required for cross-site + credentials
       path: '/',
-      maxAge: 365*24*60*60*1000
+      maxAge: 365*24*60*60*1000,
     });
 
-    // (Optional) Attempt to dispatch a code; keep non-fatal in dev
+    // (Optional) send code; don't crash in dev
     try {
-      // await sendEmailOrSms(norm) // implement later
+      // await sendEmailOrSms(norm.type, norm.value)
     } catch (e) {
       console.warn('sendCode failed:', e?.message);
     }
@@ -101,16 +104,6 @@ router.post('/request-code', async (req, res) => {
     return res.status(200).json({ ok:true });
   } catch (err) {
     console.error('identity.request-code error:', err);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-/* ---------- (optional) POST /api/identity/verify-code ---------- */
-router.post('/verify-code', async (req, res) => {
-  try {
-    // stub so frontend won’t 404 if you add it later
-    return res.status(200).json({ ok:true, verified:false });
-  } catch (err) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
