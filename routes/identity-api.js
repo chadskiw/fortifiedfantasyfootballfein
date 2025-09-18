@@ -58,6 +58,7 @@ router.options('/request-code', (req, res) => {
 });
 
 /* ---------- POST /api/identity/request-code ---------- */
+// routes/identity-api.js  (excerpt)
 router.post('/request-code', async (req, res) => {
   try {
     if (!req.is('application/json')) {
@@ -70,9 +71,9 @@ router.post('/request-code', async (req, res) => {
       return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
     }
 
-const code = genInviteCode(8);
+    const code = genInviteCode(8); // e.g. X9K2F7QZ
 
-    // metadata from headers / body
+    // metadata
     const source   = (utm_source   || req.query.utm_source   || null) ?? null;
     const medium   = (utm_medium   || req.query.utm_medium   || null) ?? null;
     const campaign = (utm_campaign || req.query.utm_campaign || null) ?? null;
@@ -80,12 +81,12 @@ const code = genInviteCode(8);
     const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
     const referer  = req.get('referer') || null;
     const ua       = req.get('user-agent') || null;
-    const iphash   = hashIp(req.ip);
+    const iphash   = hashIp(req.headers['cf-connecting-ip'] || req.ip);
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    // Insert a NEW invite row (no migrations, no unique constraint assumptions)
-    const result = await pool.query(
+    // 1) INSERT first
+    const insert = await pool.query(
       `
       INSERT INTO ff_invite
         (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
@@ -98,30 +99,30 @@ const code = genInviteCode(8);
       [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm]
     );
 
-    // Cross-site cookie lives on THIS host (Render). Frontend calls with credentials: 'include'
- // set cookie TO THE CODE (not "1")
-const cookieVal = [
-  `ff-interacted=${encodeURIComponent(code)}`,
-  'Path=/', 'Secure', 'HttpOnly',
-  'SameSite=None',   // required for cross-site
-  'Partitioned',     // <-- CHIPS
-  'Max-Age=31536000'
-].join('; ');
+    const inviteId = insert.rows[0].invite_id;
 
-res.setHeader('Set-Cookie', cookieVal);
+    // 2) Tag source with ffint-CODE (return address)
+    await pool.query(
+      `UPDATE ff_invite
+         SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
+       WHERE invite_id = $2`,
+      [code, inviteId]
+    );
 
+    // 3) Build redirect URL for your signup page
+    // swap base if you want to use your CF Pages preview domain while testing
+    const base = 'https://fortifiedfantasy.com';
+    // const base = 'https://85194fdc.fortifiedfantasyfootball.pages.dev';
+    const signupUrl = `${base}/signup?source=${encodeURIComponent('ffint-' + code)}`;
 
-// (optional) also return the code in JSON if the frontend needs to display/use it
+    console.log('[request-code] invite_id=%s code=%s id=%s', inviteId, code, idNorm);
 
-    // TODO: send the code via email/SMS based on idNorm shape (non-fatal if provider unset)
-    try {
-      // if (EMAIL_RE.test(idNorm)) await sendEmail(idNorm, code);
-      // else if (idNorm.startsWith('+')) await sendSms(idNorm, code);
-    } catch (e) {
-      console.warn('send code failed:', e?.message);
-    }
-
-return res.status(200).json({ ok: true, invite_id: result.rows[0].invite_id, interacted_code: code });
+    return res.status(200).json({
+      ok: true,
+      invite_id: inviteId,
+      interacted_code: code,
+      signup_url: signupUrl
+    });
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok:false, error:'server_error' });
