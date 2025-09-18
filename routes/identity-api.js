@@ -100,13 +100,16 @@ const code = genInviteCode(8);
 
     // Cross-site cookie lives on THIS host (Render). Frontend calls with credentials: 'include'
  // set cookie TO THE CODE (not "1")
-res.cookie('ff-interacted', code, {
-  httpOnly: true,        // keep true if only the server needs it
-  secure: true,
-  sameSite: 'none',      // required for cross-site requests with credentials
-  path: '/',
-  maxAge: 365*24*60*60*1000,
-});
+const cookieVal = [
+  `ff-interacted=${encodeURIComponent(code)}`,
+  'Path=/', 'Secure', 'HttpOnly',
+  'SameSite=None',   // required for cross-site
+  'Partitioned',     // <-- CHIPS
+  'Max-Age=31536000'
+].join('; ');
+
+res.setHeader('Set-Cookie', cookieVal);
+
 
 // (optional) also return the code in JSON if the frontend needs to display/use it
 
