@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { query } = require('../src/lib/db');
-const { putThumbToR2 } = require('../src/lib/r2');
-const { ensureInteracted } = require('../src/lib/identity');
+const { query } = require('../src/db');
+const { putThumbToR2 } = require('./r2');
+const { ensureInteracted } = require('./identity');
 
 // raw body for image uploads
 router.post('/upsert', express.raw({ type: 'image/*', limit: '6mb' }), async (req, res) => {

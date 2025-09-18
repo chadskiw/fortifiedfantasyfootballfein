@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { query } = require('../src/lib/db');
-const { makeCode, ensureInteracted } = require('../src/lib/identity');
+const { query } = require('../src/db');
+const { makeCode, ensureInteracted } = require('./identity');
 
 router.post('/request-code', async (req, res) => {
   try {
