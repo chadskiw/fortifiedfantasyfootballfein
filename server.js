@@ -49,9 +49,8 @@ app.use(cookieParser());              // <- REQUIRED for /api/fein-auth to read 
 app.use(corsMiddleware);
 app.use(rateLimit);
 app.use('/api/image', imageUpsertRouter);    // POST /api/image/upsert  (binary image)
-// Request/verify login codes
-// app.use('/api/identity', identityRouter);// --- ✅ Mount API routers BEFORE any static or SPA fallback
-app.use('/api/identity', require('./routes/identity-proxy'));
+// Request/verify login codes  --- ✅ Mount BEFORE any static
+app.use('/api/identity', identityRouter);
 
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
