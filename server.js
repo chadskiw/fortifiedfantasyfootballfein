@@ -1,7 +1,7 @@
 // server.js
 require('dotenv').config();
 const express = require('express');
-app.use(require('express').json()); // <- REQUIRED for JSON bodies
+
 const morgan  = require('morgan');
 const path    = require('path');
 const imageUpsertRouter = require('./routes/image-upsert');
@@ -43,6 +43,7 @@ app.set('trust proxy', 1);
 // --- Parsers & infra middlewares
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
+
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());              // <- REQUIRED for /api/fein-auth to read cookies
 app.use(corsMiddleware);
