@@ -64,6 +64,22 @@ app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 // --- Static AFTER APIs (so /api/* never hits the static handler)
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
 // --- Quick-patch endpoints (bypass router wiring for now)
+
+// --- JSON 404 for API paths (optional, nicer DX)
+app.use('/api', (req, res, next) => {
+  if (res.headersSent) return next();
+  return res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
+});
+
+// --- JSON error handler (prevents HTML 'Error' pages)
+// keep this as the LAST middleware
+app.use((err, req, res, _next) => {
+  console.error('[unhandled]', err);
+  if (res.headersSent) return;
+  const status = err.status || 500;
+  res.status(status).json({ ok:false, error: status === 400 ? 'bad_request' : 'server_error' });
+});
+
 const { upsertFeinMeta, getFeinMetaByKey } = require('./src/db/feinMeta');
 
 function readCookiesHeader(header = '') {
