@@ -99,13 +99,16 @@ const code = genInviteCode(8);
     );
 
     // Cross-site cookie lives on THIS host (Render). Frontend calls with credentials: 'include'
-    res.cookie('ff-interacted', '1', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      path: '/',
-      maxAge: 365*24*60*60*1000,
-    });
+ // set cookie TO THE CODE (not "1")
+res.cookie('ff-interacted', code, {
+  httpOnly: true,        // keep true if only the server needs it
+  secure: true,
+  sameSite: 'none',      // required for cross-site requests with credentials
+  path: '/',
+  maxAge: 365*24*60*60*1000,
+});
+
+// (optional) also return the code in JSON if the frontend needs to display/use it
 
     // TODO: send the code via email/SMS based on idNorm shape (non-fatal if provider unset)
     try {
@@ -115,7 +118,7 @@ const code = genInviteCode(8);
       console.warn('send code failed:', e?.message);
     }
 
-    return res.status(200).json({ ok:true, invite_id: result.rows[0].invite_id });
+return res.status(200).json({ ok: true, invite_id: result.rows[0].invite_id, interacted_code: code });
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok:false, error:'server_error' });
