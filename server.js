@@ -3,8 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const morgan  = require('morgan');
 const path    = require('path');
-const imageUpsertRouter = require('./routes/image-upsert.js');
-const identityRouter    = require('./routes/identity.js');
+const imageUpsertRouter = require('./routes/image-upsert');
+const identityRouter    = require('./routes/identity');
 const cookieParser = require('cookie-parser');
 
 const { corsMiddleware } = require('./src/cors');
