@@ -1,6 +1,7 @@
 // server.js
 require('dotenv').config();
 const express = require('express');
+app.use(require('express').json()); // <- REQUIRED for JSON bodies
 const morgan  = require('morgan');
 const path    = require('path');
 const imageUpsertRouter = require('./routes/image-upsert');
