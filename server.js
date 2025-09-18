@@ -50,7 +50,9 @@ app.use(corsMiddleware);
 app.use(rateLimit);
 app.use('/api/image', imageUpsertRouter);    // POST /api/image/upsert  (binary image)
 // Request/verify login codes
-app.use('/api/identity', identityRouter);// --- ✅ Mount API routers BEFORE any static or SPA fallback
+// app.use('/api/identity', identityRouter);// --- ✅ Mount API routers BEFORE any static or SPA fallback
+app.use('/api/identity', require('./routes/identity-proxy'));
+
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
 app.use('/api/auth', authRouter);
