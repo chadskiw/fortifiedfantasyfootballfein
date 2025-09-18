@@ -22,10 +22,17 @@ function normalizeIdentifier(raw) {
   return v; // username or other identifier
 }
 
-function genCode() {
-  // 6-digit numeric (100000–999999)
-  return String(Math.floor(100000 + Math.random() * 900000));
+// Replace the old generator with this:
+function genInviteCode(len = 8) {
+  // Unambiguous set (no 0/O or 1/I)
+  const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < len; i++) {
+    out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
+  }
+  return out; // e.g. 'X9K2F7QZ'
 }
+
 
 function hashIp(ip) {
   const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
@@ -63,7 +70,7 @@ router.post('/request-code', async (req, res) => {
       return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
     }
 
-    const code = genCode();
+const code = genInviteCode(8);
 
     // metadata from headers / body
     const source   = (utm_source   || req.query.utm_source   || null) ?? null;
