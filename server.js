@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const morgan  = require('morgan');
 const path    = require('path');
+const imageUpsertRouter = require('./routes/image-upsert.js');
+const identityRouter    = require('./routes/identity.js');
 const cookieParser = require('cookie-parser');
 
 const { corsMiddleware } = require('./src/cors');
@@ -11,6 +13,19 @@ const platformRouter     = require('./src/routes/platforms');
 const espnRouter         = require('./routers/espnRouter');
 const feinAuthRouter     = require('./routes/fein-auth');
 const authRouter     = require('./routes/fein-auth');
+
+
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+});
+
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+  pool,
+};
 
 // (Optional) light gate so headers are present for ESPN platform routes only
 const requireEspnHeaders = (req, res, next) =>
@@ -31,7 +46,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());              // <- REQUIRED for /api/fein-auth to read cookies
 app.use(corsMiddleware);
 app.use(rateLimit);
-
+app.use('/api/image', imageUpsertRouter);    // POST /api/image/upsert  (binary image)
+// Request/verify login codes
+app.use('/api/identity', identityRouter);    // POST /api/identity/request-code, /verify
 // --- ✅ Mount API routers BEFORE any static or SPA fallback
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
