@@ -1,76 +1,117 @@
-// routes/identity-api.js (request-code)
+// routes/identity-api.js
 const express = require('express');
 const router = express.Router();
-const { query } = require('../src/db');
-const { makeCode, ensureInteracted } = require('./identity');
+const { Pool } = require('pg');
 
+/* ---------- helpers ---------- */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
+
+function normalizeIdentifier(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return { type: null, value: '' };
+  if (EMAIL_RE.test(v)) return { type: 'email', value: v.toLowerCase() };
+  if (PHONE_RE.test(v)) {
+    const digits = v.replace(/[^\d]/g, '');
+    const e164 = digits.length === 11 && digits.startsWith('1') ? `+${digits}` : `+${digits}`;
+    return { type: 'phone', value: e164 };
+  }
+  return { type: 'username', value: v };
+}
+
+/* ---------- optional DB (guarded) ---------- */
+let pool = null;
+const wantDb = !!process.env.DATABASE_URL && process.env.ID_INVITES_DB !== '0';
+if (wantDb) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+  });
+}
+
+/* Ensure table exists (optional) */
+async function ensureInviteTable() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ff_invite (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      identifier_type TEXT NOT NULL,
+      identifier_value TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'seeded'
+    );
+  `);
+}
+
+/* ---------- CORS preflight for this router ---------- */
+router.options('*', (req, res) => {
+  // your global corsMiddleware also runs, but this makes OPTIONS explicit here
+  res.set({
+    'Access-Control-Allow-Origin': 'https://fortifiedfantasy.com',
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Headers': 'content-type',
+    'Vary': 'Origin',
+  });
+  res.sendStatus(204);
+});
+
+/* ---------- POST /api/identity/request-code ---------- */
 router.post('/request-code', async (req, res) => {
   try {
-    const { code } = ensureInteracted(req, res);            // 8-char FFID
-    const identifier = String(req.body?.identifier || '').trim() || null;
-
-    const ua = req.get('user-agent') || '';
-    const ref = req.get('referer') || req.get('referrer') || null;
-    const host = req.get('host');
-    const page = req.query.page ? String(req.query.page) : '/';
-    const url  = `${req.protocol}://${host}${req.originalUrl}`;
-
-    // 1) (Non-blocking) seed ff_invite if present in your DB, ignore if not
-    try {
-      await query(`
-        INSERT INTO ff_invite (interacted_code, first_identifier, landing_url, user_agent)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (interacted_code) DO NOTHING
-      `, [code, identifier, url, ua]);
-    } catch (e) {
-      // Ignore if table doesn't exist or columns differ
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[identity/request-code] ff_invite insert skipped:', e.message);
-      }
+    if (!req.is('application/json')) {
+      return res.status(415).json({ ok:false, error:'unsupported_media_type' });
     }
 
-    // 2) Generate login code & upsert ff_member (match your schema)
-    const loginCode = makeCode(8);
+    const { identifier } = req.body || {};
+    if (!identifier || typeof identifier !== 'string') {
+      return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
+    }
 
-    await query(`
-      WITH upsert AS (
-        INSERT INTO ff_member (
-          interacted_code,
-          login_code, login_code_expires,
-          last_event_type, last_seen_at,
-          first_seen_at,
-          first_referrer, last_referrer,
-          first_page,     last_page,
-          user_agent
-        )
-        VALUES (
-          $1,
-          $2, now() + interval '15 minutes',
-          'id.entered', now(),
-          now(),
-          $3, $3,
-          $4, $4,
-          $5
-        )
-        ON CONFLICT (interacted_code) DO UPDATE SET
-          login_code         = EXCLUDED.login_code,
-          login_code_expires = EXCLUDED.login_code_expires,
-          last_event_type    = 'id.entered',
-          last_seen_at       = now(),
-          last_referrer      = COALESCE(EXCLUDED.last_referrer, ff_member.last_referrer),
-          last_page          = EXCLUDED.last_page,
-          user_agent         = EXCLUDED.user_agent
-        RETURNING member_id
-      )
-      INSERT INTO ff_event (interacted_code, member_id, type, page, user_agent)
-      SELECT $1, member_id, 'id.entered', $4, $5 FROM upsert;
-    `, [code, loginCode, ref, page, ua]);
+    const norm = normalizeIdentifier(identifier);
+    if (!norm.type) {
+      return res.status(400).json({ ok:false, error:'bad_request', detail:'invalid identifier' });
+    }
 
-    // TODO: send the loginCode via email/SMS to `identifier` (if you want)
-    return res.json({ ok: true, sent: true });
-  } catch (e) {
-    console.error('[identity/request-code]', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    // Seed invite if DB enabled
+    if (pool) {
+      await ensureInviteTable();
+      await pool.query(
+        `INSERT INTO ff_invite (identifier_type, identifier_value) VALUES ($1,$2)`,
+        [norm.type, norm.value]
+      );
+    }
+
+    // Set cross-site cookie on *this* host (onrender.com)
+    // (This cookie will NOT be sent to fortifiedfantasy.com; it lives on the auth service.)
+    res.cookie('ff-interacted', '1', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',   // required for cross-site fetch with credentials
+      path: '/',
+      maxAge: 365*24*60*60*1000
+    });
+
+    // (Optional) Attempt to dispatch a code; keep non-fatal in dev
+    try {
+      // await sendEmailOrSms(norm) // implement later
+    } catch (e) {
+      console.warn('sendCode failed:', e?.message);
+    }
+
+    return res.status(200).json({ ok:true });
+  } catch (err) {
+    console.error('identity.request-code error:', err);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+/* ---------- (optional) POST /api/identity/verify-code ---------- */
+router.post('/verify-code', async (req, res) => {
+  try {
+    // stub so frontend won’t 404 if you add it later
+    return res.status(200).json({ ok:true, verified:false });
+  } catch (err) {
+    return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
