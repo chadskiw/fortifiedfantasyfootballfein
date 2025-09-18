@@ -4,7 +4,7 @@ const express = require('express');
 const morgan  = require('morgan');
 const path    = require('path');
 const imageUpsertRouter = require('./routes/image-upsert');
-const identityRouter    = require('./routes/identity');
+const identityRouter    = require('./routes/identity-api');
 const cookieParser = require('cookie-parser');
 
 const { corsMiddleware } = require('./src/cors');
@@ -48,8 +48,7 @@ app.use(corsMiddleware);
 app.use(rateLimit);
 app.use('/api/image', imageUpsertRouter);    // POST /api/image/upsert  (binary image)
 // Request/verify login codes
-app.use('/api/identity', identityRouter);    // POST /api/identity/request-code, /verify
-// --- ✅ Mount API routers BEFORE any static or SPA fallback
+app.use('/api/identity', identityRouter);// --- ✅ Mount API routers BEFORE any static or SPA fallback
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
 app.use('/api/auth', authRouter);
