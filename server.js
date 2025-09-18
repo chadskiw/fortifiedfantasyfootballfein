@@ -52,8 +52,7 @@ app.use('/api/identity', identityRouter);    // POST /api/identity/request-code,
 // --- ✅ Mount API routers BEFORE any static or SPA fallback
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
-app.use('/api/auth', require(authRouter));
-
+app.use('/api/auth', authRouter);
 
             // same-origin cookie endpoints + meta upsert
 app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
