@@ -1,26 +1,24 @@
 // src/rateLimit.js
-const WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 15*60*1000);
-const MAX       = Number(process.env.RATE_LIMIT_MAX || 1200);
-const buckets = new Map(); // ip -> { count, resetAt }
+const rateLimit = require('express-rate-limit');
 
-function rateLimit(req, res, next) {
-  const ip  = req.headers['cf-connecting-ip'] || req.ip || req.connection?.remoteAddress || 'unknown';
-  const now = Date.now();
-
-  let b = buckets.get(ip);
-  if (!b || b.resetAt <= now) {
-    b = { count: 0, resetAt: now + WINDOW_MS };
-    buckets.set(ip, b);
+const limiter = rateLimit({
+  windowMs: 60 * 1000,      // 1 minute window
+  limit: 1200,              // 1200 req/min per IP
+  standardHeaders: true,    // X-RateLimit-*
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // With trust proxy enabled, req.ip is the client's IP.
+    // If you want to be extra-safe behind Cloudflare:
+    return req.headers['cf-connecting-ip'] || req.ip;
+  },
+  skip: (req) => {
+    // Don’t rate limit preflights
+    if (req.method === 'OPTIONS') return true;
+    // EITHER skip identity completely:
+    if (req.path.startsWith('/api/identity/')) return true;
+    // OR comment the line above and keep limits but higher for auth:
+    return false;
   }
-  b.count += 1;
-  res.setHeader('X-RateLimit-Limit', String(MAX));
-  res.setHeader('X-RateLimit-Remaining', String(Math.max(0, MAX - b.count)));
-  res.setHeader('X-RateLimit-Reset', String(Math.ceil(b.resetAt/1000)));
+});
 
-  if (b.count > MAX) {
-    return res.status(429).json({ ok:false, error:'Too many requests', resetAt:new Date(b.resetAt).toISOString() });
-  }
-  next();
-}
-
-module.exports = { rateLimit };
+module.exports = { rateLimit: limiter };
