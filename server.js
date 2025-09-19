@@ -394,6 +394,20 @@ app.get('/api/diag/egress', async (_req, res) => {
   }
 });
 
+// server.js
+app.get('/api/identity/status', async (_req, res) => {
+  // If you have a session-auth user, look them up; otherwise return false.
+  // For now we'll just reflect "verified" if either timestamp is set.
+  try {
+    // TODO: wire this to your session/user resolution if available
+    // const member = await getCurrentMember(_req); // <- your implementation
+    const member = null; // fallback: treat as unverified
+    const verified = !!(member?.email_verified_at || member?.phone_verified_at);
+    res.json({ ok:true, verified });
+  } catch {
+    res.json({ ok:true, verified:false });
+  }
+});
 
 // ---- Verification starter (email/SMS) — stubbed success so UI can proceed
 app.post('/api/verify/start', async (req, res) => {
@@ -457,10 +471,7 @@ function extractEspnCreds(req) {
   return false;
 }
 
-function requireEspnCreds(req, res, next) {
-  if (extractEspnCreds(req)) return next();
-  return res.status(401).json({ ok:false, error:'no_espn_creds' });
-}
+
 
 
 
