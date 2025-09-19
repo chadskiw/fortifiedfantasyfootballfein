@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse the pool created in server.js (avoids multiple connections)
+// Reuse the pool created in server.js (export { pool } from there)
 const { pool } = require('../server');
 
 /* ---------- validators / helpers ---------- */
@@ -22,7 +22,7 @@ function normalizeIdentifier(raw) {
 function genInviteCode(len = 8) {
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
-  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random()*ALPHABET.length)|0];
+  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
   return out;
 }
 
@@ -30,18 +30,18 @@ function hashIp(ip) {
   const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
   return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
 }
-function firstLang(h=''){ return (h.split(',')[0] || '').trim() || null; }
+function firstLang(h = '') { return (h.split(',')[0] || '').trim() || null; }
 
 /* ---------- CORS preflight ---------- */
 router.options('/request-code', (req, res) => {
   const origin = req.headers.origin;
   if (origin) {
     res.set('Access-Control-Allow-Origin', origin);
-    res.set('Vary','Origin');
-    res.set('Access-Control-Allow-Credentials','true');
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Credentials', 'true');
   }
-  res.set('Access-Control-Allow-Headers','content-type');
-  res.set('Access-Control-Allow-Methods','POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'content-type');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.sendStatus(204);
 });
 
@@ -49,13 +49,13 @@ router.options('/request-code', (req, res) => {
 router.post('/request-code', async (req, res) => {
   try {
     if (!req.is('application/json')) {
-      return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+      return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
     }
 
     const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
     const idNorm = normalizeIdentifier(identifier);
     if (!idNorm) {
-      return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
+      return res.status(400).json({ ok: false, error: 'bad_request', detail: 'identifier required' });
     }
 
     const kind =
@@ -71,13 +71,13 @@ router.post('/request-code', async (req, res) => {
     const referer  = req.get('referer') || null;
     const ua       = req.get('user-agent') || null;
 
-    // make sure your app is set('trust proxy', true) so req.ip is sane
+    // behind CF/Render
     const clientIp = req.headers['cf-connecting-ip'] || req.ip;
     const iphash   = hashIp(clientIp);
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    /* 1) INSERT invite (parameterized) */
+    // 1) INSERT invite (parameterized)
     const insertInviteSQL = `
       INSERT INTO ff_invite
         (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
@@ -98,7 +98,7 @@ router.post('/request-code', async (req, res) => {
       throw err;
     }
 
-    /* 2) Tag source with ffint-CODE (not critical if it fails) */
+    // 2) Tag source with ffint-CODE (non-fatal if it fails)
     try {
       await pool.query(
         `UPDATE ff_invite
@@ -110,9 +110,7 @@ router.post('/request-code', async (req, res) => {
       console.warn('ff_invite source tag warn:', err.message);
     }
 
-    /* 3) Opportunistic member seed (parameterized, no string VALUES)
-          This assumes you added color_hex (default '#FFFFFF').
-          If you don’t have unique constraints, ON CONFLICT DO NOTHING still works. */
+    // 3) Opportunistic member seed (parameterized; NOW() everywhere)
     try {
       let memberSQL, memberVals;
 
@@ -125,6 +123,7 @@ router.post('/request-code', async (req, res) => {
           ON CONFLICT DO NOTHING
         `;
         memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
+
       } else if (kind === 'phone') {
         memberSQL = `
           INSERT INTO ff_member
@@ -134,6 +133,7 @@ router.post('/request-code', async (req, res) => {
           ON CONFLICT DO NOTHING
         `;
         memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
+
       } else {
         memberSQL = `
           INSERT INTO ff_member
@@ -151,7 +151,7 @@ router.post('/request-code', async (req, res) => {
       // non-fatal
     }
 
-    /* 4) Build signup URL with prefill params */
+    // 4) Build signup URL with prefill params
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
     const params = new URLSearchParams({ source: `ffint-${code}` });
     if (kind === 'email')  params.set('email',  idNorm);
@@ -159,7 +159,7 @@ router.post('/request-code', async (req, res) => {
     if (kind === 'handle') params.set('handle', idNorm);
     const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    /* 5) Light prefill cookie for the frontend (optional) */
+    // 5) Optional prefill cookie for frontend
     try {
       const pre = {
         firstIdentifier: idNorm,
@@ -173,14 +173,18 @@ router.post('/request-code', async (req, res) => {
         sameSite: 'Lax',
         secure: !!req.secure,
         path: '/',
-        maxAge: 7*24*60*60*1000
+        maxAge: 7 * 24 * 60 * 60 * 1000
       });
     } catch {}
 
-    /* 6) Interaction marker cookie (your original) */
+    // 6) Interaction marker cookie (httpOnly)
     try {
       res.cookie('ff-interacted', '1', {
-        httpOnly:true, secure:true, sameSite:'none', path:'/', maxAge:31536000000
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        path: '/',
+        maxAge: 31536000000
       });
     } catch {}
 
@@ -194,8 +198,8 @@ router.post('/request-code', async (req, res) => {
   } catch (e) {
     console.error('identity.request-code error:', e.message, e.detail || '');
     return res.status(500).json({
-      ok:false,
-      error:'server_error',
+      ok: false,
+      error: 'server_error',
       code: e.code || null,
       detail: e.detail || null,
       message: e.message || null
