@@ -3,8 +3,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse the pool created in server.js (export { pool } from there)
-const { pool } = require('../server');
+// Reuse the pool created in server.js (avoids multiple connections)
+const { pool } = require('../db');
 
 /* ---------- validators / helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
@@ -30,7 +30,9 @@ function hashIp(ip) {
   const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
   return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
 }
-function firstLang(h = '') { return (h.split(',')[0] || '').trim() || null; }
+function firstLang(h = '') {
+  return (h.split(',')[0] || '').trim() || null;
+}
 
 /* ---------- CORS preflight ---------- */
 router.options('/request-code', (req, res) => {
@@ -71,13 +73,13 @@ router.post('/request-code', async (req, res) => {
     const referer  = req.get('referer') || null;
     const ua       = req.get('user-agent') || null;
 
-    // behind CF/Render
+    // make sure your app is set('trust proxy', true) so req.ip is sane
     const clientIp = req.headers['cf-connecting-ip'] || req.ip;
     const iphash   = hashIp(clientIp);
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    // 1) INSERT invite (parameterized)
+    /* 1) INSERT invite (parameterized) */
     const insertInviteSQL = `
       INSERT INTO ff_invite
         (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
@@ -98,7 +100,7 @@ router.post('/request-code', async (req, res) => {
       throw err;
     }
 
-    // 2) Tag source with ffint-CODE (non-fatal if it fails)
+    /* 2) Tag source with ffint-CODE (not critical if it fails) */
     try {
       await pool.query(
         `UPDATE ff_invite
@@ -110,9 +112,10 @@ router.post('/request-code', async (req, res) => {
       console.warn('ff_invite source tag warn:', err.message);
     }
 
-    // 3) Opportunistic member seed (parameterized; NOW() everywhere)
+    /* 3) Opportunistic member seed (parameterized) */
     try {
-      let memberSQL, memberVals;
+      let memberSQL = '';
+      let memberVals = [];
 
       if (kind === 'email') {
         memberSQL = `
@@ -123,7 +126,6 @@ router.post('/request-code', async (req, res) => {
           ON CONFLICT DO NOTHING
         `;
         memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
-
       } else if (kind === 'phone') {
         memberSQL = `
           INSERT INTO ff_member
@@ -133,8 +135,7 @@ router.post('/request-code', async (req, res) => {
           ON CONFLICT DO NOTHING
         `;
         memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
-
-      } else {
+      } else { // handle
         memberSQL = `
           INSERT INTO ff_member
             (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, username)
@@ -151,7 +152,7 @@ router.post('/request-code', async (req, res) => {
       // non-fatal
     }
 
-    // 4) Build signup URL with prefill params
+    /* 4) Build signup URL with prefill params */
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
     const params = new URLSearchParams({ source: `ffint-${code}` });
     if (kind === 'email')  params.set('email',  idNorm);
@@ -159,7 +160,7 @@ router.post('/request-code', async (req, res) => {
     if (kind === 'handle') params.set('handle', idNorm);
     const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    // 5) Optional prefill cookie for frontend
+    /* 5) Light prefill cookie for the frontend (optional) */
     try {
       const pre = {
         firstIdentifier: idNorm,
@@ -177,14 +178,10 @@ router.post('/request-code', async (req, res) => {
       });
     } catch {}
 
-    // 6) Interaction marker cookie (httpOnly)
+    /* 6) Interaction marker cookie (your original) */
     try {
       res.cookie('ff-interacted', '1', {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        path: '/',
-        maxAge: 31536000000
+        httpOnly: true, secure: true, sameSite: 'none', path: '/', maxAge: 31536000000
       });
     } catch {}
 
