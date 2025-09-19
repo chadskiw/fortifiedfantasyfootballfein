@@ -4,7 +4,7 @@ const router = express.Router();
 const crypto = require('crypto');
 
 // Reuse the shared pool from server.js
-const { pool } = require('../server');
+const { pool } = require('../../server');
 
 /* ---------- validators / helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
