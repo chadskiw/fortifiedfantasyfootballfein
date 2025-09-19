@@ -14,6 +14,170 @@ const platformRouter     = require('./src/routes/platforms');
 const espnRouter         = require('./routers/espnRouter');
 const feinAuthRouter     = require('./routes/fein-auth');
 const authRouter     = require('./routes/fein-auth');
+// ----- QUICK PATCH: identity/profile/members endpoints used by signup flows -----
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+// If some clients still hit /api/espn-auth, route them to the same handler as /api/fein-auth
+app.use('/api/espn-auth', feinAuthRouter);
+
+// Tiny helpers (keep in server.js for now)
+const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
+const HANDLE_RE = /^[a-zA-Z0-9_.]{3,24}$/;
+
+const norm = (v='') => String(v).trim();
+const normEmail = (v='') => norm(v).toLowerCase();
+const normPhone = (v='') => '+' + norm(v).replace(/[^\d]/g, '');
+const isEmail = v => EMAIL_RE.test(norm(v));
+const isPhone = v => PHONE_RE.test(norm(v));
+const isHandle= v => HANDLE_RE.test(norm(v));
+
+// ---- Username availability (three aliases -> same impl)
+async function usernameTaken(username) {
+  const u = norm(username);
+  if (!isHandle(u)) return false; // treat bad shapes as "not taken"
+  const q = `SELECT 1 FROM ff_member WHERE LOWER(username)=LOWER($1) LIMIT 1`;
+  const r = await pool.query(q, [u]);
+  return r.rowCount > 0;
+}
+
+app.get('/api/profile/exists', async (req, res) => {
+  try {
+    const taken = await usernameTaken(req.query.username || '');
+    return res.json({ exists: taken });
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+app.get('/api/profile/check-username', async (req, res) => {
+  try {
+    const taken = await usernameTaken(req.query.u || '');
+    return res.json({ ok: true, taken });
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+app.get('/api/identity/handle/exists', async (req, res) => {
+  try {
+    const taken = await usernameTaken(req.query.u || '');
+    return res.json({ available: !taken });
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+
+// ---- Member find / lookup
+async function fetchMemberByEmailPhoneOrHandle({ email, phone, handle }) {
+  const params = [];
+  const conds = [];
+  if (email) { params.push(email);  conds.push(`LOWER(email)=LOWER($${params.length})`); }
+  if (phone) { params.push(phone);  conds.push(`phone_e164=$${params.length}`); }
+  if (handle){ params.push(handle); conds.push(`LOWER(username)=LOWER($${params.length})`); }
+  if (!conds.length) return null;
+  const r = await pool.query(
+    `SELECT member_id, username, email, phone_e164, color_hex
+       FROM ff_member
+      WHERE ${conds.join(' OR ')}
+      ORDER BY member_id ASC
+      LIMIT 1`,
+    params
+  );
+  return r.rows[0] || null;
+}
+
+app.get('/api/members/find', async (req, res) => {
+  try {
+    const email = req.query.email && isEmail(req.query.email) ? normEmail(req.query.email) : null;
+    const phone = req.query.phone && isPhone(req.query.phone) ? normPhone(req.query.phone) : null;
+    if (!email && !phone) return res.status(400).json({ ok:false, error:'bad_request' });
+    const member = await fetchMemberByEmailPhoneOrHandle({ email, phone });
+    return res.json({ member });
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+
+async function doLookup(identifier) {
+  const raw = norm(identifier);
+  if (isEmail(raw)) return await fetchMemberByEmailPhoneOrHandle({ email: normEmail(raw) });
+  if (isPhone(raw)) return await fetchMemberByEmailPhoneOrHandle({ phone: normPhone(raw) });
+  if (isHandle(raw)) return await fetchMemberByEmailPhoneOrHandle({ handle: raw });
+  return null;
+}
+
+app.get('/api/members/lookup', async (req, res) => {
+  try { return res.json({ member: await doLookup(req.query.identifier || '') }); }
+  catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+app.post('/api/members/lookup', async (req, res) => {
+  try { return res.json({ member: await doLookup(req.body?.identifier || '') }); }
+  catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+// identity aliases
+app.get('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
+app.post('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
+
+// ---- Upsert used by signup page (three aliases)
+async function upsertFromSignup({ handle, hex, primary_contact }) {
+  const handleVal = isHandle(handle) ? handle : null;
+  const emailVal  = isEmail(primary_contact) ? normEmail(primary_contact) : null;
+  const phoneVal  = (!emailVal && isPhone(primary_contact)) ? normPhone(primary_contact) : null;
+
+  // Try to locate an existing member by handle/email/phone
+  const existing = await fetchMemberByEmailPhoneOrHandle({
+    email: emailVal, phone: phoneVal, handle: handleVal
+  });
+
+  if (existing) {
+    await pool.query(
+      `UPDATE ff_member
+          SET username   = COALESCE($1, username),
+              email      = COALESCE($2, email),
+              phone_e164 = COALESCE($3, phone_e164),
+              color_hex  = COALESCE($4, color_hex),
+              last_seen_at = NOW()
+        WHERE member_id = $5`,
+      [handleVal, emailVal, phoneVal, hex || null, existing.member_id]
+    );
+    return { ok: true, member_id: existing.member_id, updated: true };
+  }
+
+// INSERT (use column default only when hex is missing)
+let r;
+if (hex) {
+  r = await pool.query(
+    `INSERT INTO ff_member (username, email, phone_e164, color_hex, first_seen_at, last_seen_at)
+     VALUES ($1,$2,$3,$4,NOW(),NOW())
+     RETURNING member_id`,
+    [handleVal, emailVal, phoneVal, hex]
+  );
+} else {
+  r = await pool.query(
+    `INSERT INTO ff_member (username, email, phone_e164, first_seen_at, last_seen_at)
+     VALUES ($1,$2,$3,NOW(),NOW())
+     RETURNING member_id`,
+    [handleVal, emailVal, phoneVal]
+  );
+}
+return { ok: true, member_id: r.rows[0].member_id, created: true };
+}
+
+async function handleSignupUpsert(req, res) {
+  try {
+    if (!req.is('application/json')) return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+    const { handle, hex, primary_contact } = req.body || {};
+    if (!handle && !primary_contact) return res.status(400).json({ ok:false, error:'bad_request' });
+    const result = await upsertFromSignup({ handle, hex, primary_contact });
+    return res.json(result);
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+}
+
+app.post('/api/members/upsert', handleSignupUpsert);
+app.post('/api/profile/update', handleSignupUpsert);
+app.post('/api/identity/signup', handleSignupUpsert);
+
+// ---- Verification starter (email/SMS) — stubbed success so UI can proceed
+app.post('/api/verify/start', async (req, res) => {
+  try {
+    // In production, enqueue email/SMS here; for now just 200 OK
+    return res.json({ ok: true, sent: true });
+  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+});
+
+// ----- END QUICK PATCH -----
 
 
 const { Pool } = require('pg');
@@ -36,9 +200,7 @@ const requireEspnHeaders = (req, res, next) =>
     ? res.status(401).json({ ok:false, error:'Missing x-espn-swid or x-espn-s2' })
     : next();
 
-const app = express();
-app.disable('x-powered-by');
-app.set('trust proxy', 1);
+
 
 // If you’re behind a proxy/Cloudflare/Heroku/etc, enable trust proxy so secure cookies work
 // in server.js (once)
