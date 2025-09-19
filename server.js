@@ -20,6 +20,74 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 // If some clients still hit /api/espn-auth, route them to the same handler as /api/fein-auth
 app.use('/api/espn-auth', feinAuthRouter);
+const HEX_RE = /^#?[0-9a-f]{6}$/i;
+const normHex = (v) => {
+  if (!v) return null;
+  const s = String(v).trim();
+  if (!HEX_RE.test(s)) return null;
+  return s.startsWith('#') ? s.toUpperCase() : ('#' + s.toUpperCase());
+};
+const EFFECTIVE_WHITE = '#FFFFFF';
+async function fetchByContactsOnly({ email, phone }) {
+  const params = [], conds = [];
+  if (email) { params.push(email); conds.push(`LOWER(email)=LOWER($${params.length})`); }
+  if (phone) { params.push(phone); conds.push(`phone_e164=$${params.length}`); }
+  if (!conds.length) return null;
+  const r = await pool.query(`
+    SELECT member_id, username, email, phone_e164, color_hex
+    FROM ff_member
+    WHERE (${conds.join(' OR ')}) AND deleted_at IS NULL
+    ORDER BY member_id ASC
+    LIMIT 1
+  `, params);
+  return r.rows[0] || null;
+}
+
+async function fetchUsedColorsForHandle(handle) {
+  const r = await pool.query(`
+    SELECT COALESCE(color_hex, '${EFFECTIVE_WHITE}') AS hex
+    FROM ff_member
+    WHERE LOWER(username)=LOWER($1) AND deleted_at IS NULL
+  `, [handle]);
+  return new Set(r.rows.map(x => x.hex.toUpperCase()));
+}
+function sanitizePalette(pal) {
+  if (!Array.isArray(pal)) return [];
+  return pal
+    .map(normHex)
+    .filter(Boolean)
+    .map(x => x.toUpperCase());
+}
+
+function pickAvailableColor(requestedHex, usedSet, palette) {
+  // 1) if requested is free, use it
+  const req = (requestedHex || EFFECTIVE_WHITE).toUpperCase();
+  if (!usedSet.has(req)) return req;
+
+  // 2) else pick a random color from the palette that isn’t used
+  const pool = palette.filter(h => !usedSet.has(h));
+  if (pool.length) {
+    return pool[(Math.random() * pool.length) | 0];
+  }
+
+  // 3) none available
+  return null;
+}
+
+
+// Handle usage stats (no hard limits here)
+async function handleStats(username) {
+  const u = norm(username);
+  if (!isHandle(u)) return { count: 0, colors: [] };
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS count,
+            COALESCE(ARRAY_AGG(DISTINCT color_hex) FILTER (WHERE color_hex IS NOT NULL), '{}') AS colors
+       FROM ff_member
+      WHERE deleted_at IS NULL AND LOWER(username)=LOWER($1)`,
+    [u]
+  );
+  return r.rows[0] || { count: 0, colors: [] };
+}
 
 // Tiny helpers (keep in server.js for now)
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
@@ -44,22 +112,60 @@ async function usernameTaken(username) {
 
 app.get('/api/profile/exists', async (req, res) => {
   try {
-    const taken = await usernameTaken(req.query.username || '');
-    return res.json({ exists: taken });
-  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+    const u = req.query.username || req.query.u || '';
+    const hex = normHex(req.query.hex || '');
+    const limit = Number(req.query.limit);
+    const stats = await handleStats(u);
+
+    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase())
+                                    .includes(hex) : null;
+    const underLimit = Number.isFinite(limit) ? (stats.count < limit) : null;
+
+    return res.json({
+      ok: true,
+      count: stats.count,
+      colors: stats.colors,       // array of hex strings already in use for this handle
+      pairAvailable: (hex ? !pairTaken : null),
+      handleUnderLimit: underLimit
+    });
+  } catch { return res.status(500).json({ ok:false, error:'server_error' }); }
 });
 app.get('/api/profile/check-username', async (req, res) => {
   try {
-    const taken = await usernameTaken(req.query.u || '');
-    return res.json({ ok: true, taken });
-  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+    const u = req.query.u || req.query.username || '';
+    const hex = normHex(req.query.hex || '');
+    const limit = Number(req.query.limit);
+    const stats = await handleStats(u);
+    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes(hex) : null;
+
+    return res.json({
+      ok: true,
+      count: stats.count,
+      colors: stats.colors,
+      pairAvailable: (hex ? !pairTaken : null),
+      handleUnderLimit: Number.isFinite(limit) ? (stats.count < limit) : null
+    });
+  } catch { return res.status(500).json({ ok:false, error:'server_error' }); }
 });
 app.get('/api/identity/handle/exists', async (req, res) => {
   try {
-    const taken = await usernameTaken(req.query.u || '');
-    return res.json({ available: !taken });
-  } catch (e) { return res.status(500).json({ ok:false, error:'server_error' }); }
+    const u = req.query.u || req.query.username || '';
+    const hex = normHex(req.query.hex || '');
+    const limit = Number(req.query.limit);
+    const stats = await handleStats(u);
+    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes(hex) : null;
+
+    return res.json({
+      ok: true,
+      available: Number.isFinite(limit) ? (stats.count < limit) : null, // legacy shape
+      count: stats.count,
+      colors: stats.colors,
+      pairAvailable: (hex ? !pairTaken : null),
+      handleUnderLimit: Number.isFinite(limit) ? (stats.count < limit) : null
+    });
+  } catch { return res.status(500).json({ ok:false, error:'server_error' }); }
 });
+
 
 // ---- Member find / lookup
 async function fetchMemberByEmailPhoneOrHandle({ email, phone, handle }) {
@@ -111,49 +217,159 @@ app.get('/api/identity/member/lookup', (req, res, next) => app._router.handle(Ob
 app.post('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
 
 // ---- Upsert used by signup page (three aliases)
-async function upsertFromSignup({ handle, hex, primary_contact }) {
+async function fetchByHandleColor(username, colorHex) {
+  if (!isHandle(username)) return null;
+  const hex = normHex(colorHex);
+  if (!hex) return null;
+  const r = await pool.query(
+    `SELECT member_id, username, color_hex, email, phone_e164
+       FROM ff_member
+      WHERE deleted_at IS NULL
+        AND LOWER(username)=LOWER($1)
+        AND LOWER(color_hex)=LOWER($2)
+      LIMIT 1`,
+    [username, hex]
+  );
+  return r.rows[0] || null;
+}
+
+async function upsertFromSignupSmart({
+  handle,
+  hex,                   // optional requested hex
+  primary_contact,       // email or phone
+  palette,               // optional array of hex from client
+  max_per_handle = 10,   // client may override (e.g., 5 or 10)
+}) {
   const handleVal = isHandle(handle) ? handle : null;
   const emailVal  = isEmail(primary_contact) ? normEmail(primary_contact) : null;
   const phoneVal  = (!emailVal && isPhone(primary_contact)) ? normPhone(primary_contact) : null;
+  const requested = normHex(hex); // may be null -> treated as #FFFFFF later
+  const pal = sanitizePalette(palette);
 
-  // Try to locate an existing member by handle/email/phone
-  const existing = await fetchMemberByEmailPhoneOrHandle({
-    email: emailVal, phone: phoneVal, handle: handleVal
-  });
-
-  if (existing) {
-    await pool.query(
-      `UPDATE ff_member
-          SET username   = COALESCE($1, username),
-              email      = COALESCE($2, email),
-              phone_e164 = COALESCE($3, phone_e164),
-              color_hex  = COALESCE($4, color_hex),
-              last_seen_at = NOW()
-        WHERE member_id = $5`,
-      [handleVal, emailVal, phoneVal, hex || null, existing.member_id]
-    );
-    return { ok: true, member_id: existing.member_id, updated: true };
+  if (!handleVal && !emailVal && !phoneVal) {
+    return { ok:false, error:'bad_request' };
   }
 
-// INSERT (use column default only when hex is missing)
-let r;
-if (hex) {
-  r = await pool.query(
+  // 1) If we already know this user by contact, *update that member* (do not create duplicates).
+  if (emailVal || phoneVal) {
+    const existingByContact = await fetchByContactsOnly({ email: emailVal, phone: phoneVal });
+    if (existingByContact) {
+      const chosenHex = requested || existingByContact.color_hex || EFFECTIVE_WHITE;
+      await pool.query(
+        `UPDATE ff_member
+           SET username     = COALESCE($1, username),
+               color_hex    = COALESCE($2, color_hex),
+               last_seen_at = NOW()
+         WHERE member_id = $3`,
+        [handleVal, chosenHex, existingByContact.member_id]
+      );
+      return {
+        ok: true,
+        member_id: existingByContact.member_id,
+        created: false,
+        updated: true,
+        username: handleVal || existingByContact.username,
+        color_hex: chosenHex,
+        login_valid: true
+      };
+    }
+  }
+
+  // 2) New member path. We allow same handle with different color.
+  //    Enforce "max per handle" (client-driven). We count existing rows for that handle.
+  let handleCount = 0;
+  if (handleVal) {
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS c
+         FROM ff_member
+        WHERE LOWER(username)=LOWER($1) AND deleted_at IS NULL`,
+      [handleVal]
+    );
+    handleCount = r.rows[0].c || 0;
+  }
+
+  if (handleVal && handleCount >= max_per_handle) {
+    // We still *insert* (per your ask), but mark login invalid so the UI can gate
+    // and you can decide whether to purge/merge later.
+    const chosenHex = requested || EFFECTIVE_WHITE;
+    const ins = await pool.query(
+      `INSERT INTO ff_member (username, email, phone_e164, color_hex, first_seen_at, last_seen_at)
+       VALUES ($1,$2,$3,$4,NOW(),NOW())
+       RETURNING member_id, username, color_hex`,
+      [handleVal, emailVal, phoneVal, chosenHex]
+    );
+    const row = ins.rows[0];
+    return { ok:true, member_id: row.member_id, created:true, username: row.username, color_hex: row.color_hex, login_valid: false, reason:'handle_capacity' };
+  }
+
+  // 3) pick a color that isn't already used for this handle (NULL counts as #FFFFFF)
+  let finalHex = EFFECTIVE_WHITE;
+  if (handleVal) {
+    const used = await fetchUsedColorsForHandle(handleVal);
+    const pick = pickAvailableColor(requested, used, pal);
+    if (pick) {
+      finalHex = pick;
+    } else {
+      // No colors available (palette spacing exhausted) — insert anyway but return login_valid:false
+      finalHex = requested || EFFECTIVE_WHITE;
+      const ins = await pool.query(
+        `INSERT INTO ff_member (username, email, phone_e164, color_hex, first_seen_at, last_seen_at)
+         VALUES ($1,$2,$3,$4,NOW(),NOW())
+         RETURNING member_id, username, color_hex`,
+        [handleVal, emailVal, phoneVal, finalHex]
+      );
+      const row = ins.rows[0];
+      return { ok:true, member_id: row.member_id, created:true, username: row.username, color_hex: row.color_hex, login_valid:false, reason:'no_color_available' };
+    }
+  } else {
+    // no handle; just honor requested/default color
+    finalHex = requested || EFFECTIVE_WHITE;
+  }
+
+  // 4) Normal insert (color is free)
+  const r = await pool.query(
     `INSERT INTO ff_member (username, email, phone_e164, color_hex, first_seen_at, last_seen_at)
      VALUES ($1,$2,$3,$4,NOW(),NOW())
-     RETURNING member_id`,
-    [handleVal, emailVal, phoneVal, hex]
+     RETURNING member_id, username, color_hex`,
+    [handleVal, emailVal, phoneVal, finalHex]
   );
-} else {
-  r = await pool.query(
-    `INSERT INTO ff_member (username, email, phone_e164, first_seen_at, last_seen_at)
-     VALUES ($1,$2,$3,NOW(),NOW())
-     RETURNING member_id`,
-    [handleVal, emailVal, phoneVal]
-  );
+  const row = r.rows[0];
+  return { ok:true, member_id: row.member_id, created:true, username: row.username, color_hex: row.color_hex, login_valid:true };
 }
-return { ok: true, member_id: r.rows[0].member_id, created: true };
+
+
+async function handleSignupUpsert(req, res) {
+  try {
+    if (!req.is('application/json')) return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+
+    const {
+      handle,
+      hex,                 // optional single color request
+      primary_contact,     // email or phone
+      palette,             // optional array of hex strings from the frontend
+      max_per_handle,      // optional int (frontend controls, e.g. 5 or 10)
+    } = req.body || {};
+
+    if (!handle && !primary_contact) {
+      return res.status(400).json({ ok:false, error:'bad_request' });
+    }
+
+    const out = await upsertFromSignupSmart({
+      handle,
+      hex,
+      primary_contact,
+      palette,
+      max_per_handle: Number.isInteger(max_per_handle) ? Math.max(1, max_per_handle) : 10,
+    });
+
+    return res.status(out.ok ? 200 : 400).json(out);
+  } catch (e) {
+    console.error('[signup upsert]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
 }
+
+
 
 async function handleSignupUpsert(req, res) {
   try {
@@ -168,6 +384,7 @@ async function handleSignupUpsert(req, res) {
 app.post('/api/members/upsert', handleSignupUpsert);
 app.post('/api/profile/update', handleSignupUpsert);
 app.post('/api/identity/signup', handleSignupUpsert);
+
 
 // ---- Verification starter (email/SMS) — stubbed success so UI can proceed
 app.post('/api/verify/start', async (req, res) => {
