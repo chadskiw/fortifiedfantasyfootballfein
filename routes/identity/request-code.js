@@ -120,31 +120,41 @@ router.post('/request-code', async (req, res) => {
       if (kind === 'email') {
         memberSQL = `
           INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, email)
+            (interacted_code, first_seen_at, last_seen_at,
+             user_agent, ip_hash, locale, tz, color_hex, email)
           VALUES
-            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+            ($1, NOW(), NOW(),
+             $2, $3, $4, $5,
+             COALESCE($6, '#FFFFFF'), $7)
           ON CONFLICT DO NOTHING
         `;
-        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
+        memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
       } else if (kind === 'phone') {
         memberSQL = `
           INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, phone_e164)
+            (interacted_code, first_seen_at, last_seen_at,
+             user_agent, ip_hash, locale, tz, color_hex, phone_e164)
           VALUES
-            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+            ($1, NOW(), NOW(),
+             $2, $3, $4, $5,
+             COALESCE($6, '#FFFFFF'), $7)
           ON CONFLICT DO NOTHING
         `;
-        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
+        memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
       } else { // handle
         memberSQL = `
           INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, username)
+            (interacted_code, first_seen_at, last_seen_at,
+             user_agent, ip_hash, locale, tz, color_hex, username)
           VALUES
-            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+            ($1, NOW(), NOW(),
+             $2, $3, $4, $5,
+             COALESCE($6, '#FFFFFF'), $7)
           ON CONFLICT DO NOTHING
         `;
-        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
+        memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
       }
+
 
       await pool.query(memberSQL, memberVals);
     } catch (err) {
