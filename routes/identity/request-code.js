@@ -3,10 +3,10 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse the shared pool (export { pool } from server.js)
+// Reuse the pool created in server.js (avoids multiple connections)
 const { pool } = require('../server');
 
-/* ---------- helpers ---------- */
+/* ---------- validators / helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
 
@@ -18,11 +18,11 @@ function normalizeIdentifier(raw) {
   return v; // treat as handle/username
 }
 
-// unambiguous 8-char code (no 0/O or 1/I)
+// unambiguous 8-char invite code (no 0/O or 1/I)
 function genInviteCode(len = 8) {
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
-  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
+  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random()*ALPHABET.length)|0];
   return out;
 }
 
@@ -47,147 +47,159 @@ router.options('/request-code', (req, res) => {
 
 /* ---------- POST /api/identity/request-code ---------- */
 router.post('/request-code', async (req, res) => {
-  if (!req.is('application/json')) {
-    return res.status(415).json({ ok:false, error:'unsupported_media_type' });
-  }
-
-  const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
-  const idNorm = normalizeIdentifier(identifier);
-  if (!idNorm) return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
-
-  const kind =
-    EMAIL_RE.test(idNorm) ? 'email' :
-    PHONE_RE.test(idNorm) ? 'phone' : 'handle';
-
-  const code     = genInviteCode(8);
-  const source   = utm_source   ?? req.query.utm_source   ?? null;
-  const medium   = utm_medium   ?? req.query.utm_medium   ?? null;
-  const campaign = utm_campaign ?? req.query.utm_campaign ?? null;
-
-  const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
-  const referer  = req.get('referer') || null;
-  const ua       = req.get('user-agent') || null;
-  const clientIp = req.headers['cf-connecting-ip'] || req.ip; // set app.set('trust proxy', true)
-  const iphash   = hashIp(clientIp);
-  const loc      = locale || firstLang(req.get('accept-language'));
-  const timezone = tz || null;
-
-  const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    if (!req.is('application/json')) {
+      return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+    }
 
-    // 1) ff_invite insert
+    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
+    const idNorm = normalizeIdentifier(identifier);
+    if (!idNorm) {
+      return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
+    }
+
+    const kind =
+      EMAIL_RE.test(idNorm) ? 'email' :
+      PHONE_RE.test(idNorm) ? 'phone' : 'handle';
+
+    const code     = genInviteCode(8);
+    const source   = utm_source   ?? req.query.utm_source   ?? null;
+    const medium   = utm_medium   ?? req.query.utm_medium   ?? null;
+    const campaign = utm_campaign ?? req.query.utm_campaign ?? null;
+
+    const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
+    const referer  = req.get('referer') || null;
+    const ua       = req.get('user-agent') || null;
+
+    // make sure your app is set('trust proxy', true) so req.ip is sane
+    const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+    const iphash   = hashIp(clientIp);
+    const loc      = locale || firstLang(req.get('accept-language'));
+    const timezone = tz || null;
+
+    /* 1) INSERT invite (parameterized) */
+    const insertInviteSQL = `
+      INSERT INTO ff_invite
+        (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
+         user_agent, ip_hash, locale, tz, first_identifier)
+      VALUES
+        ($1, NOW(), $2, $3, $4, $5, $6,
+         $7, $8, $9, $10, $11)
+      RETURNING invite_id
+    `;
+    const inviteVals = [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm];
+
     let inviteId;
     try {
-      const r = await client.query(
-        `INSERT INTO ff_invite
-           (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
-            user_agent, ip_hash, locale, tz, first_identifier)
-         VALUES
-           ($1, NOW(), $2, $3, $4, $5, $6,
-            $7, $8, $9, $10, $11)
-         RETURNING invite_id`,
-        [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm]
-      );
-      inviteId = r.rows[0]?.invite_id;
+      const ins = await pool.query(insertInviteSQL, inviteVals);
+      inviteId = ins.rows[0]?.invite_id;
     } catch (err) {
-      console.error('[invite.insert] ERROR', { message: err.message, code: err.code, detail: err.detail });
+      console.error('ff_invite insert error:', err.message, err.detail || '');
       throw err;
     }
 
-    // 2) tag source "…:ffint-CODE" (non-fatal)
+    /* 2) Tag source with ffint-CODE (not critical if it fails) */
     try {
-      await client.query(
+      await pool.query(
         `UPDATE ff_invite
-           SET source = COALESCE(NULLIF(source,''), 'web') || ':ffint-' || $1
+           SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
          WHERE invite_id = $2`,
         [code, inviteId]
       );
     } catch (err) {
-      console.warn('[invite.tag] WARN', { message: err.message, code: err.code, detail: err.detail });
+      console.warn('ff_invite source tag warn:', err.message);
     }
 
-    // 3) opportunistic ff_member upsert in two simple steps:
-    // 3a) base insert (no dynamic columns)
+    /* 3) Opportunistic member seed (parameterized, no string VALUES)
+          This assumes you added color_hex (default '#FFFFFF').
+          If you don’t have unique constraints, ON CONFLICT DO NOTHING still works. */
     try {
-      await client.query(
-        `INSERT INTO ff_member
-           (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex)
-         VALUES
-           ($1, NOW(), NOW(), $2, $3, $4, $5, $6)
-         ON CONFLICT DO NOTHING`,
-        [code, ua || null, iphash, loc || null, timezone || null, '#FFFFFF']
-      );
-    } catch (err) {
-      console.warn('[member.insert] WARN', { message: err.message, code: err.code, detail: err.detail });
-    }
+      let memberSQL, memberVals;
 
-    // 3b) set the identifier column if we have one (only if empty)
-    try {
       if (kind === 'email') {
-        await client.query(
-          `UPDATE ff_member
-             SET email = $2
-           WHERE interacted_code = $1
-             AND (email IS NULL OR email = '')`,
-          [code, idNorm]
-        );
+        memberSQL = `
+          INSERT INTO ff_member
+            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, email)
+          VALUES
+            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+          ON CONFLICT DO NOTHING
+        `;
+        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
       } else if (kind === 'phone') {
-        await client.query(
-          `UPDATE ff_member
-             SET phone_e164 = $2
-           WHERE interacted_code = $1
-             AND (phone_e164 IS NULL OR phone_e164 = '')`,
-          [code, idNorm]
-        );
+        memberSQL = `
+          INSERT INTO ff_member
+            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, phone_e164)
+          VALUES
+            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+          ON CONFLICT DO NOTHING
+        `;
+        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
       } else {
-        await client.query(
-          `UPDATE ff_member
-             SET username = $2
-           WHERE interacted_code = $1
-             AND (username IS NULL OR username = '')`,
-          [code, idNorm]
-        );
+        memberSQL = `
+          INSERT INTO ff_member
+            (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex, username)
+          VALUES
+            ($1, NOW(), NOW(), $2, $3, $4, $5, $6, $7)
+          ON CONFLICT DO NOTHING
+        `;
+        memberVals = [code, ua, iphash, loc, timezone, '#FFFFFF', idNorm];
       }
+
+      await pool.query(memberSQL, memberVals);
     } catch (err) {
-      console.warn('[member.update.id] WARN', { message: err.message, code: err.code, detail: err.detail });
+      console.warn('ff_member insert warn:', err.message);
+      // non-fatal
     }
 
-    await client.query('COMMIT');
-
-    // 4) build signup URL
+    /* 4) Build signup URL with prefill params */
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
-    const qs = new URLSearchParams({ source: `ffint-${code}` });
-    if (kind === 'email')  qs.set('email',  idNorm);
-    if (kind === 'phone')  qs.set('phone',  idNorm);
-    if (kind === 'handle') qs.set('handle', idNorm);
-    const signup_url = `${siteBase}/signup?${qs.toString()}`;
+    const params = new URLSearchParams({ source: `ffint-${code}` });
+    if (kind === 'email')  params.set('email',  idNorm);
+    if (kind === 'phone')  params.set('phone',  idNorm);
+    if (kind === 'handle') params.set('handle', idNorm);
+    const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    // 5) cookies
+    /* 5) Light prefill cookie for the frontend (optional) */
     try {
-      res.cookie(
-        'ff.pre.signup',
-        encodeURIComponent(JSON.stringify({ firstIdentifier: idNorm, type: kind })),
-        { httpOnly: false, sameSite: 'Lax', secure: !!req.secure, path: '/', maxAge: 7*24*60*60*1000 }
-      );
-      res.cookie('ff-interacted', '1', {
-        httpOnly: true, secure: true, sameSite: 'none', path: '/', maxAge: 31536000000
+      const pre = {
+        firstIdentifier: idNorm,
+        type: kind,
+        pending: kind === 'email' ? { email: idNorm }
+               : kind === 'phone' ? { phone: idNorm }
+               : null
+      };
+      res.cookie('ff.pre.signup', encodeURIComponent(JSON.stringify(pre)), {
+        httpOnly: false,
+        sameSite: 'Lax',
+        secure: !!req.secure,
+        path: '/',
+        maxAge: 7*24*60*60*1000
       });
-    } catch (err) {
-      console.warn('[cookies] WARN', err.message);
-    }
+    } catch {}
 
-    return res.status(200).json({ ok:true, invite_id: inviteId, interacted_code: code, signup_url });
+    /* 6) Interaction marker cookie (your original) */
+    try {
+      res.cookie('ff-interacted', '1', {
+        httpOnly:true, secure:true, sameSite:'none', path:'/', maxAge:31536000000
+      });
+    } catch {}
+
+    return res.status(200).json({
+      ok: true,
+      invite_id: inviteId,
+      interacted_code: code,
+      signup_url: signupUrl
+    });
 
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('[identity.request-code] ERROR', { message: e.message, code: e.code, detail: e.detail });
+    console.error('identity.request-code error:', e.message, e.detail || '');
     return res.status(500).json({
-      ok:false, error:'server_error',
-      code: e.code || null, detail: e.detail || null, message: e.message || null
+      ok:false,
+      error:'server_error',
+      code: e.code || null,
+      detail: e.detail || null,
+      message: e.message || null
     });
-  } finally {
-    client.release();
   }
 });
 
