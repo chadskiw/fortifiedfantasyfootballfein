@@ -28,6 +28,8 @@ module.exports = {
   pool,
 };
 
+
+
 // (Optional) light gate so headers are present for ESPN platform routes only
 const requireEspnHeaders = (req, res, next) =>
   (!req.get('x-espn-swid') || !req.get('x-espn-s2'))
@@ -38,7 +40,8 @@ const app = express();
 app.disable('x-powered-by');
 
 // If you’re behind a proxy/Cloudflare/Heroku/etc, enable trust proxy so secure cookies work
-app.set('trust proxy', 1);
+// in server.js (once)
+app.set('trust proxy', true);
 
 // --- Parsers & infra middlewares
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
