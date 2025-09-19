@@ -3,8 +3,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse the pool created in server.js (avoids multiple connections)
-const { pool } = require('../db');
+// Reuse the shared pool from server.js
+const { pool } = require('../server');
 
 /* ---------- validators / helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
@@ -18,7 +18,7 @@ function normalizeIdentifier(raw) {
   return v; // treat as handle/username
 }
 
-// unambiguous 8-char invite code (no 0/O or 1/I)
+// Unambiguous 8-char invite code (no 0/O or 1/I)
 function genInviteCode(len = 8) {
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
@@ -33,6 +33,9 @@ function hashIp(ip) {
 function firstLang(h = '') {
   return (h.split(',')[0] || '').trim() || null;
 }
+function isHttps(req) {
+  return req.secure || req.headers['x-forwarded-proto'] === 'https';
+}
 
 /* ---------- CORS preflight ---------- */
 router.options('/request-code', (req, res) => {
@@ -42,7 +45,6 @@ router.options('/request-code', (req, res) => {
     res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Credentials', 'true');
   }
-  // include the headers your frontend actually uses
   res.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key');
   res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.sendStatus(204);
@@ -79,13 +81,13 @@ router.post('/request-code', async (req, res) => {
     const referer  = req.get('referer') || null;
     const ua       = req.get('user-agent') || null;
 
-    // make sure your app is set('trust proxy', true) so req.ip is sane
+    // trust proxy must be enabled in server.js
     const clientIp = req.headers['cf-connecting-ip'] || req.ip;
     const iphash   = hashIp(clientIp);
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    /* 1) INSERT invite (parameterized, identifiers quoted) */
+    /* 1) INSERT invite (identifiers quoted to avoid keyword collisions) */
     const insertInviteSQL =
       `INSERT INTO "ff_invite"
         ("interacted_code","invited_at","source","medium","campaign","landing_url","referrer",
@@ -95,30 +97,14 @@ router.post('/request-code', async (req, res) => {
        RETURNING "invite_id";`;
 
     const inviteVals = [
-      code,           // $1 interacted_code
-      source,         // $2 source
-      medium,         // $3 medium
-      campaign,       // $4 campaign
-      landing,        // $5 landing_url
-      referer,        // $6 referrer
-      ua,             // $7 user_agent
-      iphash,         // $8 ip_hash
-      loc,            // $9 locale
-      timezone,       // $10 tz
-      idNorm          // $11 first_identifier
+      code, source, medium, campaign, landing, referer,
+      ua, iphash, loc, timezone, idNorm
     ];
 
-    let inviteId;
-    try {
-      const ins = await pool.query(insertInviteSQL, inviteVals);
-      inviteId = ins.rows[0]?.invite_id;
-    } catch (err) {
-      // Log the *shape* of the statement to help debugging without dumping secrets
-      console.error('ff_invite insert error:', err.message, { hint: 'ff_invite insert failed' });
-      throw err;
-    }
+    const ins = await pool.query(insertInviteSQL, inviteVals);
+    const inviteId = ins.rows[0]?.invite_id;
 
-    /* 2) Tag source with ffint-CODE (not critical if it fails) */
+    /* 2) Tag source with ffint-CODE (best-effort) */
     try {
       await pool.query(
         `UPDATE "ff_invite"
@@ -130,7 +116,7 @@ router.post('/request-code', async (req, res) => {
       console.warn('ff_invite source tag warn:', err.message);
     }
 
-    /* 3) Opportunistic member seed (parameterized, identifiers quoted) */
+    /* 3) Opportunistic member seed (matches your ff_member schema) */
     try {
       let memberSQL = '';
       let memberVals = [];
@@ -157,7 +143,7 @@ router.post('/request-code', async (req, res) => {
            ON CONFLICT DO NOTHING;`;
         memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
 
-      } else { // handle/username
+      } else {
         memberSQL =
           `INSERT INTO "ff_member"
             ("interacted_code","first_seen_at","last_seen_at",
@@ -172,10 +158,9 @@ router.post('/request-code', async (req, res) => {
       await pool.query(memberSQL, memberVals);
     } catch (err) {
       console.warn('ff_member insert warn:', err.message);
-      // non-fatal
     }
 
-    /* 4) Build signup URL with prefill params */
+    /* 4) Build signup URL */
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
     const params = new URLSearchParams({ source: `ffint-${code}` });
     if (kind === 'email')  params.set('email',  idNorm);
@@ -183,7 +168,7 @@ router.post('/request-code', async (req, res) => {
     if (kind === 'handle') params.set('handle', idNorm);
     const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    /* 5) Light prefill cookie for the frontend (optional) */
+    /* 5) Prefill cookie (frontend helper) */
     try {
       const pre = {
         firstIdentifier: idNorm,
@@ -195,16 +180,21 @@ router.post('/request-code', async (req, res) => {
       res.cookie('ff.pre.signup', encodeURIComponent(JSON.stringify(pre)), {
         httpOnly: false,
         sameSite: 'Lax',
-        secure: !!req.secure,
+        secure: isHttps(req),
         path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000
       });
     } catch {}
 
-    /* 6) Interaction marker cookie (your original) */
+    /* 6) Interaction marker cookie (cross-site) */
     try {
+      // SameSite=None requires secure:true
       res.cookie('ff-interacted', '1', {
-        httpOnly: true, secure: true, sameSite: 'none', path: '/', maxAge: 31536000000
+        httpOnly: true,
+        sameSite: 'none',
+        secure: true,
+        path: '/',
+        maxAge: 31536000000
       });
     } catch {}
 

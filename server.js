@@ -38,11 +38,10 @@ const requireEspnHeaders = (req, res, next) =>
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
 // If you’re behind a proxy/Cloudflare/Heroku/etc, enable trust proxy so secure cookies work
 // in server.js (once)
-app.set('trust proxy', true);
-
 // --- Parsers & infra middlewares
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
@@ -54,7 +53,6 @@ app.use(rateLimit);
 app.use('/api/image', imageUpsertRouter);    // POST /api/image/upsert  (binary image)
 // Request/verify login codes  --- ✅ Mount BEFORE any static
 app.use('/api/identity', require('./routes/identity-api/request-code'));
-
 app.use('/api/fein-auth', feinAuthRouter);     
 // server.js
 app.use('/api/auth', authRouter);
