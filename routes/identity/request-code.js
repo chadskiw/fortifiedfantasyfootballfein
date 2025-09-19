@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse the pool created in server.js (avoids multiple connections)
+// Reuse pool from server.js
 const { pool } = require('../server');
 
 /* ---------- validators / helpers ---------- */
@@ -15,14 +15,15 @@ function normalizeIdentifier(raw) {
   if (!v) return '';
   if (EMAIL_RE.test(v)) return v.toLowerCase();
   if (PHONE_RE.test(v)) return '+' + v.replace(/[^\d]/g, '');
-  return v; // treat as handle/username
+  return v;
 }
 
-// unambiguous 8-char invite code (no 0/O or 1/I)
 function genInviteCode(len = 8) {
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
-  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random()*ALPHABET.length)|0];
+  for (let i = 0; i < len; i++) {
+    out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
+  }
   return out;
 }
 
@@ -30,18 +31,20 @@ function hashIp(ip) {
   const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
   return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
 }
-function firstLang(h=''){ return (h.split(',')[0] || '').trim() || null; }
+function firstLang(h = '') {
+  return (h.split(',')[0] || '').trim() || null;
+}
 
 /* ---------- CORS preflight ---------- */
 router.options('/request-code', (req, res) => {
   const origin = req.headers.origin;
   if (origin) {
     res.set('Access-Control-Allow-Origin', origin);
-    res.set('Vary','Origin');
-    res.set('Access-Control-Allow-Credentials','true');
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Credentials', 'true');
   }
-  res.set('Access-Control-Allow-Headers','content-type');
-  res.set('Access-Control-Allow-Methods','POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'content-type');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.sendStatus(204);
 });
 
@@ -49,35 +52,38 @@ router.options('/request-code', (req, res) => {
 router.post('/request-code', async (req, res) => {
   try {
     if (!req.is('application/json')) {
-      return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+      return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
     }
 
-    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
+    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } =
+      req.body || {};
     const idNorm = normalizeIdentifier(identifier);
     if (!idNorm) {
-      return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
+      return res
+        .status(400)
+        .json({ ok: false, error: 'bad_request', detail: 'identifier required' });
     }
 
-    // figure out kind for member insert + signup prefill
-    const kind =
-      EMAIL_RE.test(idNorm) ? 'email' :
-      PHONE_RE.test(idNorm) ? 'phone' : 'handle';
+    const kind = EMAIL_RE.test(idNorm)
+      ? 'email'
+      : PHONE_RE.test(idNorm)
+      ? 'phone'
+      : 'handle';
 
-    const code     = genInviteCode(8); // e.g. X9K2F7QZ
-    const source   = utm_source   ?? req.query.utm_source   ?? null;
-    const medium   = utm_medium   ?? req.query.utm_medium   ?? null;
+    const code = genInviteCode(8);
+    const source = utm_source ?? req.query.utm_source ?? null;
+    const medium = utm_medium ?? req.query.utm_medium ?? null;
     const campaign = utm_campaign ?? req.query.utm_campaign ?? null;
 
-    const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
-    const referer  = req.get('referer') || null;
-    const ua       = req.get('user-agent') || null;
-    // if you’re behind a proxy/CDN, prefer their header (and set app.set('trust proxy', true))
+    const landing = landing_url || req.body?.landingUrl || req.get('referer') || null;
+    const referer = req.get('referer') || null;
+    const ua = req.get('user-agent') || null;
     const clientIp = req.headers['cf-connecting-ip'] || req.ip;
-    const iphash   = hashIp(clientIp);
-    const loc      = locale || firstLang(req.get('accept-language'));
+    const iphash = hashIp(clientIp);
+    const loc = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    // 1) INSERT invite
+    /* ---------- Insert into ff_invite ---------- */
     let inviteId;
     try {
       const insert = await pool.query(
@@ -98,96 +104,92 @@ router.post('/request-code', async (req, res) => {
       throw err;
     }
 
-    // 2) Tag source with ffint-CODE (return address)
-    try {
-      await pool.query(
-        `UPDATE ff_invite
-           SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
-         WHERE invite_id = $2`,
-        [code, inviteId]
-      );
-    } catch (err) {
-      console.warn('ff_invite source tag warn:', err.message);
-      // non-fatal
-    }
+    // Tag source
+    await pool.query(
+      `UPDATE ff_invite
+         SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
+       WHERE invite_id = $2`,
+      [code, inviteId]
+    ).catch((err) => console.warn('ff_invite source tag warn:', err.message));
 
-    // 3) Opportunistic member row (safe defaults). If already present, ignore.
+    /* ---------- Opportunistic insert into ff_member ---------- */
     try {
-      // Build column list / values dynamically based on kind
-      const cols = ['interacted_code', 'first_seen_at', 'last_seen_at', 'user_agent', 'ip_hash', 'locale', 'tz', 'color_hex'];
+      const cols = [
+        'interacted_code',
+        'first_seen_at',
+        'last_seen_at',
+        'user_agent',
+        'ip_hash',
+        'locale',
+        'tz',
+        'color_hex'
+      ];
       const vals = [code, 'NOW()', 'NOW()', '$UA$', '$IPHASH$', '$LOC$', '$TZ$', "'#FFFFFF'"];
-      // email/phone go into the correct column
-      if (kind === 'email') { cols.push('email');       vals.push('$IDENT$'); }
-      if (kind === 'phone') { cols.push('phone_e164');  vals.push('$IDENT$'); }
-      if (kind === 'handle'){ cols.push('username');    vals.push('$IDENT$'); }
 
-      // Simple string build (safer is param array; here we inline literals we control)
-      const sql =
-        `INSERT INTO ff_member (${cols.join(',')})
-         VALUES (${vals.map(v => v
-             .replace('$UA$',     `'${(ua||'').replace(/'/g,"''")}'`)
-             .replace('$IPHASH$', `'${iphash}'`)
-             .replace('$LOC$',    loc ? `'${String(loc).replace(/'/g,"''")}'` : 'NULL')
-             .replace('$TZ$',     timezone ? `'${String(timezone).replace(/'/g,"''")}'` : 'NULL')
-             .replace('$IDENT$',  `'${String(idNorm).replace(/'/g,"''")}'`)
-           ).join(',')})
-         ON CONFLICT DO NOTHING`; // relies on your unique constraints if any
+      if (kind === 'email') cols.push('email') && vals.push('$IDENT$');
+      if (kind === 'phone') cols.push('phone_e164') && vals.push('$IDENT$');
+      if (kind === 'handle') cols.push('username') && vals.push('$IDENT$');
 
+      const sql = `
+        INSERT INTO ff_member (${cols.join(',')})
+        VALUES (${vals
+          .map((v) =>
+            v
+              .replace('$UA$', `'${(ua || '').replace(/'/g, "''")}'`)
+              .replace('$IPHASH$', `'${iphash}'`)
+              .replace('$LOC$', loc ? `'${String(loc).replace(/'/g, "''")}'` : 'NULL')
+              .replace('$TZ$', timezone ? `'${String(timezone).replace(/'/g, "''")}'` : 'NULL')
+              .replace('$IDENT$', `'${String(idNorm).replace(/'/g, "''")}'`)
+          )
+          .join(',')})
+        ON CONFLICT DO NOTHING
+      `;
       await pool.query(sql);
     } catch (err) {
       console.warn('ff_member insert warn:', err.message);
-      // Non-fatal: we can still proceed
     }
 
-    // 4) Build signup URL & return legacy fields clients expect
+    /* ---------- Build signup URL ---------- */
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
-
     const params = new URLSearchParams({ source: `ffint-${code}` });
-    if (kind === 'email')  params.set('email',  idNorm);
-    if (kind === 'phone')  params.set('phone',  idNorm);
+    if (kind === 'email') params.set('email', idNorm);
+    if (kind === 'phone') params.set('phone', idNorm);
     if (kind === 'handle') params.set('handle', idNorm);
 
     const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    // Also set a light, non-httpOnly cookie the frontend can read (optional)
-    // so /signup can prefill even without URL params:
-    try {
-      const pre = {
-        firstIdentifier: idNorm,
-        type: kind,
-        pending: kind === 'email' ? { email: idNorm }
-               : kind === 'phone' ? { phone: idNorm }
-               : null
-      };
-      res.cookie('ff.pre.signup', encodeURIComponent(JSON.stringify(pre)), {
-        httpOnly: false,
-        sameSite: 'Lax',
-        secure: !!req.secure,
-        path: '/',
-        maxAge: 7*24*60*60*1000
-      });
-    } catch {}
+    /* ---------- Set cookies ---------- */
+    res.cookie(
+      'ff.pre.signup',
+      encodeURIComponent(
+        JSON.stringify({
+          firstIdentifier: idNorm,
+          type: kind
+        })
+      ),
+      { httpOnly: false, sameSite: 'Lax', secure: !!req.secure, path: '/', maxAge: 7 * 24 * 60 * 60 * 1000 }
+    );
 
-    // Interaction marker cookie (your original)
-    try {
-      res.cookie('ff-interacted', '1', {
-        httpOnly:true, secure:true, sameSite:'none', path:'/', maxAge:31536000000
-      });
-    } catch {}
+    res.cookie('ff-interacted', '1', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      path: '/',
+      maxAge: 31536000000
+    });
 
-    // ✅ Return what the client expects
+    /* ---------- Response ---------- */
     return res.status(200).json({
       ok: true,
       invite_id: inviteId,
       interacted_code: code,
       signup_url: signupUrl
     });
-
   } catch (e) {
     console.error('identity.request-code error:', e.message, e.detail || '');
     return res.status(500).json({
-      ok:false,
-      error:'server_error',
+      ok: false,
+      error: 'server_error',
       code: e.code || null,
       detail: e.detail || null,
       message: e.message || null
