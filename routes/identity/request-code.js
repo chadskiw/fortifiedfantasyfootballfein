@@ -3,10 +3,10 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 
-// Reuse pool from server.js (export { pool } there)
+// Reuse the shared pool (export { pool } from server.js)
 const { pool } = require('../server');
 
-/* ---------- validators / helpers ---------- */
+/* ---------- helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
 
@@ -18,8 +18,8 @@ function normalizeIdentifier(raw) {
   return v; // treat as handle/username
 }
 
+// unambiguous 8-char code (no 0/O or 1/I)
 function genInviteCode(len = 8) {
-  // unambiguous (no 0/O or 1/I)
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
   for (let i = 0; i < len; i++) out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
@@ -30,7 +30,7 @@ function hashIp(ip) {
   const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
   return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
 }
-function firstLang(h = '') { return (h.split(',')[0] || '').trim() || null; }
+function firstLang(h=''){ return (h.split(',')[0] || '').trim() || null; }
 
 /* ---------- CORS preflight ---------- */
 router.options('/request-code', (req, res) => {
@@ -53,9 +53,7 @@ router.post('/request-code', async (req, res) => {
 
   const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
   const idNorm = normalizeIdentifier(identifier);
-  if (!idNorm) {
-    return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
-  }
+  if (!idNorm) return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
 
   const kind =
     EMAIL_RE.test(idNorm) ? 'email' :
@@ -69,9 +67,7 @@ router.post('/request-code', async (req, res) => {
   const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
   const referer  = req.get('referer') || null;
   const ua       = req.get('user-agent') || null;
-
-  // prefer CDN/proxy header if behind CF/Render; also set app.set('trust proxy', true)
-  const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+  const clientIp = req.headers['cf-connecting-ip'] || req.ip; // set app.set('trust proxy', true)
   const iphash   = hashIp(clientIp);
   const loc      = locale || firstLang(req.get('accept-language'));
   const timezone = tz || null;
@@ -80,7 +76,7 @@ router.post('/request-code', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    /* 1) INSERT invite */
+    // 1) ff_invite insert
     let inviteId;
     try {
       const r = await client.query(
@@ -96,10 +92,10 @@ router.post('/request-code', async (req, res) => {
       inviteId = r.rows[0]?.invite_id;
     } catch (err) {
       console.error('[invite.insert] ERROR', { message: err.message, code: err.code, detail: err.detail });
-      throw err; // triggers ROLLBACK
+      throw err;
     }
 
-    /* 2) Tag source with ffint-CODE (not critical if it fails) */
+    // 2) tag source "…:ffint-CODE" (non-fatal)
     try {
       await client.query(
         `UPDATE ff_invite
@@ -109,79 +105,70 @@ router.post('/request-code', async (req, res) => {
       );
     } catch (err) {
       console.warn('[invite.tag] WARN', { message: err.message, code: err.code, detail: err.detail });
-      // non-fatal
     }
 
-    /* 3) Opportunistic member insert (ignore conflicts) */
+    // 3) opportunistic ff_member upsert in two simple steps:
+    // 3a) base insert (no dynamic columns)
     try {
-      // Build dynamic column/value arrays
-      const cols = ['interacted_code', 'first_seen_at', 'last_seen_at', 'user_agent', 'ip_hash', 'locale', 'tz', 'color_hex'];
-      const vals = [code, /* NOW() */ /* NOW() */ ua, iphash, loc, timezone, '#FFFFFF'];
-      // $ placeholders: interacted_code is $1 above? We're in a new statement, so place them fresh.
-      // We'll use NOW() inline, everything else param’d.
-
-      if (kind === 'email')  { cols.push('email');      vals.push(idNorm); }
-      if (kind === 'phone')  { cols.push('phone_e164'); vals.push(idNorm); }
-      if (kind === 'handle') { cols.push('username');   vals.push(idNorm); }
-
-      // Build param list: interacted_code is first param again here
-      // We want: interacted_code, NOW(), NOW(), user_agent, ip_hash, locale, tz, color_hex, [identifier?]
-      const params = [];
-      const placeholders = [];
-      let i = 1;
-
-      // interacted_code
-      params.push(code); placeholders.push(`$${i++}`);
-      // NOW()
-      placeholders.push('NOW()');
-      // NOW()
-      placeholders.push('NOW()');
-      // user_agent
-      params.push(ua || null); placeholders.push(`$${i++}`);
-      // ip_hash
-      params.push(iphash); placeholders.push(`$${i++}`);
-      // locale
-      params.push(loc || null); placeholders.push(`$${i++}`);
-      // tz
-      params.push(timezone || null); placeholders.push(`$${i++}`);
-      // color_hex
-      params.push('#FFFFFF'); placeholders.push(`$${i++}`);
-
-      // optional identifier
-      if (kind === 'email' || kind === 'phone' || kind === 'handle') {
-        params.push(idNorm); placeholders.push(`$${i++}`);
-      }
-
-      // Reorder cols to match placeholders count:
-      // We constructed placeholders to match the base cols order + the optional column at the end,
-      // so cols array already matches: interacted_code, first_seen_at, last_seen_at, ua, iphash, locale, tz, color_hex, [identifier col]
-      const insertSql = `
-        INSERT INTO ff_member (${cols.join(', ')})
-        VALUES (${placeholders.join(', ')})
-        ON CONFLICT DO NOTHING
-      `;
-      await client.query(insertSql, params);
+      await client.query(
+        `INSERT INTO ff_member
+           (interacted_code, first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz, color_hex)
+         VALUES
+           ($1, NOW(), NOW(), $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [code, ua || null, iphash, loc || null, timezone || null, '#FFFFFF']
+      );
     } catch (err) {
       console.warn('[member.insert] WARN', { message: err.message, code: err.code, detail: err.detail });
-      // non-fatal
+    }
+
+    // 3b) set the identifier column if we have one (only if empty)
+    try {
+      if (kind === 'email') {
+        await client.query(
+          `UPDATE ff_member
+             SET email = $2
+           WHERE interacted_code = $1
+             AND (email IS NULL OR email = '')`,
+          [code, idNorm]
+        );
+      } else if (kind === 'phone') {
+        await client.query(
+          `UPDATE ff_member
+             SET phone_e164 = $2
+           WHERE interacted_code = $1
+             AND (phone_e164 IS NULL OR phone_e164 = '')`,
+          [code, idNorm]
+        );
+      } else {
+        await client.query(
+          `UPDATE ff_member
+             SET username = $2
+           WHERE interacted_code = $1
+             AND (username IS NULL OR username = '')`,
+          [code, idNorm]
+        );
+      }
+    } catch (err) {
+      console.warn('[member.update.id] WARN', { message: err.message, code: err.code, detail: err.detail });
     }
 
     await client.query('COMMIT');
 
-    /* 4) Build signup URL */
+    // 4) build signup URL
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
-    const params = new URLSearchParams({ source: `ffint-${code}` });
-    if (kind === 'email')  params.set('email',  idNorm);
-    if (kind === 'phone')  params.set('phone',  idNorm);
-    if (kind === 'handle') params.set('handle', idNorm);
-    const signupUrl = `${siteBase}/signup?${params.toString()}`;
+    const qs = new URLSearchParams({ source: `ffint-${code}` });
+    if (kind === 'email')  qs.set('email',  idNorm);
+    if (kind === 'phone')  qs.set('phone',  idNorm);
+    if (kind === 'handle') qs.set('handle', idNorm);
+    const signup_url = `${siteBase}/signup?${qs.toString()}`;
 
-    /* 5) Cookies */
+    // 5) cookies
     try {
       res.cookie(
         'ff.pre.signup',
         encodeURIComponent(JSON.stringify({ firstIdentifier: idNorm, type: kind })),
-        { httpOnly: false, sameSite: 'Lax', secure: !!req.secure, path: '/', maxAge: 7 * 24 * 60 * 60 * 1000 }
+        { httpOnly: false, sameSite: 'Lax', secure: !!req.secure, path: '/', maxAge: 7*24*60*60*1000 }
       );
       res.cookie('ff-interacted', '1', {
         httpOnly: true, secure: true, sameSite: 'none', path: '/', maxAge: 31536000000
@@ -190,25 +177,14 @@ router.post('/request-code', async (req, res) => {
       console.warn('[cookies] WARN', err.message);
     }
 
-    return res.status(200).json({
-      ok: true,
-      invite_id: inviteId,
-      interacted_code: code,
-      signup_url: signupUrl
-    });
+    return res.status(200).json({ ok:true, invite_id: inviteId, interacted_code: code, signup_url });
 
   } catch (e) {
-    // make sure aborted tx is cleared
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('[identity.request-code] ERROR', {
-      message: e.message, code: e.code, detail: e.detail
-    });
+    console.error('[identity.request-code] ERROR', { message: e.message, code: e.code, detail: e.detail });
     return res.status(500).json({
-      ok:false,
-      error:'server_error',
-      code: e.code || null,
-      detail: e.detail || null,
-      message: e.message || null
+      ok:false, error:'server_error',
+      code: e.code || null, detail: e.detail || null, message: e.message || null
     });
   } finally {
     client.release();
