@@ -384,6 +384,15 @@ async function handleSignupUpsert(req, res) {
 app.post('/api/members/upsert', handleSignupUpsert);
 app.post('/api/profile/update', handleSignupUpsert);
 app.post('/api/identity/signup', handleSignupUpsert);
+app.get('/diag/egress', async (_req, res) => {
+  try {
+    const r4 = await fetch('https://api.ipify.org?format=json').then(r=>r.json());
+    const r6 = await fetch('https://api64.ipify.org?format=json').then(r=>r.json()).catch(()=>null);
+    res.json({ egress_ipv4: r4?.ip || null, egress_ipv6: r6?.ip || null });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
 
 
 // ---- Verification starter (email/SMS) — stubbed success so UI can proceed
