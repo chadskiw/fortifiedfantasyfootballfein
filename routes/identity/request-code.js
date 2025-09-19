@@ -42,7 +42,8 @@ router.options('/request-code', (req, res) => {
     res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Credentials', 'true');
   }
-  res.set('Access-Control-Allow-Headers', 'content-type');
+  // include the headers your frontend actually uses
+  res.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key');
   res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.sendStatus(204);
 });
@@ -54,7 +55,12 @@ router.post('/request-code', async (req, res) => {
       return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
     }
 
-    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url } = req.body || {};
+    const {
+      identifier, tz, locale,
+      utm_source, utm_medium, utm_campaign,
+      landing_url
+    } = req.body || {};
+
     const idNorm = normalizeIdentifier(identifier);
     if (!idNorm) {
       return res.status(400).json({ ok: false, error: 'bad_request', detail: 'identifier required' });
@@ -79,82 +85,89 @@ router.post('/request-code', async (req, res) => {
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    /* 1) INSERT invite (parameterized) */
-    const insertInviteSQL = `
-      INSERT INTO ff_invite
-        (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
-         user_agent, ip_hash, locale, tz, first_identifier)
-      VALUES
-        ($1, NOW(), $2, $3, $4, $5, $6,
-         $7, $8, $9, $10, $11)
-      RETURNING invite_id
-    `;
-    const inviteVals = [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm];
+    /* 1) INSERT invite (parameterized, identifiers quoted) */
+    const insertInviteSQL =
+      `INSERT INTO "ff_invite"
+        ("interacted_code","invited_at","source","medium","campaign","landing_url","referrer",
+         "user_agent","ip_hash","locale","tz","first_identifier")
+       VALUES ($1, NOW(), $2, $3, $4, $5, $6,
+               $7, $8, $9, $10, $11)
+       RETURNING "invite_id";`;
+
+    const inviteVals = [
+      code,           // $1 interacted_code
+      source,         // $2 source
+      medium,         // $3 medium
+      campaign,       // $4 campaign
+      landing,        // $5 landing_url
+      referer,        // $6 referrer
+      ua,             // $7 user_agent
+      iphash,         // $8 ip_hash
+      loc,            // $9 locale
+      timezone,       // $10 tz
+      idNorm          // $11 first_identifier
+    ];
 
     let inviteId;
     try {
       const ins = await pool.query(insertInviteSQL, inviteVals);
       inviteId = ins.rows[0]?.invite_id;
     } catch (err) {
-      console.error('ff_invite insert error:', err.message, err.detail || '');
+      // Log the *shape* of the statement to help debugging without dumping secrets
+      console.error('ff_invite insert error:', err.message, { hint: 'ff_invite insert failed' });
       throw err;
     }
 
     /* 2) Tag source with ffint-CODE (not critical if it fails) */
     try {
       await pool.query(
-        `UPDATE ff_invite
-           SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
-         WHERE invite_id = $2`,
+        `UPDATE "ff_invite"
+           SET "source" = COALESCE(NULLIF("source", ''), 'web') || ':ffint-' || $1
+         WHERE "invite_id" = $2;`,
         [code, inviteId]
       );
     } catch (err) {
       console.warn('ff_invite source tag warn:', err.message);
     }
 
-    /* 3) Opportunistic member seed (parameterized) */
+    /* 3) Opportunistic member seed (parameterized, identifiers quoted) */
     try {
       let memberSQL = '';
       let memberVals = [];
 
       if (kind === 'email') {
-        memberSQL = `
-          INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at,
-             user_agent, ip_hash, locale, tz, color_hex, email)
-          VALUES
-            ($1, NOW(), NOW(),
-             $2, $3, $4, $5,
-             COALESCE($6, '#FFFFFF'), $7)
-          ON CONFLICT DO NOTHING
-        `;
+        memberSQL =
+          `INSERT INTO "ff_member"
+            ("interacted_code","first_seen_at","last_seen_at",
+             "user_agent","ip_hash","locale","tz","color_hex","email")
+           VALUES ($1, NOW(), NOW(),
+                   $2, $3, $4, $5,
+                   COALESCE($6, '#FFFFFF'), $7)
+           ON CONFLICT DO NOTHING;`;
         memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
+
       } else if (kind === 'phone') {
-        memberSQL = `
-          INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at,
-             user_agent, ip_hash, locale, tz, color_hex, phone_e164)
-          VALUES
-            ($1, NOW(), NOW(),
-             $2, $3, $4, $5,
-             COALESCE($6, '#FFFFFF'), $7)
-          ON CONFLICT DO NOTHING
-        `;
+        memberSQL =
+          `INSERT INTO "ff_member"
+            ("interacted_code","first_seen_at","last_seen_at",
+             "user_agent","ip_hash","locale","tz","color_hex","phone_e164")
+           VALUES ($1, NOW(), NOW(),
+                   $2, $3, $4, $5,
+                   COALESCE($6, '#FFFFFF'), $7)
+           ON CONFLICT DO NOTHING;`;
         memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
-      } else { // handle
-        memberSQL = `
-          INSERT INTO ff_member
-            (interacted_code, first_seen_at, last_seen_at,
-             user_agent, ip_hash, locale, tz, color_hex, username)
-          VALUES
-            ($1, NOW(), NOW(),
-             $2, $3, $4, $5,
-             COALESCE($6, '#FFFFFF'), $7)
-          ON CONFLICT DO NOTHING
-        `;
+
+      } else { // handle/username
+        memberSQL =
+          `INSERT INTO "ff_member"
+            ("interacted_code","first_seen_at","last_seen_at",
+             "user_agent","ip_hash","locale","tz","color_hex","username")
+           VALUES ($1, NOW(), NOW(),
+                   $2, $3, $4, $5,
+                   COALESCE($6, '#FFFFFF'), $7)
+           ON CONFLICT DO NOTHING;`;
         memberVals = [code, ua, iphash, loc, timezone, null, idNorm];
       }
-
 
       await pool.query(memberSQL, memberVals);
     } catch (err) {
@@ -203,7 +216,7 @@ router.post('/request-code', async (req, res) => {
     });
 
   } catch (e) {
-    console.error('identity.request-code error:', e.message, e.detail || '');
+    console.error('identity.request-code error:', e.message);
     return res.status(500).json({
       ok: false,
       error: 'server_error',
