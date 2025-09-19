@@ -384,7 +384,7 @@ async function handleSignupUpsert(req, res) {
 app.post('/api/members/upsert', handleSignupUpsert);
 app.post('/api/profile/update', handleSignupUpsert);
 app.post('/api/identity/signup', handleSignupUpsert);
-app.get('/diag/egress', async (_req, res) => {
+app.get('/api/diag/egress', async (_req, res) => {
   try {
     const r4 = await fetch('https://api.ipify.org?format=json').then(r=>r.json());
     const r6 = await fetch('https://api64.ipify.org?format=json').then(r=>r.json()).catch(()=>null);
