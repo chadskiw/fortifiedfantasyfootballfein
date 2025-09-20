@@ -184,7 +184,6 @@ app.use('/api/platforms/espn', espnRouter);
 
 // Identity API + request-code endpoints (your existing routers)
 app.use('/api/identity', identityRouter);
-app.use('/api/identity', require('./routes/identity/request-code.js')); // POST /api/identity/request-code
 
 // Verify (server-side anagram flow)
 app.use('/api', verifyRouter); // POST /api/verify
