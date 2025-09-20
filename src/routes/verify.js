@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../../server');
 const crypto = require('crypto');
-const { buildCodeFromCookie, buildSeededCode } = require('../../anagram');
+const { buildCodeFromCookie, buildSeededCode } = require('../util/anagram');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
