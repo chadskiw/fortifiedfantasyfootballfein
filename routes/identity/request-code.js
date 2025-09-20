@@ -52,22 +52,58 @@ const CREATE_REQUESTS_SQL = `
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQUESTS_SQL);
 }
+// right after `const member = await findOrCreateMember(kind, value);`
+res.cookie('ff_interacted', member.interacted_code, {
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+  maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
+});
+return res.status(200).json({
+  ok: true,
+  sent: true,
+  member_id: member.member_id,
+  interacted_code: member.interacted_code,   // <— optional
+  signup_url: u.pathname + u.search,
+  ms: Date.now() - start
+});
 
 /* ------------------------------- member helpers --------------------------- */
+/* ------------------------------- member helpers --------------------------- */
+function makeInteractedCode(kind) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let base = '';
+  for (let i = 0; i < 8; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
+  const suffix = (kind === 'email' || kind === 'phone' || kind === 'handle') ? kind : 'unknown';
+  return `${base}-${suffix}`; // e.g. 7KX94Q2N-phone
+}
+
 async function findOrCreateMember(kind, value) {
   const col = kind === 'email' ? 'email' : kind === 'phone' ? 'phone_e164' : 'username';
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
-  if (f.rows[0]) return f.rows[0];
-
-  // minimal create
+  if (f.rows[0]) {
+    // backfill if existing row is missing interacted_code
+    if (!f.rows[0].interacted_code) {
+      const interacted = makeInteractedCode(kind);
+      const upd = await pool.query(
+        `UPDATE ff_member SET interacted_code = $1, last_seen_at = now() WHERE member_id = $2 RETURNING *`,
+        [interacted, f.rows[0].member_id]
+      );
+      return upd.rows[0];
+    }
+    return f.rows[0];
+  }
+  // NEW member -> write interacted_code (NOT NULL) and timestamps
+  const interacted = makeInteractedCode(kind);
   const ins = await pool.query(
-    `INSERT INTO ff_member (${col}, first_seen_at, last_seen_at)
-     VALUES ($1, now(), now())
+    `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
+     VALUES ($1, $2, now(), now())
      RETURNING *`,
-    [value]
+    [value, interacted]
   );
   return ins.rows[0];
 }
+
 
 function makeCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -212,6 +248,7 @@ router.post('/', async (req, res) => {
 
     // Find or create member, write a 6-digit login_code (10-min TTL)
     const member = await findOrCreateMember(kind, value);
+    
     const code = makeCode();
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await pool.query(
@@ -236,13 +273,21 @@ router.post('/', async (req, res) => {
     if (kind === 'phone')  u.searchParams.set('phone', value);
     if (kind === 'handle') u.searchParams.set('handle', value);
 
-    return res.status(200).json({
-      ok: true,
-      sent: true,               // indicates we attempted a send
-      member_id: member.member_id,
-      signup_url: u.pathname + u.search,
-      ms: Date.now() - start
-    });
+// right after `const member = await findOrCreateMember(kind, value);`
+res.cookie('ff_interacted', member.interacted_code, {
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+  maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
+});
+return res.status(200).json({
+  ok: true,
+  sent: true,
+  member_id: member.member_id,
+  interacted_code: member.interacted_code,   // <— optional
+  signup_url: u.pathname + u.search,
+  ms: Date.now() - start
+});
   } catch (err) {
     console.error('identity.request-code error:', err);
     // Even on unexpected server error, don’t expose internals
