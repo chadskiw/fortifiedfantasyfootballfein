@@ -5,7 +5,6 @@ const { pool } = require('../../server');
 const crypto = require('crypto');
 const { buildCodeFromCookie, buildSeededCode } = require('../util/anagram');
 
-const NotificationApi = require('notificationapi-node-server-sdk');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
