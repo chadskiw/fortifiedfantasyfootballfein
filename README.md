@@ -1,3 +1,6 @@
+CHECK THIS OUT
+<!-- TRUE_LOCATION: README.md -->
+<!-- IN_USE: FALSE -->
 # FF Platforms Server
 
 Unified API exposing **ESPN** and **Sleeper** under one process.

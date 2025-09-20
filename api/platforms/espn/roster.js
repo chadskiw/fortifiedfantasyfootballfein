@@ -1,3 +1,6 @@
+CHECK THIS OUT
+// TRUE_LOCATION: api/platforms/espn/roster.js
+// IN_USE: FALSE
 // GET  /api/platforms/espn/roster?season=2025&leagueId=...&week=1[&teamId=4]
 // 200 + data on success
 // 401 with { ok:false, error:'auth_required', ... } when SWID/espn_s2 are missing

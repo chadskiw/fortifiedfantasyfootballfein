@@ -1,3 +1,6 @@
+CHECK THIS OUT
+// TRUE_LOCATION: public/api/diag/egress.js
+// IN_USE: FALSE
 api/diag/egress.js// --- Egress IP diagnostics (what Cloudflare will see for your API token)
 app.get(['/api/diag/egress', '/diag/egress'], async (req, res) => {
   res.set('cache-control', 'no-store');

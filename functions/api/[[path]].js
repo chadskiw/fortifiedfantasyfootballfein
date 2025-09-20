@@ -1,3 +1,6 @@
+CHECK THIS OUT
+// TRUE_LOCATION: functions/api/[[path]].js
+// IN_USE: FALSE
 export async function onRequest({ request }) {
   const inUrl = new URL(request.url);
   const target = new URL(inUrl.pathname.replace(/^\/api/, ''), 'https://<your-render-service>.onrender.com/api');

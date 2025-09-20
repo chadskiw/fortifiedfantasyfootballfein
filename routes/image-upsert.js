@@ -1,3 +1,5 @@
+// TRUE_LOCATION: routes/image-upsert.js
+// IN_USE: TRUE
 // routes/image-upsert.js
 // Express router for ingesting a raw image and storing it in Cloudflare R2,
 // while wiring first-touch + activity state in Postgres.

@@ -1,3 +1,5 @@
+// TRUE_LOCATION: api/platforms/espn.js
+// IN_USE: TRUE
 // server/routes/platforms-espn.js
 const express = require('express');
 const cookieParser = require('cookie-parser');
@@ -114,5 +116,8 @@ router.get('/free-agents', async (req, res) => {
     res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
-
+function requireEspnCreds(req, res, next) {
+  if (extractEspnCreds(req)) return next();
+  return res.status(401).json({ ok:false, error:'no_espn_creds' });
+}
 module.exports = router;

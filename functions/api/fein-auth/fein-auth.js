@@ -1,3 +1,6 @@
+CHECK THIS OUT
+// TRUE_LOCATION: functions/api/fein-auth/fein-auth.js
+// IN_USE: FALSE
 // Public route: anyone can list leagues (no auth required)
 // GET /api/fein-auth/by-league?season=2025
 // Optional: ?leagueId=1888700373 to fetch one

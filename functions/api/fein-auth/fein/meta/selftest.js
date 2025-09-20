@@ -1,3 +1,6 @@
+CHECK THIS OUT
+// TRUE_LOCATION: functions/api/fein-auth/fein/meta/selftest.js
+// IN_USE: FALSE
 // GET /api/fein-auth/fein/meta/selftest
 app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
   const { Pool } = require('pg');
