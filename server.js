@@ -310,7 +310,7 @@ app.get('/api/fein-auth/fein/meta/row', async (req, res) => {
 
 // DB + creds echo
 app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
-  const { Pool } = require('pg');
+  //const { Pool } = require('pg');
   try {
     const testPool = new Pool({
       connectionString: process.env.DATABASE_URL,
