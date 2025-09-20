@@ -2,11 +2,23 @@
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { pool } = require('../db/pool');
+const { Pool } = require('../src/db');
 
 const router = express.Router();
 router.use(express.json());
-
+  try {
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+    });
+    const r = await pool.query('SELECT 1 as ok');
+    // show what the server sees for creds (from headers or cookies)
+    const swid = req.get('x-espn-swid') || (req.headers.cookie||'').includes('SWID') ? 'cookie_present' : '';
+    const s2   = req.get('x-espn-s2')   || (req.headers.cookie||'').includes('espn_s2') ? 'cookie_present' : '';
+    res.json({ ok: true, db: r.rows[0], credsSeen: { swid: !!swid, s2: !!s2 } });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:'db_error', message: e.message, code: e.code });
+  }
 /* ------------------------ identifier normalization ------------------------ */
 const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RX = /^\+?[0-9\s().-]{7,20}$/;
