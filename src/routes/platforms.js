@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/platforms.js
+// IN_USE: TRUE
 // src/routes/platforms.js
 // Aggregates NON-ESPN platform routers under /api/platforms/*
 // ESPN is mounted separately in server.js with auth gating.

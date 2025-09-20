@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/util/anagram.js
+// IN_USE: TRUE
 // src/anagram.js
 // Server-side "anagram" builder (seeded HMAC over ff_sess)
 

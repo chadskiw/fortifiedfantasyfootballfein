@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/api/platforms/index.js
+// IN_USE: FALSE
 // src/api/platforms/index.js
 const express = require('express');
 const path = require('path');

@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/middleware/r2.js
+// IN_USE: TRUE
 // src/middleware/r2.js  (server uploader)
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const crypto = require('crypto');

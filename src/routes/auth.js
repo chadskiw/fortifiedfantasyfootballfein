@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/auth.js
+// IN_USE: FALSE
 // server/routes/auth.js
 const express = require('express');
 const router = express.Router();

@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/save-amage-meta.js
+// IN_USE: FALSE
 // src/save-image-meta.js
 const { query } = require('../src/db');
 

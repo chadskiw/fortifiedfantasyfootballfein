@@ -1,4 +1,3 @@
-CHECK THIS OUT
 // TRUE_LOCATION: routes/identity-proxy.js
 // IN_USE: FALSE
 // routes/identity-proxy.js

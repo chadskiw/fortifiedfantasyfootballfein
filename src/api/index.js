@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/api/index.js
+// IN_USE: FALSE
 // api/platforms/index.js
 // Returns platform adapters. No Express router logic here.
 

@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/auth.js
+// IN_USE: FALSE
 function readAuthFromRequest(req){
   const h = req.headers || {};
   let swid = h['x-espn-swid'] || '';

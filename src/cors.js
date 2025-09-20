@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/cors.js
+// IN_USE: TRUE
 // src/cors.js
 const ENV_ALLOWED = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);

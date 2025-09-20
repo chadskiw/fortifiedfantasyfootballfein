@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/espn-proxy.js
+// IN_USE: FALSE
 // routes/espn-proxy.js
 // Fortified Fantasy — ESPN credentialed proxies (server-side safe)
 // Requires: ../src/db exports { query }, and your DB has fein_meta table w/ swid,s2.

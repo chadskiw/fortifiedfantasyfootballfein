@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/selftest.js
+// IN_USE: FALSE
 // GET /api/fein-auth/fein/meta/selftest
 app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
   const { Pool } = require('pg');

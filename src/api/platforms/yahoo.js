@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/api/platforms/yahoo.js
+// IN_USE: FALSE
 // src/platforms/yahoo.js
 module.exports = {
   name: 'yahoo',

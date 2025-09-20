@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/feinReact.js
+// IN_USE: FALSE
 // routes/fein-react.js
 // FEIN Reactions with dynamic table resolution + debug metadata.
 // Mount under /api/fein.

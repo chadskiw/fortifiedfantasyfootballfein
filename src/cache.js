@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/cache.js
+// IN_USE: FALSE
 // src/cache.js
 const TTL = Number(process.env.CACHE_TTL_SECONDS || 0);
 const store = new Map(); // key -> { value, exp }

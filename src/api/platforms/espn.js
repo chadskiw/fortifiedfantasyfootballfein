@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/api/platforms/espn.js
+// IN_USE: TRUE
 // api/platforms/espn.js
 // ESPN adapter: all the goodies you need today.
 

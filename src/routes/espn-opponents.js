@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/espn-opponents.js
+// IN_USE: FALSE
 // routes/espn-opponents.js
 // Fortified Fantasy — safe proxies for opponents + rosters (players only)
 // Uses ONE valid team’s creds in a league, pulled from fein_meta.

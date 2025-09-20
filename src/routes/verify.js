@@ -1,3 +1,5 @@
+// TRUE_LOCATION: src/routes/verify.js
+// IN_USE: TRUE
 // routes/verify.js
 const express = require('express');
 const router = express.Router();
