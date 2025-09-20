@@ -6,6 +6,19 @@ const crypto = require('crypto');
 // Reuse the shared pool from server.js
 const { pool } = require('../../server');
 
+/* ---------- NotificationAPI (SERVER-SIDE) ---------- */
+let notificationapi = null;
+try {
+  // CommonJS default export shape
+  notificationapi = require('notificationapi-node-server-sdk').default;
+  notificationapi.init(
+    process.env.NOTIFICATIONAPI_CLIENT_ID || '',
+    process.env.NOTIFICATIONAPI_CLIENT_SECRET || ''
+  );
+} catch (e) {
+  console.warn('[notify] SDK not initialized:', e?.message || e);
+}
+
 /* ---------- validators / helpers ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
@@ -51,12 +64,8 @@ router.options('/request-code', (req, res) => {
 });
 
 /* ---------- POST /api/identity/request-code ---------- */
-router.post('/request-code', async (req, res) => {
+router.post('/request-code', express.json({ limit: '64kb' }), async (req, res) => {
   try {
-    if (!req.is('application/json')) {
-      return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
-    }
-
     const {
       identifier, tz, locale,
       utm_source, utm_medium, utm_campaign,
@@ -87,7 +96,7 @@ router.post('/request-code', async (req, res) => {
     const loc      = locale || firstLang(req.get('accept-language'));
     const timezone = tz || null;
 
-    /* 1) INSERT invite (identifiers quoted to avoid keyword collisions) */
+    /* 1) INSERT invite */
     const insertInviteSQL =
       `INSERT INTO "ff_invite"
         ("interacted_code","invited_at","source","medium","campaign","landing_url","referrer",
@@ -116,7 +125,7 @@ router.post('/request-code', async (req, res) => {
       console.warn('ff_invite source tag warn:', err.message);
     }
 
-    /* 3) Opportunistic member seed (matches your ff_member schema) */
+    /* 3) Opportunistic member seed */
     try {
       let memberSQL = '';
       let memberVals = [];
@@ -160,7 +169,39 @@ router.post('/request-code', async (req, res) => {
       console.warn('ff_member insert warn:', err.message);
     }
 
-    /* 4) Build signup URL */
+    /* 4) Send the code via NotificationAPI (non-fatal on failure) */
+    let notify = { attempted: false, sent: false, error: null };
+    if (notificationapi && (process.env.NOTIFICATIONAPI_CLIENT_ID && process.env.NOTIFICATIONAPI_CLIENT_SECRET)) {
+      try {
+        notify.attempted = true;
+
+        const to = {
+          id: idNorm, // a stable ID for NotificationAPI user
+          email: kind === 'email' ? idNorm : undefined,
+          number: kind === 'phone' ? idNorm : undefined,
+        };
+
+        // Use your template/type; both email & sms content are optional if your template handles them
+        await notificationapi.send({
+          type: 'account_authorization', // or your configured type
+          to,
+          email: kind === 'email' ? {
+            subject: 'Your Fortified Fantasy sign-in code',
+            html: `<p>Your code is <b>${code}</b>. Enter it to continue.</p>`
+          } : undefined,
+          sms: kind === 'phone' ? {
+            message: `Your Fortified Fantasy code: ${code}`
+          } : undefined
+        });
+
+        notify.sent = true;
+      } catch (e) {
+        notify.error = e?.message || String(e);
+        console.warn('[notify.send] failed:', notify.error);
+      }
+    }
+
+    /* 5) Build signup URL */
     const siteBase = process.env.PUBLIC_SITE_ORIGIN || 'https://fortifiedfantasy.com';
     const params = new URLSearchParams({ source: `ffint-${code}` });
     if (kind === 'email')  params.set('email',  idNorm);
@@ -168,7 +209,7 @@ router.post('/request-code', async (req, res) => {
     if (kind === 'handle') params.set('handle', idNorm);
     const signupUrl = `${siteBase}/signup?${params.toString()}`;
 
-    /* 5) Prefill cookie (frontend helper) */
+    /* 6) Prefill cookie (frontend helper) */
     try {
       const pre = {
         firstIdentifier: idNorm,
@@ -186,9 +227,8 @@ router.post('/request-code', async (req, res) => {
       });
     } catch {}
 
-    /* 6) Interaction marker cookie (cross-site) */
+    /* 7) Interaction marker cookie (cross-site) */
     try {
-      // SameSite=None requires secure:true
       res.cookie('ff-interacted', '1', {
         httpOnly: true,
         sameSite: 'none',
@@ -202,7 +242,8 @@ router.post('/request-code', async (req, res) => {
       ok: true,
       invite_id: inviteId,
       interacted_code: code,
-      signup_url: signupUrl
+      signup_url: signupUrl,
+      notify
     });
 
   } catch (e) {
