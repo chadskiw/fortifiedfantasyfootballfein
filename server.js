@@ -14,11 +14,14 @@ const platformRouter     = require('./src/routes/platforms');
 const espnRouter         = require('./routers/espnRouter');
 const feinAuthRouter     = require('./routes/fein-auth');
 const authRouter     = require('./routes/fein-auth');
+const verifyRouter = require('./routes/verify');
+
 // ----- QUICK PATCH: identity/profile/members endpoints used by signup flows -----
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 // If some clients still hit /api/espn-auth, route them to the same handler as /api/fein-auth
+app.use('/api', verifyRouter);
 app.use('/api/espn-auth', feinAuthRouter);
 const HEX_RE = /^#?[0-9a-f]{6}$/i;
 const normHex = (v) => {
