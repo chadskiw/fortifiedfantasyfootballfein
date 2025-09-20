@@ -2,23 +2,26 @@
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { Pool } = require('../src/db');
+const { pool } = require('../db/pool'); // <-- correct path & export (CommonJS)
 
 const router = express.Router();
 router.use(express.json());
+
+/* ------------------------------- /health ---------------------------------- */
+// GET /api/identity/health
+router.get('/health', async (req, res) => {
   try {
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
-    });
-    const r = await pool.query('SELECT 1 as ok');
-    // show what the server sees for creds (from headers or cookies)
-    const swid = req.get('x-espn-swid') || (req.headers.cookie||'').includes('SWID') ? 'cookie_present' : '';
-    const s2   = req.get('x-espn-s2')   || (req.headers.cookie||'').includes('espn_s2') ? 'cookie_present' : '';
-    res.json({ ok: true, db: r.rows[0], credsSeen: { swid: !!swid, s2: !!s2 } });
+    const r = await pool.query('SELECT 1 AS ok');
+    // peek for ESPN creds presence (headers/cookies), but don't leak values
+    const cookie = req.headers.cookie || '';
+    const swidSeen = !!(req.get('x-espn-swid') || cookie.includes('SWID='));
+    const s2Seen   = !!(req.get('x-espn-s2')   || cookie.includes('espn_s2=') || cookie.includes('ESPN_S2='));
+    res.json({ ok: true, db: r.rows[0]?.ok === 1, credsSeen: { swid: swidSeen, s2: s2Seen } });
   } catch (e) {
-    res.status(500).json({ ok:false, error:'db_error', message: e.message, code: e.code });
+    res.status(500).json({ ok: false, error: 'db_error', message: e.message, code: e.code });
   }
+});
+
 /* ------------------------ identifier normalization ------------------------ */
 const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RX = /^\+?[0-9\s().-]{7,20}$/;
@@ -50,14 +53,14 @@ function ratelimit(key, limit = 6, ttlMs = 60_000) {
 }
 
 /* ------------------------------ db bootstrap ------------------------------ */
-// IMPORTANT: one statement per query call; no multi-statement strings.
+// One statement per query; no multi-statement strings
 const CREATE_REQUESTS_SQL = `
   CREATE TABLE IF NOT EXISTS ff_identity_requests (
     id BIGSERIAL PRIMARY KEY,
-    identifier_kind TEXT NOT NULL,
+    identifier_kind  TEXT NOT NULL,
     identifier_value TEXT NOT NULL,
-    ip_hash TEXT,
-    created_at TIMESTAMPTZ DEFAULT now()
+    ip_hash          TEXT,
+    created_at       TIMESTAMPTZ DEFAULT now()
   )
 `;
 
@@ -67,7 +70,7 @@ async function ensureRequestsTable() {
 
 /* ------------------------------- code sender ------------------------------ */
 async function sendCode({ identifierKind, identifierValue, code }) {
-  // “No-op send” if creds missing → never 500 due to env.
+  // No-op if no mail/SMS creds so env won’t 500 the request
   if (identifierKind === 'email') {
     const haveSendgrid = !!process.env.SENDGRID_API_KEY;
     const haveSmtp = !!process.env.SMTP_HOST;
@@ -115,7 +118,8 @@ async function sendCode({ identifierKind, identifierValue, code }) {
   }
 }
 
-/* --------------------------------- routes --------------------------------- */
+/* -------------------------------- endpoints -------------------------------- */
+// POST /api/identity/request-code
 router.post('/request-code', async (req, res) => {
   const start = Date.now();
   try {
@@ -123,7 +127,6 @@ router.post('/request-code', async (req, res) => {
     const { kind, value } = normalizeIdentifier(identifier);
 
     if (!value) {
-      // Your “cwhitese” example now returns 422 instead of 500.
       return res.status(422).json({
         ok: false,
         error: 'invalid_identifier',
@@ -131,28 +134,21 @@ router.post('/request-code', async (req, res) => {
       });
     }
 
-    // Rate limit per (ip+identifier)
+    // Rate-limit per (ip+identifier)
     const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
     const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
     const rl = ratelimit(`${ipHash}:${value}`, 6, 60_000);
     if (!rl.ok) {
-      return res.status(429).json({
-        ok: false,
-        error: 'rate_limited',
-        resetAt: rl.resetAt,
-      });
+      return res.status(429).json({ ok: false, error: 'rate_limited', resetAt: rl.resetAt });
     }
 
-    // Create the table if needed (single statement)
     await ensureRequestsTable();
 
-    // Record the request (separate single-statement query)
     await pool.query(
       `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
-    // Generate and send code (no-op if env missing)
     const code = String(Math.floor(100000 + Math.random() * 900000));
     await sendCode({ identifierKind: kind, identifierValue: value, code });
 
