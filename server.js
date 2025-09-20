@@ -20,6 +20,13 @@ const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 // const platformRouter  = require('./src/routes/platforms');        // (optional, not mounted below)
 
+
+
+// ---------- App ----------
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
 // ---------- DB ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -32,10 +39,6 @@ module.exports = {
   pool,
 };
 
-// ---------- App ----------
-const app = express();
-app.disable('x-powered-by');
-app.set('trust proxy', 1);
 
 // ---------- Shared helpers ----------
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
