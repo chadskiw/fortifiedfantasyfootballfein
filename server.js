@@ -399,7 +399,24 @@ app.get('/api/members/recent', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+// then in server.js
+app.post('/api/verify/start', async (req, res) => {
+  try {
+    const { kind, value, code } = req.body || {};
+    if (!value || !code) return res.status(400).json({ ok: false, error: 'bad_request' });
 
+    await notificationApi.send({
+      notificationId: 'signup-code',
+      user: { id: value, email: kind === 'email' ? value : undefined },
+      mergeTags: { code },
+    });
+
+    res.json({ ok: true, sent: true });
+  } catch (e) {
+    console.error('[verify/start]', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 // alias used by some clients: /api/identity/members
 app.get('/api/identity/members', (req, res, next) =>
   app._router.handle(Object.assign(req, { url: '/api/members' }), res, next)

@@ -4,12 +4,17 @@ const router = express.Router();
 const { pool } = require('../../server');
 const crypto = require('crypto');
 const { buildCodeFromCookie, buildSeededCode } = require('../util/anagram');
+const NotificationApi = require('notificationapi-node-server-sdk');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
 const norm = (v='') => String(v).trim();
 const normEmail = (v='') => norm(v).toLowerCase();
 const normPhone = (v='') => '+' + norm(v).replace(/[^\d]/g, '');
+const notificationApi = new NotificationApi({
+  clientId: process.env.NOTIFICATIONAPI_CLIENT_ID,
+  clientSecret: process.env.NOTIFICATIONAPI_CLIENT_SECRET,
+});
 
 function hashIP(ip) {
   return crypto.createHash('sha256').update(ip || '').digest('hex');
