@@ -6,7 +6,9 @@ const router = express.Router();
 // Subroutes
 router.use('/request-code', require('./request-code')); // POST /api/identity/request-code
 
-// Optional ping
-router.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+// Optional health check
+router.get('/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
 
 module.exports = router;
