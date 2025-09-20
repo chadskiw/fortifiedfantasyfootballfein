@@ -2,7 +2,7 @@
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { pool } = require('../db/pool');
+const { pool } = require('../src/db/pool');
 
 const router = express.Router();
 router.use(express.json());
