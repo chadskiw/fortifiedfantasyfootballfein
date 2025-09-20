@@ -502,7 +502,7 @@ app.use('/api/fein-auth', feinAuthRouter);
 app.use('/api/auth', authRouter);
 
             // same-origin cookie endpoints + meta upsert
-app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
+//app.use('/api/platforms/espn', requireEspnHeaders, espnRouter);
 // If/when you restore other platforms aggregate router:
 // app.use('/api/platforms', platformRouter);
 
