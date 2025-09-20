@@ -330,6 +330,68 @@ app.get('/healthz', async (_req, res) => {
     res.status(500).json({ ok: false, error: 'db_error', message: e.message });
   }
 });
+// --- MEMBERS LISTING ENDPOINTS (for faces.js) ---
+function toLimit(v, def=96) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
+}
+function cleanOrder(v) {
+  return String(v || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+}
+
+// GET /api/members?limit=96&order=desc
+app.get('/api/members', async (req, res) => {
+  try {
+    const limit = toLimit(req.query.limit);
+    const orderSql = cleanOrder(req.query.order);
+    const rows = (await pool.query(
+      `
+      SELECT
+        member_id, username, color_hex, email, phone_e164,
+        image_key, image_etag, image_format, image_width, image_height, image_version, last_image_at,
+        event_count, first_seen_at, last_seen_at
+      FROM ff_member
+      WHERE deleted_at IS NULL
+      ORDER BY last_seen_at ${orderSql}
+      LIMIT $1
+      `, [limit]
+    )).rows;
+
+    res.json({ ok: true, items: rows, limit, order: orderSql.toLowerCase() });
+  } catch (e) {
+    console.error('[GET /api/members]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// GET /api/members/recent?limit=96
+app.get('/api/members/recent', async (req, res) => {
+  try {
+    const limit = toLimit(req.query.limit);
+    const rows = (await pool.query(
+      `
+      SELECT
+        member_id, username, color_hex, email, phone_e164,
+        image_key, image_etag, image_format, image_width, image_height, image_version, last_image_at,
+        event_count, first_seen_at, last_seen_at
+      FROM ff_member
+      WHERE deleted_at IS NULL
+      ORDER BY last_seen_at DESC
+      LIMIT $1
+      `, [limit]
+    )).rows;
+
+    res.json({ ok: true, items: rows, limit });
+  } catch (e) {
+    console.error('[GET /api/members/recent]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// alias used by some clients: /api/identity/members
+app.get('/api/identity/members', (req, res, next) =>
+  app._router.handle(Object.assign(req, { url: '/api/members' }), res, next)
+);
 
 // ---------- Static AFTER APIs ----------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
@@ -349,7 +411,7 @@ app.use((err, req, res, _next) => {
 });
 
 // ---------- Health ----------
-app.get('/healthz', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
+// app.get('/healthz', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
 
 // ---------- Start ----------
 const port = process.env.PORT || 3000;
