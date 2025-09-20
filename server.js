@@ -487,7 +487,6 @@ app.use(express.json({ limit: '1mb' }));
 
 app.use(express.urlencoded({ extended: true }));
 // server.js
-const espnRouter = require('./routers/espnRouter');
 app.use('/api/platforms/espn', espnRouter);
 
 app.use(cookieParser());              // <- REQUIRED for /api/fein-auth to read cookies
