@@ -322,6 +322,14 @@ app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
     res.status(500).json({ ok:false, error:'db_error', code:e.code, message:e.message });
   }
 });
+app.get('/healthz', async (_req, res) => {
+  try {
+    const r = await pool.query('SELECT 1 AS ok');
+    res.json({ ok: true, db: r.rows[0].ok === 1, ts: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'db_error', message: e.message });
+  }
+});
 
 // ---------- Static AFTER APIs ----------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
