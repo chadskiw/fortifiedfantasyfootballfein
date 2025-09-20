@@ -1,15 +1,25 @@
+// TRUE_LOCATION: src/db.js
+// IN_USE: TRUE
+// src/db.js
 const { Pool } = require('pg');
-
-const DB_URL = process.env.DATABASE_URL;
-if (!DB_URL) { console.error('DATABASE_URL is required'); process.exit(1); }
+const isRender = /render\.com/.test(process.env.DATABASE_URL || '');
 
 const pool = new Pool({
-  connectionString: DB_URL,
-  ssl: DB_URL.includes('localhost') ? false : { rejectUnauthorized: false },
-  max: 5,
+  connectionString: process.env.DATABASE_URL,
+  ssl: isRender ? { rejectUnauthorized: false } : undefined
 });
 
-module.exports = {
-  pool,
-  q: (sql, params) => pool.query(sql, params).then(r => r.rows),
-};
+pool.on('error', (err) => console.error('PG pool error', err));
+
+async function q(text, params) {
+  const t0 = Date.now();
+  const res = await pool.query(text, params);
+  res.durationMs = Date.now() - t0;
+  return res;
+}
+async function ping() {
+  const r = await q('select 1 as ok');
+  return r.rows[0]?.ok === 1;
+}
+
+module.exports = { pool, q, ping };
