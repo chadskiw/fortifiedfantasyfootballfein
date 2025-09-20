@@ -1,18 +1,16 @@
-// TRUE_LOCATION: src/routes/identity-api.js
+// TRUE_LOCATION: routes/identity-api.js
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { pool } = require('../src/db/pool'); // <-- correct path & export (CommonJS)
+const { pool } = require('../db/pool');
 
 const router = express.Router();
 router.use(express.json());
 
 /* ------------------------------- /health ---------------------------------- */
-// GET /api/identity/health
 router.get('/health', async (req, res) => {
   try {
     const r = await pool.query('SELECT 1 AS ok');
-    // peek for ESPN creds presence (headers/cookies), but don't leak values
     const cookie = req.headers.cookie || '';
     const swidSeen = !!(req.get('x-espn-swid') || cookie.includes('SWID='));
     const s2Seen   = !!(req.get('x-espn-s2')   || cookie.includes('espn_s2=') || cookie.includes('ESPN_S2='));
@@ -35,6 +33,8 @@ function normalizeIdentifier(raw) {
     const e164ish = digits.startsWith('+') ? digits : `+${digits}`;
     return { kind: 'phone', value: e164ish };
   }
+  const handleOk = /^[a-zA-Z0-9_.]{3,24}$/.test(s);
+  if (handleOk) return { kind: 'handle', value: s };
   return { kind: null, value: null };
 }
 
@@ -53,8 +53,7 @@ function ratelimit(key, limit = 6, ttlMs = 60_000) {
 }
 
 /* ------------------------------ db bootstrap ------------------------------ */
-// One statement per query; no multi-statement strings
-const CREATE_REQUESTS_SQL = `
+const CREATE_REQ_SQL = `
   CREATE TABLE IF NOT EXISTS ff_identity_requests (
     id BIGSERIAL PRIMARY KEY,
     identifier_kind  TEXT NOT NULL,
@@ -63,14 +62,46 @@ const CREATE_REQUESTS_SQL = `
     created_at       TIMESTAMPTZ DEFAULT now()
   )
 `;
-
 async function ensureRequestsTable() {
-  await pool.query(CREATE_REQUESTS_SQL);
+  await pool.query(CREATE_REQ_SQL);
+}
+
+/* ----------------------------- member helpers ----------------------------- */
+async function findOrCreateMemberByIdentifier(kind, value) {
+  // 1) try find
+  let where, val;
+  if (kind === 'email') { where = 'email = $1'; val = value; }
+  else if (kind === 'phone') { where = 'phone_e164 = $1'; val = value; }
+  else { where = 'username = $1'; val = value; }
+
+  const f = await pool.query(`select * from ff_member where ${where} limit 1`, [val]);
+  if (f.rows[0]) return f.rows[0];
+
+  // 2) insert minimal row
+  const cols = ['first_seen_at','last_seen_at'];
+  const vals = ['now()','now()'];
+  let colSet = '', params = [], place = [];
+  if (kind === 'email') { cols.push('email'); params.push(value); }
+  else if (kind === 'phone') { cols.push('phone_e164'); params.push(value); }
+  else { cols.push('username'); params.push(value); }
+  for (let i = 0; i < params.length; i++) place.push(`$${i+1}`);
+
+  const ins = await pool.query(
+    `insert into ff_member (${cols.join(',')})
+     values (${params.length ? place.join(',') + ',' : ''}${vals.join(',')})
+     returning *`,
+    params
+  );
+  return ins.rows[0];
+}
+
+function makeCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 /* ------------------------------- code sender ------------------------------ */
 async function sendCode({ identifierKind, identifierValue, code }) {
-  // No-op if no mail/SMS creds so env won’t 500 the request
+  // No-op if no creds so we never 500
   if (identifierKind === 'email') {
     const haveSendgrid = !!process.env.SENDGRID_API_KEY;
     const haveSmtp = !!process.env.SMTP_HOST;
@@ -130,7 +161,7 @@ router.post('/request-code', async (req, res) => {
       return res.status(422).json({
         ok: false,
         error: 'invalid_identifier',
-        message: 'Provide a valid email or E.164 phone number.',
+        message: 'Provide a valid email, E.164 phone, or handle.',
       });
     }
 
@@ -143,16 +174,40 @@ router.post('/request-code', async (req, res) => {
     }
 
     await ensureRequestsTable();
-
     await pool.query(
       `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    // Find or create member
+    const member = await findOrCreateMemberByIdentifier(kind, value);
+
+    // Store login code (10 min TTL)
+    const code = makeCode();
+    const exp = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await pool.query(
+      `update ff_member
+         set login_code = $1,
+             login_code_expires = $2,
+             last_seen_at = now()
+       where member_id = $3`,
+      [code, exp, member.member_id]
+    );
+
+    // Send (may be NOOP without creds)
     await sendCode({ identifierKind: kind, identifierValue: value, code });
 
-    return res.status(200).json({ ok: true, sent: true, ms: Date.now() - start });
+    // Tell the client where to go next so it navigates
+    const u = new URL('/signup', 'https://fortifiedfantasy.com'); // or use relative '/signup'
+    u.searchParams.set(kind === 'email' ? 'email' : kind === 'phone' ? 'phone' : 'handle', value);
+
+    return res.status(200).json({
+      ok: true,
+      sent: true,
+      member_id: member.member_id,
+      signup_url: u.pathname + u.search, // client will redirect
+      ms: Date.now() - start
+    });
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok: false, error: 'internal_error' });
