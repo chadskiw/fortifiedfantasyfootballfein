@@ -23,6 +23,9 @@ app.set('trust proxy', 1);
 // If some clients still hit /api/espn-auth, route them to the same handler as /api/fein-auth
 app.use('/api', verifyRouter);
 app.use('/api/espn-auth', feinAuthRouter);
+// ... later, with other app.use()
+app.use('/api/identity', signupEmailRouter); // POST /api/identity/signup-email
+app.use('/api', verifyRouter);               // POST /api/verify
 const HEX_RE = /^#?[0-9a-f]{6}$/i;
 const normHex = (v) => {
   if (!v) return null;
