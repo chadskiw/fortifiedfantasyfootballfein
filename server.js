@@ -24,7 +24,6 @@ app.set('trust proxy', 1);
 app.use('/api', verifyRouter);
 app.use('/api/espn-auth', feinAuthRouter);
 // ... later, with other app.use()
-app.use('/api/identity', signupEmailRouter); // POST /api/identity/signup-email
 app.use('/api', verifyRouter);               // POST /api/verify
 const HEX_RE = /^#?[0-9a-f]{6}$/i;
 const normHex = (v) => {
