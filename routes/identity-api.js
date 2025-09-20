@@ -2,10 +2,11 @@
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { pool } = require('../src/db/pool');
+const { pool } = require('../../src/db/pool'); // adjust path if your pool lives elsewhere
 
 const router = express.Router();
 router.use(express.json());
+
 
 /* ----- health (optional) ----- */
 router.get('/health', async (req, res) => {
