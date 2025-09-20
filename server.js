@@ -14,7 +14,7 @@ const platformRouter     = require('./src/routes/platforms');
 const espnRouter         = require('./routers/espnRouter');
 const feinAuthRouter     = require('./routes/fein-auth');
 const authRouter     = require('./routes/fein-auth');
-const verifyRouter = require('./routes/verify');
+const verifyRouter = require('./src/routes/verify');
 
 // ----- QUICK PATCH: identity/profile/members endpoints used by signup flows -----
 const app = express();
