@@ -322,14 +322,26 @@ app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
     res.status(500).json({ ok:false, error:'db_error', code:e.code, message:e.message });
   }
 });
+// --- Health (place BEFORE static/catch-alls) ---
 app.get('/healthz', async (_req, res) => {
+  res.set('Cache-Control', 'no-store'); // avoid CDN/browser caching
   try {
     const r = await pool.query('SELECT 1 AS ok');
-    res.json({ ok: true, db: r.rows[0].ok === 1, ts: new Date().toISOString() });
+    res.type('application/json').json({
+      ok: true,
+      db: r.rows?.[0]?.ok === 1,
+      ts: new Date().toISOString()
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: 'db_error', message: e.message });
+    res.status(500).type('application/json').json({
+      ok: false,
+      db: false,
+      error: e.message,
+      ts: new Date().toISOString()
+    });
   }
 });
+
 // --- MEMBERS LISTING ENDPOINTS (for faces.js) ---
 function toLimit(v, def=96) {
   const n = Number(v);
