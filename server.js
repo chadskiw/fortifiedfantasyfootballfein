@@ -220,6 +220,14 @@ const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 app.use(corsMiddleware);
 app.use(rateLimit);
+app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
+  immutable: true, maxAge: '4h',
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.js'))  res.type('application/javascript');
+    if (filePath.endsWith('.css')) res.type('text/css');
+    if (filePath.endsWith('.wasm')) res.type('application/wasm');
+  }
+}));
 
 // ---------- DB helpers for identity ----------
 async function handleStats(username) {
