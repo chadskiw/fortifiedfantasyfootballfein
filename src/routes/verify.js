@@ -3,7 +3,6 @@ const express = require('express');
 const crypto = require('crypto');
 const { pool } = require('../db/pool');
 // If you already have these helpers somewhere else, import them instead of redefining.
-const { notificationApi } = require('../../notificationApi'); // adjust path if needed
 
 const router = express.Router();
 router.use(express.json());
@@ -78,6 +77,106 @@ function normalizeIdentifier(kind, value){
   return { kind:null, value:null };
 }
 function genCode(){ return crypto.randomInt(0, 1_000_000).toString().padStart(6,'0'); }
+// --- notifier (NotificationAPI first, then fallbacks; never throws) ---
+let notifInited = false, notifReady = false, notificationapi = null;
+function initNotificationAPI() {
+  if (notifInited) return notifReady;
+  notifInited = true;
+  try {
+    const clientId = process.env.NOTIFICATIONAPI_CLIENT_ID;
+    const clientSecret = process.env.NOTIFICATIONAPI_CLIENT_SECRET;
+    if (clientId && clientSecret) {
+      notificationapi = require('notificationapi-node-server-sdk').default;
+      notificationapi.init(clientId, clientSecret);
+      notifReady = true;
+      console.log('[notify] SDK initialized');
+    } else {
+      console.log('[notify] SDK not available; missing env credentials');
+    }
+  } catch (e) {
+    console.log('[notify] SDK not initialized:', e?.message || e);
+    notifReady = false;
+  }
+  return notifReady;
+}
+
+async function sendViaNotificationAPI({ identifierKind, identifierValue, code }) {
+  try {
+    const ok = initNotificationAPI();
+    if (!ok) return false;
+    const user = { id: identifierValue };
+    if (identifierKind === 'email') user.email = identifierValue;
+    if (identifierKind === 'phone') user.phone = identifierValue;
+    await notificationapi.send({
+      notificationId: process.env.NOTIFICATIONAPI_TEMPLATE_ID || 'login-code',
+      user,
+      mergeTags: { code }
+    });
+    return true;
+  } catch (e) {
+    console.warn('[notify] send failed:', e?.message || e);
+    return false;
+  }
+}
+
+async function sendViaFallbackProviders({ identifierKind, identifierValue, code }) {
+  try {
+    if (identifierKind === 'email') {
+      const haveSendgrid = !!process.env.SENDGRID_API_KEY;
+      const haveSmtp     = !!process.env.SMTP_HOST;
+      if (!haveSendgrid && !haveSmtp) {
+        console.log(`[MAIL:NOOP] to=${identifierValue} code=${code}`);
+        return true;
+      }
+      const nodemailer = require('nodemailer');
+      let transporter;
+      if (haveSendgrid) {
+        const sgTransport = require('nodemailer-sendgrid').default;
+        transporter = nodemailer.createTransport(sgTransport({ apiKey: process.env.SENDGRID_API_KEY }));
+      } else {
+        transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: false,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+      }
+      await transporter.sendMail({
+        from: process.env.MAIL_FROM || 'Fortified Fantasy <no-reply@fortifiedfantasy.com>',
+        to: identifierValue,
+        subject: 'Your Fortified Fantasy sign-in code',
+        text: `Your code is: ${code} (valid for 10 minutes)`,
+      });
+      return true;
+    }
+    if (identifierKind === 'phone') {
+      const haveTwilio = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
+      if (!haveTwilio) {
+        console.log(`[SMS:NOOP] to=${identifierValue} code=${code}`);
+        return true;
+      }
+      const twilio = require('twilio')(
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN
+      );
+      await twilio.messages.create({
+        to: identifierValue,
+        from: process.env.TWILIO_FROM,
+        body: `Fortified Fantasy code: ${code}`,
+      });
+      return true;
+    }
+  } catch (e) {
+    console.warn('[fallback send] failed:', e?.message || e);
+  }
+  return false;
+}
+
+async function sendCode({ identifierKind, identifierValue, code }) {
+  const viaNotif = await sendViaNotificationAPI({ identifierKind, identifierValue, code });
+  if (viaNotif) return;
+  await sendViaFallbackProviders({ identifierKind, identifierValue, code });
+}
 
 // ===== /verify/start (server generates & sends code; ties to invite) =====
 router.post('/verify/start', async (req, res) => {
@@ -107,15 +206,8 @@ router.post('/verify/start', async (req, res) => {
       [value, invite?.invite_id || null]
     );
 
-    await notificationApi.send({
-      notificationId: 'signup-code',
-      user: {
-        id: value,
-        email: kind === 'email' ? value : undefined,
-        phone: kind === 'phone' ? value : undefined
-      },
-      mergeTags: { code }
-    });
+await sendCode({ identifierKind: kind, identifierValue: value, code });
+
 
     res.json({ ok:true, sent:true, invite_id: invite?.invite_id || null });
   } catch (e) {
