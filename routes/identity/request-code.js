@@ -52,23 +52,7 @@ const CREATE_REQUESTS_SQL = `
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQUESTS_SQL);
 }
-// right after `const member = await findOrCreateMember(kind, value);`
-res.cookie('ff_interacted', member.interacted_code, {
-  httpOnly: true,
-  sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
-});
-return res.status(200).json({
-  ok: true,
-  sent: true,
-  member_id: member.member_id,
-  interacted_code: member.interacted_code,   // <— optional
-  signup_url: u.pathname + u.search,
-  ms: Date.now() - start
-});
 
-/* ------------------------------- member helpers --------------------------- */
 /* ------------------------------- member helpers --------------------------- */
 function makeInteractedCode(kind) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -79,21 +63,28 @@ function makeInteractedCode(kind) {
 }
 
 async function findOrCreateMember(kind, value) {
-  const col = kind === 'email' ? 'email' : kind === 'phone' ? 'phone_e164' : 'username';
+  const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
+
+  // Try to find existing
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
   if (f.rows[0]) {
-    // backfill if existing row is missing interacted_code
+    // Backfill interacted_code if missing
     if (!f.rows[0].interacted_code) {
       const interacted = makeInteractedCode(kind);
       const upd = await pool.query(
-        `UPDATE ff_member SET interacted_code = $1, last_seen_at = now() WHERE member_id = $2 RETURNING *`,
+        `UPDATE ff_member
+           SET interacted_code = $1,
+               last_seen_at     = now()
+         WHERE member_id = $2
+         RETURNING *`,
         [interacted, f.rows[0].member_id]
       );
       return upd.rows[0];
     }
     return f.rows[0];
   }
-  // NEW member -> write interacted_code (NOT NULL) and timestamps
+
+  // Create minimal new member with interacted_code (NOT NULL)
   const interacted = makeInteractedCode(kind);
   const ins = await pool.query(
     `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
@@ -103,7 +94,6 @@ async function findOrCreateMember(kind, value) {
   );
   return ins.rows[0];
 }
-
 
 function makeCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -145,7 +135,7 @@ async function sendViaNotificationAPI({ identifierKind, identifierValue, code })
     if (identifierKind === 'phone') user.phone = identifierValue;
 
     await notificationapi.send({
-      notificationId: process.env.NOTIFICATIONAPI_TEMPLATE_ID || 'login-code', // configure in dashboard
+      notificationId: process.env.NOTIFICATIONAPI_TEMPLATE_ID || 'login-code',
       user,
       mergeTags: { code }
     });
@@ -214,7 +204,6 @@ async function sendCode({ identifierKind, identifierValue, code }) {
   // Try NotificationAPI first, then fallback. Never throw.
   const viaNotif = await sendViaNotificationAPI({ identifierKind, identifierValue, code });
   if (viaNotif) return;
-
   await sendViaFallbackProviders({ identifierKind, identifierValue, code });
 }
 
@@ -246,51 +235,52 @@ router.post('/', async (req, res) => {
       [kind, value, ipHash]
     );
 
-    // Find or create member, write a 6-digit login_code (10-min TTL)
+    // Ensure we have a member and an interacted_code
     const member = await findOrCreateMember(kind, value);
-    
+
+    // Generate login code + expiry
     const code = makeCode();
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    // IMPORTANT: also ensure interacted_code is set for older rows (COALESCE)
+    const interacted = member.interacted_code || makeInteractedCode(kind);
     await pool.query(
       `UPDATE ff_member
-          SET login_code = $1,
-              login_code_expires = $2,
-              last_seen_at = now()
-        WHERE member_id = $3`,
-      [code, exp, member.member_id]
+          SET interacted_code     = COALESCE(interacted_code, $1),
+              login_code          = $2,
+              login_code_expires  = $3,
+              last_seen_at        = now()
+        WHERE member_id = $4`,
+      [interacted, code, exp, member.member_id]
     );
 
-    // Send code — BUT even if send fails, we still proceed to signup
-    try {
-      await sendCode({ identifierKind: kind, identifierValue: value, code });
-    } catch (e) {
-      console.warn('[request-code] send skipped/failed:', e?.message || e);
-    }
+    // Set handoff cookie like signup flow expects
+    res.cookie('ff_interacted', interacted, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
+    });
 
-    // Always return signup_url so client continues the flow
+    // Try to send (never blocks continuation)
+    try { await sendCode({ identifierKind: kind, identifierValue: value, code }); } catch {}
+
+    // Always return signup_url so the client navigates (your page checks this) :contentReference[oaicite:1]{index=1}
     const u = new URL('/signup', 'https://fortifiedfantasy.com');
     if (kind === 'email')  u.searchParams.set('email', value);
     if (kind === 'phone')  u.searchParams.set('phone', value);
     if (kind === 'handle') u.searchParams.set('handle', value);
 
-// right after `const member = await findOrCreateMember(kind, value);`
-res.cookie('ff_interacted', member.interacted_code, {
-  httpOnly: true,
-  sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
-});
-return res.status(200).json({
-  ok: true,
-  sent: true,
-  member_id: member.member_id,
-  interacted_code: member.interacted_code,   // <— optional
-  signup_url: u.pathname + u.search,
-  ms: Date.now() - start
-});
+    return res.status(200).json({
+      ok: true,
+      sent: true,
+      member_id: member.member_id,
+      interacted_code: interacted,
+      signup_url: u.pathname + u.search,
+      ms: Date.now() - start
+    });
   } catch (err) {
     console.error('identity.request-code error:', err);
-    // Even on unexpected server error, don’t expose internals
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
