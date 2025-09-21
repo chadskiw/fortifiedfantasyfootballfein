@@ -325,7 +325,8 @@ await pool.query(
 
 
     // Set handoff cookie like signup flow expects
-    res.cookie('ff_interacted', interacted, {
+    res.cookie('ff_interacted', member.interacted_code,
+ {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
