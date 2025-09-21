@@ -3,7 +3,7 @@
 // routes/identity.js
 // Helpers for FF identity cookie & codes (CommonJS)
 
-const COOKIE_NAME = 'ff-interacted';
+const COOKIE_NAME = 'ff_interacted';
 const HEADER_NAME = 'x-ff-id';
 const CODE_RE = /^[A-Z0-9]{8}$/;
 
