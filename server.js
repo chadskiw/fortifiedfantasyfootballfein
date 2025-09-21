@@ -270,6 +270,10 @@ const verifyRouter       = asRouter(require('./src/routes/verify'), 'src/routes/
 const handleLoginRouter  = asRouter(require('./routes/identity/handle-login.js'), 'routes/identity/handle-login');
 const contactsRouter     = asRouter(require('./routes/identity/contacts'), 'routes/identity/contacts');
 const espnIngestRouter = require('./src/routes/espn-injest.js')(pool);
+// server.js (or wherever you build your Express app)
+const createEspnAuthRouter = require('./api/platforms/espn-auth');
+app.use('/api/platforms/espn', createEspnAuthRouter(pool));
+
 // server.js (or app.js)
 const createMembersRouter = require('./src/api/members'); // path to file above
 // ...
