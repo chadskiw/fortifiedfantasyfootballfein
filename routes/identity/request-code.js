@@ -128,7 +128,7 @@ async function findOrCreateMember(kind, value) {
                 last_seen_at = now()
           WHERE member_id = $4
           RETURNING *`,
-        [triple.adj1, triple.adj2, triple.noun, row.member_id]
+        [triple.adj1, triple.adj2, triple.noun, row.member_id || null]
       );
       return upd.rows[0];
     }
@@ -319,7 +319,7 @@ await pool.query(
           login_code_expires = $2,
           last_seen_at       = now()
     WHERE member_id = $3`,
-  [code, exp, member.member_id]
+  [code, exp, member.member_id || null]
 );
 
 
@@ -344,7 +344,7 @@ await pool.query(
     return res.status(200).json({
       ok: true,
       sent: true,
-      member_id: member.member_id,
+      member_id: member.member_id || null,
       interacted_code: interacted,
       signup_url: u.pathname + u.search,
       ms: Date.now() - start
