@@ -19,7 +19,6 @@ const verifyRouter      = require('./src/routes/verify');           // POST /api
 const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 // const platformRouter  = require('./src/routes/platforms');        // (optional, not mounted below)
-const identityRouter = require('./routes/identity-api');
 const handleLoginRouter = require('./routes/identity/handle-login.js');
 
 
