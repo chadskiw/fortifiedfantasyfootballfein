@@ -62,7 +62,13 @@ const CREATE_REQ_SQL = `
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQ_SQL);
 }
-
+function makeInteractedCode(kind, value) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let base = '';
+  for (let i = 0; i < 8; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
+  const label = kind === 'email' ? 'EMAIL' : kind === 'phone' ? 'PHONE' : kind === 'handle' ? 'HANDLE' : 'UNKNOWN';
+  return `${base}-${label}:${value}`;   // e.g. 7KX94Q2N-PHONE:+17175218287
+}
 /* ----- member helpers ----- */
 async function findOrCreateMember(kind, value) {
   const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
