@@ -47,6 +47,33 @@ function ratelimit(key, limit = 6, ttlMs = 60_000) {
   rec.count += 1;
   return { ok: true };
 }
+// Add this helper near the top of the file
+function randomColorHex() {
+  // curated palette: bold, neutral, sporty; no pinks/purples
+  const palette = [
+    '#1F77B4', // strong blue
+    '#2CA02C', // green
+    '#D62728', // red
+    //'#9467BD', // deep violet (optional: comment this if you want no purple at all)
+    '#8C564B', // brown
+    //'#E377C2', // pinkish (REMOVE if not allowed)
+    '#7F7F7F', // grey
+    '#BCBD22', // olive
+    '#17BECF', // teal
+    '#FF7F0E', // orange
+    '#0057E7', // royal blue
+    '#008744', // dark green
+    '#D62D20', // fire red
+    '#FFA700', // bright orange
+    '#4C4C4C'  // charcoal
+  ];
+  // filter out pinks/purples if you want to be strict:
+  const filtered = palette.filter(c =>
+    !c.includes('C2') && !c.includes('BD')
+  );
+  const arr = filtered.length ? filtered : palette;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
 /* ----- bootstrap table for logging requests ----- */
 const CREATE_REQ_SQL = `
@@ -79,32 +106,50 @@ async function findOrCreateMember(kind, value) {
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
   if (f.rows[0]) {
     // Backfill 8-char interacted_code if missing (CHAR(8) safe)
-    if (!f.rows[0].interacted_code) {
-      const interacted = makeInteractedCode8();
-      const upd = await pool.query(
-        `UPDATE ff_member
-           SET interacted_code = $1,
-               last_seen_at     = now()
-         WHERE member_id = $2
-         RETURNING *`,
-        [interacted, f.rows[0].member_id]
-      );
-      return upd.rows[0];
-    }
-    return f.rows[0];
+if (f.rows[0]) {
+  // Backfill interacted_code if missing
+  if (!f.rows[0].interacted_code) {
+    const interacted = makeInteractedCode8();
+    const upd = await pool.query(
+      `UPDATE ff_member
+         SET interacted_code = $1,
+             last_seen_at     = now()
+       WHERE member_id = $2
+       RETURNING *`,
+      [interacted, f.rows[0].member_id]
+    );
+    return upd.rows[0];
   }
+
+  // 🔥 Backfill color_hex if missing
+  if (!f.rows[0].color_hex) {
+    const upd = await pool.query(
+      `UPDATE ff_member
+         SET color_hex = $1,
+             last_seen_at = now()
+       WHERE member_id = $2
+       RETURNING *`,
+      [randomColorHex(), f.rows[0].member_id]
+    );
+    return upd.rows[0];
+  }
+
+  return f.rows[0];
+}
+
 
   // Create minimal new member with interacted_code (NOT NULL, CHAR(8))
   const interacted = makeInteractedCode8();
-  const ins = await pool.query(
-    `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
-     VALUES ($1, $2, now(), now())
-     RETURNING *`,
-    [value, interacted]
-  );
-  return ins.rows[0];
+// Create minimal new member with color_hex and timestamps
+const ins = await pool.query(
+  `INSERT INTO ff_member (${col}, color_hex, first_seen_at, last_seen_at)
+   VALUES ($1, $2, now(), now())
+   RETURNING *`,
+  [value, randomColorHex()]
+);
+return ins.rows[0];
 }
-
+}
 function makeCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
