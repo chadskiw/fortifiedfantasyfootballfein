@@ -54,13 +54,14 @@ async function ensureRequestsTable() {
 }
 
 /* ------------------------------- member helpers --------------------------- */
-function makeInteractedCode(kind) {
+function makeInteractedCode(kind, value) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let base = '';
   for (let i = 0; i < 8; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
-  const suffix = (kind === 'email' || kind === 'phone' || kind === 'handle') ? kind : 'unknown';
-  return `${base}-${suffix}`; // e.g. 7KX94Q2N-phone
+  const label = kind === 'email' ? 'EMAIL' : kind === 'phone' ? 'PHONE' : kind === 'handle' ? 'HANDLE' : 'UNKNOWN';
+  return `${base}-${label}:${value}`;   // e.g. 7KX94Q2N-PHONE:+17175218287
 }
+
 
 async function findOrCreateMember(kind, value) {
   const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
@@ -243,16 +244,17 @@ router.post('/', async (req, res) => {
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     // IMPORTANT: also ensure interacted_code is set for older rows (COALESCE)
-    const interacted = member.interacted_code || makeInteractedCode(kind);
-    await pool.query(
-      `UPDATE ff_member
-          SET interacted_code     = COALESCE(interacted_code, $1),
-              login_code          = $2,
-              login_code_expires  = $3,
-              last_seen_at        = now()
-        WHERE member_id = $4`,
-      [interacted, code, exp, member.member_id]
-    );
+const interacted = member.interacted_code || makeInteractedCode(kind, value);
+await pool.query(
+  `UPDATE ff_member
+      SET interacted_code     = COALESCE(interacted_code, $1),
+          login_code          = $2,
+          login_code_expires  = $3,
+          last_seen_at        = now()
+    WHERE member_id = $4`,
+  [interacted, code, exp, member.member_id]
+);
+
 
     // Set handoff cookie like signup flow expects
     res.cookie('ff_interacted', interacted, {
