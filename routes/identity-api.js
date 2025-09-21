@@ -136,7 +136,7 @@ function genCode() {
 }
 
 // START: generate + send a code and tie it to the invite
-app.post('/api/verify/start', async (req, res) => {
+router.post('/api/verify/start', async (req, res) => {
   try {
     const { kind: rawKind, value: rawValue } = req.body || {};
     const { kind, value } = normalizeIdentifier(rawKind, rawValue);
@@ -190,7 +190,7 @@ app.post('/api/verify/start', async (req, res) => {
 });
 
 // CONFIRM: validate code and mark invite joined
-app.post('/api/verify/confirm', async (req, res) => {
+router.post('/api/verify/confirm', async (req, res) => {
   try {
     const { kind: rawKind, value: rawValue, code } = req.body || {};
     const { kind, value } = normalizeIdentifier(rawKind, rawValue);
