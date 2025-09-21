@@ -1,4 +1,3 @@
-CHECK THIS OUT
 // TRUE_LOCATION: functions/api/[[path]].js
 // IN_USE: FALSE
 export async function onRequest({ request }) {

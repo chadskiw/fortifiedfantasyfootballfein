@@ -1,4 +1,4 @@
-CHECK THIS OUT
+// CHECK THIS OUT
 // TRUE_LOCATION: functions/api/fein-auth/fein/meta/selftest.js
 // IN_USE: FALSE
 // GET /api/fein-auth/fein/meta/selftest
