@@ -269,7 +269,7 @@ const espnRouter         = asRouter(require('./routers/espnRouter'), 'routers/es
 const verifyRouter       = asRouter(require('./src/routes/verify'), 'src/routes/verify');
 const handleLoginRouter  = asRouter(require('./routes/identity/handle-login.js'), 'routes/identity/handle-login');
 const contactsRouter     = asRouter(require('./routes/identity/contacts'), 'routes/identity/contacts');
-const espnIngestRouter = require('./api/platforms/espn-injest.js')(pool);
+const espnIngestRouter = require('./src/routes/espn-injest.js')(pool);
 app.use('/api/platforms/espn', espnIngestRouter);
 
 // ---------- Mounted Routers ----------
