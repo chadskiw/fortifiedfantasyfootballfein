@@ -1,126 +1,166 @@
-// TRUE_LOCATION: src/routes/verify.js
-// IN_USE: TRUE
-// routes/verify.js
+// src/routes/verify.js
 const express = require('express');
-const router = express.Router();
-const { pool } = require('../../server');
 const crypto = require('crypto');
-const { buildCodeFromCookie, buildSeededCode } = require('../util/anagram');
+const { pool } = require('../db/pool');
+// If you already have these helpers somewhere else, import them instead of redefining.
+const { notificationApi } = require('../../notificationApi'); // adjust path if needed
 
+const router = express.Router();
+router.use(express.json());
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
-const norm = (v='') => String(v).trim();
-const normEmail = (v='') => norm(v).toLowerCase();
-const normPhone = (v='') => '+' + norm(v).replace(/[^\d]/g, '');
+// ===== invite helper (inline for now; move to /src/lib/invite.js later) =====
+const INVITE_COOKIE = 'ff_interacted';
+function getLocale(req){ const h = String(req.headers['accept-language'] || ''); return h.split(',')[0] || null; }
+function getTz(req){ return String(req.headers['x-ff-tz'] || '') || null; }
 
-function hashIP(ip) {
-  return crypto.createHash('sha256').update(ip || '').digest('hex');
+function makeInteractedCode(){
+  return crypto.randomBytes(6).toString('base64url').slice(0,8).toUpperCase();
 }
-// --- Optional NotificationAPI (won't crash if not installed) ---
-let notificationapi = null;
-try {
-  notificationapi = require('notificationapi-node-server-sdk').default;
-  notificationapi.init(
-    process.env.NOTIFICATIONAPI_CLIENT_ID || '',
-    process.env.NOTIFICATIONAPI_CLIENT_SECRET || ''
+
+async function upsertInviteForRequest(req, res){
+  let code = (req.cookies?.[INVITE_COOKIE] || '').trim();
+  if (!code) code = makeInteractedCode();
+
+  const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
+  const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
+  const landingUrl = String(req.headers['x-ff-landing'] || req.originalUrl || req.url || '');
+  const referrer   = String(req.get('referer') || '');
+  const ua         = String(req.get('user-agent') || '');
+  const locale     = getLocale(req);
+  const tz         = getTz(req);
+
+  const { rows } = await pool.query(
+    `INSERT INTO ff_invite (interacted_code, invited_at, source, medium, campaign, landing_url, referrer, user_agent, ip_hash, locale, tz)
+     VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (interacted_code) DO UPDATE
+       SET landing_url = COALESCE(ff_invite.landing_url, EXCLUDED.landing_url),
+           referrer    = COALESCE(ff_invite.referrer,    EXCLUDED.referrer),
+           user_agent  = COALESCE(ff_invite.user_agent,  EXCLUDED.user_agent),
+           ip_hash     = COALESCE(ff_invite.ip_hash,     EXCLUDED.ip_hash),
+           locale      = COALESCE(ff_invite.locale,      EXCLUDED.locale),
+           tz          = COALESCE(ff_invite.tz,          EXCLUDED.tz)
+     RETURNING invite_id, interacted_code`,
+    [
+      code,
+      req.query.source || null,
+      req.query.medium || null,
+      req.query.campaign || null,
+      landingUrl || null,
+      referrer || null,
+      ua || null,
+      ipHash || null,
+      locale || null,
+      tz || null,
+    ]
   );
-} catch (e) {
-  console.warn('[notify] SDK not available; skipping:', e?.message || e);
+
+  const invite = rows[0];
+  if (!req.cookies?.[INVITE_COOKIE]) {
+    res.cookie(INVITE_COOKIE, invite.interacted_code, {
+      httpOnly: true, secure: true, sameSite: 'Lax',
+      maxAge: 1000 * 60 * 60 * 24 * 365
+    });
+  }
+  return invite;
 }
 
-/** POST /api/verify
- * body: { email? , phone? , code }
- * If code matches derived(ff_sess): upsert member.
- * Else: issue a new seeded code (no edits to email/phone) and return 401 with retry:true.
- */
-router.post('/verify', async (req, res) => {
+// ===== identifier + code helpers =====
+const isEmail = (x='') => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(x).trim());
+const isPhone = (x='') => /^\+?[0-9][0-9\s\-().]{5,}$/.test(String(x).trim());
+function normalizeIdentifier(kind, value){
+  const v = String(value || '').trim();
+  if (kind === 'email' && isEmail(v)) return { kind:'email', value:v };
+  if (kind === 'phone') {
+    let cleaned = v.replace(/[^\d+]/g, '');
+    if (!cleaned.startsWith('+') && cleaned.length === 10) cleaned = '+1' + cleaned;
+    if (/^\+\d{7,15}$/.test(cleaned)) return { kind:'phone', value:cleaned };
+  }
+  return { kind:null, value:null };
+}
+function genCode(){ return crypto.randomInt(0, 1_000_000).toString().padStart(6,'0'); }
+
+// ===== /verify/start (server generates & sends code; ties to invite) =====
+router.post('/verify/start', async (req, res) => {
   try {
-    const ffSess = req.cookies?.ff_sess;
-    if (!ffSess) return res.status(400).json({ ok:false, error:'no_session' });
+    const { kind: rawKind, value: rawValue } = req.body || {};
+    const { kind, value } = normalizeIdentifier(rawKind, rawValue);
+    if (!kind || !value) return res.status(422).json({ ok:false, error:'invalid_identifier' });
 
-    // IMPORTANT: identifiers are not editable here; we accept only those sent now and use same on retry
-    const rawEmail = norm(req.body?.email || '');
-    const rawPhone = norm(req.body?.phone || '');
-    const email = rawEmail && EMAIL_RE.test(rawEmail) ? normEmail(rawEmail) : null;
-    const phone = !email && rawPhone && PHONE_RE.test(rawPhone) ? normPhone(rawPhone) : null;
-    if (!email && !phone) return res.status(400).json({ ok:false, error:'missing_identifier' });
+    const invite = await upsertInviteForRequest(req, res);
+    const code = genCode();
 
-    const userCode = norm(req.body?.code || '').toUpperCase();
-    if (!userCode) return res.status(400).json({ ok:false, error:'missing_code' });
+    await pool.query(
+      `INSERT INTO ff_identity_requests
+        (identifier_kind, identifier_value, code, expires_at, invite_id, ip_hash)
+       VALUES ($1,$2,$3, now() + interval '10 minutes', $4, $5)`,
+      [
+        kind,
+        value,
+        code,
+        invite?.invite_id || null,
+        crypto.createHash('sha256').update(String(req.headers['cf-connecting-ip'] || req.ip || '')).digest('hex'),
+      ]
+    );
 
-    const expected = buildCodeFromCookie(ffSess);
+    await pool.query(
+      `UPDATE ff_invite SET first_identifier = COALESCE(first_identifier, $1) WHERE invite_id = $2`,
+      [value, invite?.invite_id || null]
+    );
 
-    if (userCode === expected) {
-      // ✅ success → upsert ff_member
-      const ua = String(req.get('user-agent') || '').slice(0, 512);
-      const ip = hashIP(req.headers['cf-connecting-ip'] || req.ip || '');
+    await notificationApi.send({
+      notificationId: 'signup-code',
+      user: {
+        id: value,
+        email: kind === 'email' ? value : undefined,
+        phone: kind === 'phone' ? value : undefined
+      },
+      mergeTags: { code }
+    });
 
-      const q = await pool.query(`
-        INSERT INTO ff_member (
-          email, phone_e164, email_verified_at, phone_verified_at,
-          first_seen_at, last_seen_at, user_agent, ip_hash
-        )
-        VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6)
-        ON CONFLICT (email) DO UPDATE SET
-          last_seen_at = NOW(),
-          email_verified_at = COALESCE(ff_member.email_verified_at, $3),
-          phone_verified_at = CASE WHEN $2 IS NOT NULL THEN NOW() ELSE ff_member.phone_verified_at END,
-          user_agent = $5,
-          ip_hash = $6
-        RETURNING member_id, username, email, phone_e164, email_verified_at, phone_verified_at
-      `, [
-        email || null,
-        phone || null,
-        email ? new Date().toISOString() : null,
-        phone ? new Date().toISOString() : null,
-        ua,
-        ip
-      ]);
-
-      const member = q.rows[0];
-
-      // Link any invite rows for this identifier
-      try {
-        await pool.query(
-          `UPDATE ff_invite
-              SET joined_at = NOW(), member_id = $1
-            WHERE first_identifier = $2 AND joined_at IS NULL`,
-          [member.member_id, email || phone]
-        );
-      } catch (e) {
-        console.warn('[verify] invite link skipped:', e.code || e.message);
-      }
-
-      return res.json({ ok:true, member });
-    }
-
-    // ❌ mismatch → derive new code from (ff_sess + timestamp) and (mock) send to SAME identifier
-    const retryCode = buildSeededCode(ffSess, Date.now());
-    console.log(`[Mock Retry] To: ${email || phone} — New code: ${retryCode}`);
-
-    // Optionally record a new invite attempt
-    try {
-      await pool.query(
-        `INSERT INTO ff_invite (interacted_code, member_id, invited_at, source, medium, user_agent, ip_hash, first_identifier)
-         VALUES ($1, NULL, NOW(), $2, $3, $4, $5, $6)`,
-        [
-          retryCode,
-          'verify-retry',
-          email ? 'email' : 'sms',
-          String(req.get('user-agent') || '').slice(0, 512),
-          hashIP(req.headers['cf-connecting-ip'] || req.ip || ''),
-          email || phone
-        ]
-      );
-    } catch (e) {
-      console.warn('[verify] retry invite insert skipped:', e.code || e.message);
-    }
-
-    return res.status(401).json({ ok:false, error:'invalid_code', retry:true });
+    res.json({ ok:true, sent:true, invite_id: invite?.invite_id || null });
   } catch (e) {
-    console.error('[verify]', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    console.error('[verify/start]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// ===== /verify/confirm =====
+router.post('/verify/confirm', async (req, res) => {
+  try {
+    const { kind: rawKind, value: rawValue, code } = req.body || {};
+    const { kind, value } = normalizeIdentifier(rawKind, rawValue);
+    if (!kind || !value || !code) return res.status(422).json({ ok:false, error:'bad_request' });
+
+    const { rows } = await pool.query(
+      `SELECT id, expires_at, used_at, invite_id
+         FROM ff_identity_requests
+        WHERE identifier_kind=$1 AND identifier_value=$2 AND code=$3
+        ORDER BY id DESC
+        LIMIT 1`,
+      [kind, value, code]
+    );
+
+    const hit = rows[0];
+    if (!hit) return res.status(404).json({ ok:false, error:'not_found' });
+    if (hit.used_at) return res.status(409).json({ ok:false, error:'already_used' });
+    if (new Date(hit.expires_at) < new Date()) return res.status(410).json({ ok:false, error:'expired' });
+
+    await pool.query(`UPDATE ff_identity_requests SET used_at = now() WHERE id=$1`, [hit.id]);
+
+    const memberId = req.session?.member_id || null;
+    await pool.query(
+      `UPDATE ff_invite
+          SET joined_at = COALESCE(joined_at, now()),
+              member_id = COALESCE(member_id, $1),
+              first_identifier = COALESCE(first_identifier, $2)
+        WHERE invite_id = $3`,
+      [memberId, value, hit.invite_id]
+    );
+
+    res.json({ ok:true, verified:true, invite_id: hit.invite_id || null });
+  } catch (e) {
+    console.error('[verify/confirm]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
