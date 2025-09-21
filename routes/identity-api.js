@@ -7,7 +7,6 @@ const { pool } = require('../src/db/pool'); // adjust path if your pool lives el
 const router = express.Router();
 router.use(express.json());
 
-
 /* ----- health (optional) ----- */
 router.get('/health', async (req, res) => {
   try {
@@ -19,8 +18,8 @@ router.get('/health', async (req, res) => {
 });
 
 /* ----- id normalize ----- */
-const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const PHONE_RX = /^\+?[0-9\s().-]{7,20}$/;
+const EMAIL_RX  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const PHONE_RX  = /^\+?[0-9\s().-]{7,20}$/;
 const HANDLE_RX = /^[a-zA-Z0-9_.]{3,24}$/;
 
 function normalizeIdentifier(raw) {
@@ -62,13 +61,16 @@ const CREATE_REQ_SQL = `
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQ_SQL);
 }
-function makeInteractedCode(kind, value) {
+
+/* ----- LEGACY-SAFE 8-char code (fits CHAR(8)) ----- */
+function makeInteractedCode8() {
+  // no ambiguous chars; exactly 8 chars
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let base = '';
-  for (let i = 0; i < 8; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
-  const label = kind === 'email' ? 'EMAIL' : kind === 'phone' ? 'PHONE' : kind === 'handle' ? 'HANDLE' : 'UNKNOWN';
-  return `${base}-${label}:${value}`;   // e.g. 7KX94Q2N-PHONE:+17175218287
+  let out = '';
+  for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out; // e.g. 7KX94Q2N
 }
+
 /* ----- member helpers ----- */
 async function findOrCreateMember(kind, value) {
   const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
@@ -76,9 +78,9 @@ async function findOrCreateMember(kind, value) {
   // Try to find existing
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
   if (f.rows[0]) {
-    // Backfill interacted_code if missing
+    // Backfill 8-char interacted_code if missing (CHAR(8) safe)
     if (!f.rows[0].interacted_code) {
-const interacted = makeInteractedCode(kind, value);
+      const interacted = makeInteractedCode8();
       const upd = await pool.query(
         `UPDATE ff_member
            SET interacted_code = $1,
@@ -92,8 +94,8 @@ const interacted = makeInteractedCode(kind, value);
     return f.rows[0];
   }
 
-  // Create minimal new member with interacted_code (NOT NULL)
-const interacted = makeInteractedCode(kind, value);
+  // Create minimal new member with interacted_code (NOT NULL, CHAR(8))
+  const interacted = makeInteractedCode8();
   const ins = await pool.query(
     `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
      VALUES ($1, $2, now(), now())
@@ -119,7 +121,7 @@ async function sendCode({ identifierKind, identifierValue, code }) {
     console.log(`[SMS:NOOP] ${identifierValue} code=${code}`);
     return;
   }
-  // … hook up nodemailer / twilio the same as before if you’re ready …
+  // hook up nodemailer / twilio as desired
 }
 
 /* ----- POST /api/identity/request-code ----- */
@@ -144,27 +146,27 @@ router.post('/request-code', async (req, res) => {
 
     await ensureRequestsTable();
     await pool.query(
-      `insert into ff_identity_requests (identifier_kind, identifier_value, ip_hash) values ($1,$2,$3)`,
+      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
     const member = await findOrCreateMember(kind, value);
 
     const code = makeCode();
-    const exp = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await pool.query(
-      `update ff_member
-         set login_code = $1,
-             login_code_expires = $2,
-             last_seen_at = now()
-       where member_id = $3`,
+      `UPDATE ff_member
+          SET login_code         = $1,
+              login_code_expires = $2,
+              last_seen_at       = now()
+        WHERE member_id = $3`,
       [code, exp, member.member_id]
     );
 
     await sendCode({ identifierKind: kind, identifierValue: value, code });
 
     // IMPORTANT: return signup_url so the client navigates
-    const u = new URL('/signup', 'https://fortifiedfantasy.com'); // can be relative if you prefer
+    const u = new URL('/signup', 'https://fortifiedfantasy.com');
     if (kind === 'email')  u.searchParams.set('email', value);
     if (kind === 'phone')  u.searchParams.set('phone', value);
     if (kind === 'handle') u.searchParams.set('handle', value);
