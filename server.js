@@ -43,7 +43,7 @@ module.exports = {
 const crypto = require('crypto');
 // use the *existing* `pool` you already created above (via `new Pool(...)`)
 // so REMOVE/DO NOT RE-IMPORT pool from './db.js'
-const { notificationApi } = require('./notificationApi'); // adjust path/exports if needed
+//const { notificationApi } = require('./notificationApi'); // adjust path/exports if needed
 
 // Reads/writes the visitor token that keys the invite row
 const INVITE_COOKIE = 'ff_interacted'; // (name can be anything consistent)
