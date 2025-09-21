@@ -1,38 +1,48 @@
 // POST /api/identity/contacts/validate
-// body: { email?: string, phone?: string }
-// returns { ok:true, conflicts:[{field:'email'|'phone', member_id, handle}] }
 router.post('/contacts/validate', async (req, res) => {
   try {
-    const me = cookieMemberId(req); // current logged-in-ish member (if any)
-    const email = (req.body?.email || '').trim().toLowerCase() || null;
-    const phone = (req.body?.phone || '').trim() || null;
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const rawPhone = String(req.body?.phone || '').trim().replace(/[^\d+]/g,'');
+    const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
+    const phone = /^\+?\d{7,20}$/.test(rawPhone) ? (rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`) : null;
 
-    const conflicts = [];
+    const me = req.cookies?.ff_member || null; // your current user (if any)
+
+    const out = { ok: true, email: null, phone: null, actions: { needs_merge: false } };
 
     if (email) {
-      const hit = await findMemberByEmail(email);
-      if (hit && hit.member_id !== me) {
-        conflicts.push({ field:'email', member_id: hit.member_id, handle: hit.username || null });
-      }
-    }
-    if (phone) {
-      const hit = await findMemberByPhone(phone);
-      if (hit && hit.member_id !== me) {
-        conflicts.push({ field:'phone', member_id: hit.member_id, handle: hit.username || null });
-      }
+      const q = await pool.query(
+        `SELECT member_id, email_verified_at IS NOT NULL AS verified
+           FROM ff_member
+          WHERE deleted_at IS NULL AND LOWER(email)=LOWER($1)
+          ORDER BY member_id LIMIT 1`,
+        [email]
+      );
+      const row = q.rows[0];
+      if (!row) out.email = { status: 'available', member_id: null };
+      else if (me && row.member_id === me) out.email = { status: 'owned', member_id: me };
+      else if (row.verified) { out.email = { status: 'taken_verified', member_id: row.member_id }; out.actions.needs_merge = true; }
+      else out.email = { status: 'taken_unverified', member_id: row.member_id };
     }
 
-    if (conflicts.length) {
-      return res.status(409).json({
-        ok:false,
-        error:'contact_conflict',
-        message:'One or more contacts already belong to a different account.',
-        conflicts
-      });
+    if (phone) {
+      const q = await pool.query(
+        `SELECT member_id, phone_verified_at IS NOT NULL AS verified
+           FROM ff_member
+          WHERE deleted_at IS NULL AND phone_e164=$1
+          ORDER BY member_id LIMIT 1`,
+        [phone]
+      );
+      const row = q.rows[0];
+      if (!row) out.phone = { status: 'available', member_id: null };
+      else if (me && row.member_id === me) out.phone = { status: 'owned', member_id: me };
+      else if (row.verified) { out.phone = { status: 'taken_verified', member_id: row.member_id }; out.actions.needs_merge = true; }
+      else out.phone = { status: 'taken_unverified', member_id: row.member_id };
     }
-    return res.json({ ok:true, conflicts:[] });
+
+    res.json(out);
   } catch (e) {
     console.error('[contacts/validate]', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });

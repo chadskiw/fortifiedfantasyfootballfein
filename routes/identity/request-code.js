@@ -1,5 +1,6 @@
-// TRUE_LOCATION: routes/identity/request-code.js
-// IN_USE: TRUE
+// routes/identity/request-code.js
+// COMPLETE + CONFLICT-CHECKS + FULL ff_identity_requests SCHEMA
+
 const express = require('express');
 const crypto = require('crypto');
 const { pool } = require('../../src/db/pool');
@@ -25,6 +26,21 @@ function normalizeIdentifier(raw) {
   return { kind: null, value: null };
 }
 
+// When caller sends { kind, value } explicitly
+function normalizeByKind(kind, value) {
+  const k = String(kind || '').trim().toLowerCase();
+  const v = String(value || '').trim();
+  if (k === 'email' && EMAIL_RX.test(v)) return { kind: 'email', value: v.toLowerCase() };
+  if (k === 'phone') {
+    const digits = v.replace(/[^\d+]/g, '');
+    const only   = digits.replace(/[^\d]/g, '');
+    const e164   = digits.startsWith('+') ? digits : (only.length === 10 ? `+1${only}` : `+${only}`);
+    if (/^\+\d{7,15}$/.test(e164)) return { kind: 'phone', value: e164 };
+  }
+  if (k === 'handle' && HANDLE_RX.test(v)) return { kind: 'handle', value: v };
+  return { kind: null, value: null };
+}
+
 /* ------------------------------ tiny rate limit --------------------------- */
 const recent = new Map(); // key -> { count, resetAt }
 function ratelimit(key, limit = 6, ttlMs = 60_000) {
@@ -39,141 +55,120 @@ function ratelimit(key, limit = 6, ttlMs = 60_000) {
   return { ok: true, remaining: limit - rec.count, resetAt: rec.resetAt };
 }
 
-/* -------------------------- log table (single stmt) ------------------------ */
+/* ----------------------- ff_identity_requests bootstrap -------------------- */
+// Match the fuller schema used by verify flow (code/expires/used/invite_id + indexes)
 const CREATE_REQUESTS_SQL = `
   CREATE TABLE IF NOT EXISTS ff_identity_requests (
     id BIGSERIAL PRIMARY KEY,
     identifier_kind  TEXT NOT NULL,
     identifier_value TEXT NOT NULL,
+    code             TEXT,
+    expires_at       TIMESTAMPTZ,
+    used_at          TIMESTAMPTZ,
+    invite_id        BIGINT,
     ip_hash          TEXT,
     created_at       TIMESTAMPTZ DEFAULT now()
-  )
+  );
+
+  DO $do$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname = 'ff_ir_lookup_idx'
+    ) THEN
+      CREATE INDEX ff_ir_lookup_idx
+        ON ff_identity_requests (identifier_kind, identifier_value, code);
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname = 'ff_ir_expires_idx'
+    ) THEN
+      CREATE INDEX ff_ir_expires_idx
+        ON ff_identity_requests (expires_at);
+    END IF;
+  END
+  $do$;
 `;
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQUESTS_SQL);
 }
-const path = require('path');
-let WORDS;
-try {
-  WORDS = require('../../data/recovery_words.json');
-} catch (_e) {
-  WORDS = { adjectives: [], nouns: [] };
+
+/* ------------------------------- member helpers --------------------------- */
+async function generateUniqueMemberId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  while (true) {
+    let id = '';
+    for (let i = 0; i < 8; i++) id += alphabet[(Math.random() * alphabet.length) | 0];
+    const { rowCount } = await pool.query('SELECT 1 FROM ff_member WHERE member_id=$1 LIMIT 1', [id]);
+    if (rowCount === 0) return id;
+  }
 }
 
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+// read the current member from cookie if present
+function cookieMemberId(req) {
+  return String(req.cookies?.ff_member || '').trim() || null;
+}
+
+async function findMemberByEmail(email) {
+  const { rows } = await pool.query(
+    `SELECT member_id, username FROM ff_member WHERE LOWER(email)=LOWER($1) AND deleted_at IS NULL LIMIT 1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+async function findMemberByPhone(phone) {
+  const { rows } = await pool.query(
+    `SELECT member_id, username FROM ff_member WHERE phone_e164=$1 AND deleted_at IS NULL LIMIT 1`,
+    [phone]
+  );
+  return rows[0] || null;
 }
 
 function makeRecoveryTripleOnce() {
-  const adjs = WORDS.adjectives?.length ? WORDS.adjectives : ['mighty','fearless','electric','legendary'];
-  const nouns = WORDS.nouns?.length ? WORDS.nouns : ['endzone','touchdown','huddle','gridiron'];
-
-  let a1 = pick(adjs), a2 = pick(adjs);
-  // ensure different adjectives
-  for (let i = 0; i < 5 && a2 === a1; i++) a2 = pick(adjs);
-
-  const n1 = pick(nouns);
-  return { adj1: a1, adj2: a2, noun: n1 };
+  const adjs = ['mighty','fearless','electric','legendary','prime','clutch','gritty','steady'];
+  const nouns = ['endzone','touchdown','huddle','gridiron','sideline','backfield'];
+  const a1 = adjs[(Math.random()*adjs.length)|0];
+  let a2 = adjs[(Math.random()*adjs.length)|0];
+  if (a2 === a1) a2 = adjs[(Math.random()*adjs.length)|0];
+  const n1 = nouns[(Math.random()*nouns.length)|0];
+  return { adj1:a1, adj2:a2, noun:n1 };
 }
-
-/**
- * Generate a unique (adj1, adj2, noun) triple under the orderless constraint.
- * - Checks existence using LEAST/GREATEST on adjectives
- * - Retries up to 20 times (extremely unlikely to exhaust with decent lists)
- */
 async function makeUniqueRecoveryTriple() {
-  for (let i = 0; i < 20; i++) {
-    const { adj1, adj2, noun } = makeRecoveryTripleOnce();
-    const { rows } = await pool.query(
-      `SELECT 1
-         FROM ff_member
-        WHERE LEAST(adj1, adj2) = LEAST($1, $2)
-          AND GREATEST(adj1, adj2) = GREATEST($1, $2)
-          AND noun = $3
-        LIMIT 1`,
-      [adj1, adj2, noun]
+  for (let i=0;i<20;i++) {
+    const t = makeRecoveryTripleOnce();
+    const { rowCount } = await pool.query(
+      `SELECT 1 FROM ff_member
+        WHERE LEAST(adj1,adj2)=LEAST($1,$2)
+          AND GREATEST(adj1,adj2)=GREATEST($1,$2)
+          AND noun=$3 LIMIT 1`,
+      [t.adj1,t.adj2,t.noun]
     );
-    if (!rows[0]) return { adj1, adj2, noun };
+    if (rowCount === 0) return t;
   }
-  // As a last resort, just return the last attempt; INSERT will 409 and we’ll retry there.
   return makeRecoveryTripleOnce();
 }
 
-/* ------------------------------- member helpers --------------------------- */
-function makeInteractedCode(kind, value) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let base = '';
-  for (let i = 0; i < 8; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
-  const label = kind === 'email' ? 'EMAIL' : kind === 'phone' ? 'PHONE' : kind === 'handle' ? 'HANDLE' : 'UNKNOWN';
-  return `${base}-${label}:${value}`;   // e.g. 7KX94Q2N-PHONE:+17175218287
-}
-
-
+// ensure or create a member; also ensure a legacy interacted_code
 async function findOrCreateMember(kind, value) {
   const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
+  const f = await pool.query(`SELECT * FROM ff_member WHERE ${col}=$1 LIMIT 1`, [value]);
+  if (f.rows[0]) return f.rows[0];
 
-  // Try to find existing
-  const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
-  if (f.rows[0]) {
-    const row = f.rows[0];
-
-    // Backfill recovery triple if missing any part
-    if (!row.adj1 || !row.adj2 || !row.noun) {
-      const triple = await generateUniqueMemberId();
-      const upd = await pool.query(
-        `UPDATE ff_member
-            SET adj1 = $1,
-                adj2 = $2,
-                noun = $3,
-                last_seen_at = now()
-          WHERE member_id = $4
-          RETURNING *`,
-        [triple.adj1, triple.adj2, triple.noun, row.member_id || null]
-      );
-      return upd.rows[0];
-    }
-    return row;
-  }
-
-  // Create new member with a unique triple
+  const member_id = await generateUniqueMemberId();
   const triple = await makeUniqueRecoveryTriple();
-  // Note: interacted_code becomes optional; we can derive a legacy string if you still want the cookie
-  const legacy = `${triple.adj1}-${triple.adj2}-${triple.noun}`;
-
-  // Robust insert with retry on unique violation (extremely rare)
-  for (let tries = 0; tries < 5; tries++) {
-    try {
-      const ins = await pool.query(
-        `INSERT INTO ff_member (${col}, interacted_code, adj1, adj2, noun, first_seen_at, last_seen_at)
-         VALUES ($1, $2, $3, $4, $5, now(), now())
-         RETURNING *`,
-        [value, legacy, triple.adj1, triple.adj2, triple.noun]
-      );
-      return ins.rows[0];
-    } catch (e) {
-      // 23505 = unique_violation on the index; generate another triple and retry
-      if (e && e.code === '23505') {
-        const t2 = await makeUniqueRecoveryTriple();
-        triple.adj1 = t2.adj1; triple.adj2 = t2.adj2; triple.noun = t2.noun;
-        continue;
-      }
-      throw e;
-    }
-  }
-  // Should never reach here
-  throw new Error('could_not_insert_member_unique_triple');
-}
-
-
-function makeCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  const interacted_code = `${triple.adj1}-${triple.adj2}-${triple.noun}`;
+  const ins = await pool.query(
+    `INSERT INTO ff_member (member_id, ${col}, interacted_code, adj1, adj2, noun, first_seen_at, last_seen_at)
+     VALUES ($1,$2,$3,$4,$5,$6,now(),now())
+     RETURNING *`,
+    [member_id, value, interacted_code, triple.adj1, triple.adj2, triple.noun]
+  );
+  return ins.rows[0];
 }
 
 /* --------------------------- Notification sender --------------------------- */
-// Prefer NotificationAPI; fallback to email/SMS providers. Never throw on send.
-let notifInited = false;
-let notifReady = false;
-let notificationapi = null;
+let notifInited = false, notifReady = false, notificationapi = null;
 function initNotificationAPI() {
   if (notifInited) return notifReady;
   notifInited = true;
@@ -194,16 +189,12 @@ function initNotificationAPI() {
   }
   return notifReady;
 }
-
 async function sendViaNotificationAPI({ identifierKind, identifierValue, code }) {
   try {
-    const ok = initNotificationAPI();
-    if (!ok) return false;
-
+    if (!initNotificationAPI()) return false;
     const user = { id: identifierValue };
     if (identifierKind === 'email') user.email = identifierValue;
     if (identifierKind === 'phone') user.phone = identifierValue;
-
     await notificationapi.send({
       notificationId: process.env.NOTIFICATIONAPI_TEMPLATE_ID || 'login-code',
       user,
@@ -215,16 +206,12 @@ async function sendViaNotificationAPI({ identifierKind, identifierValue, code })
     return false;
   }
 }
-
 async function sendViaFallbackProviders({ identifierKind, identifierValue, code }) {
   try {
     if (identifierKind === 'email') {
       const haveSendgrid = !!process.env.SENDGRID_API_KEY;
       const haveSmtp     = !!process.env.SMTP_HOST;
-      if (!haveSendgrid && !haveSmtp) {
-        console.log(`[MAIL:NOOP] to=${identifierValue} code=${code}`);
-        return true;
-      }
+      if (!haveSendgrid && !haveSmtp) { console.log(`[MAIL:NOOP] to=${identifierValue} code=${code}`); return true; }
       const nodemailer = require('nodemailer');
       let transporter;
       if (haveSendgrid) {
@@ -246,22 +233,11 @@ async function sendViaFallbackProviders({ identifierKind, identifierValue, code 
       });
       return true;
     }
-
     if (identifierKind === 'phone') {
       const haveTwilio = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
-      if (!haveTwilio) {
-        console.log(`[SMS:NOOP] to=${identifierValue} code=${code}`);
-        return true;
-      }
-      const twilio = require('twilio')(
-        process.env.TWILIO_ACCOUNT_SID,
-        process.env.TWILIO_AUTH_TOKEN
-      );
-      await twilio.messages.create({
-        to: identifierValue,
-        from: process.env.TWILIO_FROM,
-        body: `Fortified Fantasy code: ${code}`,
-      });
+      if (!haveTwilio) { console.log(`[SMS:NOOP] to=${identifierValue} code=${code}`); return true; }
+      const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await twilio.messages.create({ to: identifierValue, from: process.env.TWILIO_FROM, body: `Fortified Fantasy code: ${code}` });
       return true;
     }
   } catch (e) {
@@ -269,169 +245,119 @@ async function sendViaFallbackProviders({ identifierKind, identifierValue, code 
   }
   return false;
 }
-
 async function sendCode({ identifierKind, identifierValue, code }) {
-  // Try NotificationAPI first, then fallback. Never throw.
-  const viaNotif = await sendViaNotificationAPI({ identifierKind, identifierValue, code });
-  if (viaNotif) return;
+  if (await sendViaNotificationAPI({ identifierKind, identifierValue, code })) return;
   await sendViaFallbackProviders({ identifierKind, identifierValue, code });
 }
-function normalizeByKind(kind, value) {
-  const s = String(value || '').trim();
-  if (kind === 'email' && EMAIL_RX.test(s)) {
-    return { kind: 'email', value: s.toLowerCase() };
-  }
-  if (kind === 'phone') {
-    const digits = s.replace(/[^\d+]/g, '');
-    const hasPlus = digits.startsWith('+');
-    const onlyDigits = digits.replace(/[^\d]/g, '');
-    const e164ish = hasPlus ? digits : (onlyDigits.length === 10 ? `+1${onlyDigits}` : `+${onlyDigits}`);
-    if (PHONE_RX.test(s) || /^\+\d{7,15}$/.test(e164ish)) {
-      return { kind: 'phone', value: e164ish };
-    }
-  }
-}
-// Uniqueness pre-check
-const me = cookieMemberId(req);
-if (kind === 'email') {
-  const hit = await findMemberByEmail(value);
-  if (hit && hit.member_id !== me) {
-    return res.status(409).json({
-      ok:false, error:'contact_conflict',
-      message:'Email already connected to a different account.',
-      conflicts:[{field:'email', member_id: hit.member_id, handle: hit.username || null}]
-    });
-  }
-}
-if (kind === 'phone') {
-  const hit = await findMemberByPhone(value);
-  if (hit && hit.member_id !== me) {
-    return res.status(409).json({
-      ok:false, error:'contact_conflict',
-      message:'Phone already connected to a different account.',
-      conflicts:[{field:'phone', member_id: hit.member_id, handle: hit.username || null}]
-    });
-  }
-}
-
+function makeCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
 
 /* --------------------------------- route ---------------------------------- */
 // POST /api/identity/request-code
 router.post('/', async (req, res) => {
   const start = Date.now();
   try {
-// TEMP DEBUG (remove in prod)
-if (process.env.NODE_ENV !== 'production') {
-  console.log('[request-code] body:', req.body);
-}
+    // Accept {identifier} OR {kind,value}
+    let detected = { kind:null, value:null };
+    if (req.body?.identifier) {
+      detected = normalizeIdentifier(req.body.identifier);
+    } else if (req.body?.kind && req.body?.value) {
+      detected = normalizeByKind(req.body.kind, req.body.value);
+    }
+    const { kind, value } = detected;
 
-// Accept both payload styles: {identifier} OR {kind,value}
-let identifier = req.body?.identifier;
-let detected = { kind: null, value: null };
+    if (!value) {
+      return res.status(422).json({
+        ok:false, error:'invalid_identifier',
+        message:'Provide a valid email, E.164 phone, or handle.',
+        received: req.body
+      });
+    }
 
-if (identifier) {
-  detected = normalizeIdentifier(identifier);
-} else if (req.body?.kind && req.body?.value) {
-  // If caller sends {kind,value}, trust 'kind' and normalize the 'value'
-  const rawKind = String(req.body.kind || '').trim().toLowerCase();
-  const rawValue = String(req.body.value || '').trim();
-  detected = normalizeByKind(rawKind, rawValue); // add helper below
-} else {
-  detected = { kind: null, value: null };
-}
+    // Uniqueness pre-check (email/phone cannot belong to a *different* member)
+    const me = cookieMemberId(req);
+    if (kind === 'email') {
+      const hit = await findMemberByEmail(value);
+      if (hit && hit.member_id !== me) {
+        return res.status(409).json({
+          ok:false, error:'contact_conflict',
+          message:'Email already connected to a different account.',
+          conflicts:[{ field:'email', member_id: hit.member_id, handle: hit.username || null }]
+        });
+      }
+    }
+    if (kind === 'phone') {
+      const hit = await findMemberByPhone(value);
+      if (hit && hit.member_id !== me) {
+        return res.status(409).json({
+          ok:false, error:'contact_conflict',
+          message:'Phone already connected to a different account.',
+          conflicts:[{ field:'phone', member_id: hit.member_id, handle: hit.username || null }]
+        });
+      }
+    }
 
-const { kind, value } = detected;
-
-if (!value) {
-  return res.status(422).json({
-    ok: false,
-    error: 'invalid_identifier',
-    message: 'Provide a valid email, E.164 phone, or handle.',
-    received: req.body // TEMP: keep for a bit, remove later
-  });
-}
-
-
-    // Rate-limit per (ip+identifier)
+    // Rate limit
     const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
     const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
     const rl = ratelimit(`${ipHash}:${value}`, 6, 60_000);
-    if (!rl.ok) return res.status(429).json({ ok: false, error: 'rate_limited', resetAt: rl.resetAt });
+    if (!rl.ok) return res.status(429).json({ ok:false, error:'rate_limited', resetAt: rl.resetAt });
 
+    // Ensure table exists and log request row
     await ensureRequestsTable();
     await pool.query(
       `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
-    // Ensure we have a member and an interacted_code
+    // Ensure member exists (or create)
     const member = await findOrCreateMember(kind, value);
 
-    // Generate login code + expiry
+    // Create login code + expiry on member (kept on ff_member for your existing flows)
     const code = makeCode();
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await pool.query(
+      `UPDATE ff_member
+          SET login_code=$1, login_code_expires=$2, last_seen_at=now()
+        WHERE member_id=$3`,
+      [code, exp, member.member_id]
+    );
 
-    // IMPORTANT: also ensure interacted_code is set for older rows (COALESCE)
-await pool.query(
-  `UPDATE ff_member
-      SET login_code         = $1,
-          login_code_expires = $2,
-          last_seen_at       = now()
-    WHERE member_id = $3`,
-  [code, exp, member.member_id || null]
-);
-
-
-
-    // Set handoff cookie like signup flow expects
-    res.cookie('ff_interacted', member.interacted_code,
- {
+    // Set cookies for handoff
+    res.cookie('ff_member', String(member.member_id), {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
+      maxAge: 365*24*60*60*1000
+    });
+    const interacted = member.interacted_code || `${member.adj1}-${member.adj2}-${member.noun}`;
+    res.cookie('ff_interacted', interacted, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 365*24*60*60*1000
     });
 
-    // Try to send (never blocks continuation)
-    try { await sendCode({ identifierKind: kind, identifierValue: value, code }); } catch {}
+    // Fire-and-forget send
+    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(()=>{});
 
-    // Always return signup_url so the client navigates (your page checks this) :contentReference[oaicite:1]{index=1}
+    // Where the client should go next
     const u = new URL('/signup', 'https://fortifiedfantasy.com');
     if (kind === 'email')  u.searchParams.set('email', value);
     if (kind === 'phone')  u.searchParams.set('phone', value);
     if (kind === 'handle') u.searchParams.set('handle', value);
 
     return res.status(200).json({
-      ok: true,
-      sent: true,
-      member_id: member.member_id || null,
+      ok:true,
+      sent:true,
+      member_id: member.member_id,
       interacted_code: interacted,
       signup_url: u.pathname + u.search,
       ms: Date.now() - start
     });
   } catch (err) {
     console.error('identity.request-code error:', err);
-    return res.status(500).json({ ok: false, error: 'internal_error' });
+    return res.status(500).json({ ok:false, error:'internal_error' });
   }
 });
-async function generateUniqueMemberId(pool) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
-  function makeId() {
-    let out = '';
-    for (let i = 0; i < 8; i++) {
-      out += alphabet[Math.floor(Math.random() * alphabet.length)];
-    }
-    return out;
-  }
-
-  while (true) {
-    const candidate = makeId();
-    const check = await pool.query(
-      'SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1',
-      [candidate]
-    );
-    if (check.rowCount === 0) return candidate; // unique
-  }
-}
 
 module.exports = router;
