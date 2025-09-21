@@ -119,7 +119,7 @@ async function findOrCreateMember(kind, value) {
 
     // Backfill recovery triple if missing any part
     if (!row.adj1 || !row.adj2 || !row.noun) {
-      const triple = await makeUniqueRecoveryTriple();
+      const triple = await generateUniqueMemberId();
       const upd = await pool.query(
         `UPDATE ff_member
             SET adj1 = $1,
@@ -354,5 +354,24 @@ await pool.query(
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
+async function generateUniqueMemberId(pool) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
+  function makeId() {
+    let out = '';
+    for (let i = 0; i < 8; i++) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+  }
+
+  while (true) {
+    const candidate = makeId();
+    const check = await pool.query(
+      'SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1',
+      [candidate]
+    );
+    if (check.rowCount === 0) return candidate; // unique
+  }
+}
 
 module.exports = router;

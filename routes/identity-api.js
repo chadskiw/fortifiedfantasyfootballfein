@@ -109,18 +109,15 @@ async function findOrCreateMember(kind, value) {
 if (f.rows[0]) {
   // Backfill interacted_code if missing
   if (!f.rows[0].interacted_code) {
-    const interacted = makeInteractedCode8();
-    const upd = await pool.query(
-      `UPDATE ff_member
-         SET interacted_code = $1,
-             last_seen_at     = now()
-       WHERE member_id = $2
-       RETURNING *`,
-      [interacted, f.rows[0].member_id]
-    );
-    return upd.rows[0];
+const memberId = await generateUniqueMemberId(pool);
+const ins = await pool.query(
+  `INSERT INTO ff_member (member_id, ${col}, color_hex, first_seen_at, last_seen_at)
+   VALUES ($1, $2, $3, now(), now())
+   RETURNING *`,
+  [memberId, value, randomColorHex()]
+);
+return ins.rows[0];
   }
-
   // 🔥 Backfill color_hex if missing
   if (!f.rows[0].color_hex) {
     const upd = await pool.query(
@@ -228,5 +225,24 @@ router.post('/request-code', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
+async function generateUniqueMemberId(pool) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
+  function makeId() {
+    let out = '';
+    for (let i = 0; i < 8; i++) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+  }
+
+  while (true) {
+    const candidate = makeId();
+    const check = await pool.query(
+      'SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1',
+      [candidate]
+    );
+    if (check.rowCount === 0) return candidate; // unique
+  }
+}
 
 module.exports = router;
