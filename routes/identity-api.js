@@ -325,48 +325,93 @@ router.post('/request-code', async (req, res) => {
     );
 
     // Ensure member row
-    const member = await findOrCreateMember(kind, value);
-    if (!member || !member.member_id) {
-      // Defensive guard — avoid "cannot read properties of undefined (member_id)"
-      throw new Error('member_creation_failed');
-    }
+  // Ensure member row
+const member = await findOrCreateMember(kind, value);
+if (!member || !member.member_id) {
+  throw new Error('member_creation_failed');
+}
 
-    // Create login code
-const code = makeCode(); // already 6 digits
-const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+// ----- optional body fields for upsert-ish behavior -----
+const incomingHandle = (req.body?.handle || '').trim() || null;
+const incomingHexRaw = (req.body?.hex || '').trim() || null;
 
+const isValidHex = (h) => /^#?[0-9a-f]{6}$/i.test(String(h || '').replace('#',''));
+const normalizeHex = (h) => {
+  if (!isValidHex(h)) return null;
+  const hex = h.startsWith('#') ? h : `#${h}`;
+  return hex.toUpperCase();
+};
+
+// load current values (we already have them on member, but this is safe)
+const current = member; // { member_id, username, color_hex, ... }
+
+// decide next username/hex without ever writing NULL over an existing value
+let nextUsername = incomingHandle || current.username || null;
+
+let nextHex = current.color_hex || null;
+const incomingHex = normalizeHex(incomingHexRaw);
+
+// take a valid incoming hex if provided (including #FFFFFF if user explicitly sent it)
+if (incomingHex) {
+  nextHex = incomingHex;
+}
+
+// if we’re introducing a username and there is still no hex on file, assign one
+if (nextUsername && !nextHex) {
+  // choose a non-conflicting hex for this handle (simple palette example)
+  const palette = ['#1F77B4','#2CA02C','#D62728','#7F7F7F','#BCBD22','#17BECF','#FF7F0E','#008744','#D62D20','#FFA700','#4C4C4C','#0057E7'];
+  // pick any palette color not already used by this username (or just first)
+  // (If you have a stricter uniqueness rule, swap this out for your picker.)
+  nextHex = palette[Math.floor(Math.random() * palette.length)];
+}
+
+// persist username/hex (COALESCE keeps existing values when the "next" is null)
 await pool.query(
   `UPDATE ff_member
-      SET login_code         = LEFT(TRIM($1), 6),
+     SET username     = COALESCE($1, username),
+         color_hex    = COALESCE($2, color_hex),
+         last_seen_at = now()
+   WHERE member_id = $3`,
+  [nextUsername, nextHex, current.member_id]
+);
+
+// Create login code
+const code = makeCode(); // 6 digits
+const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+await pool.query(
+  `UPDATE ff_member
+      SET login_code         = $1,
           login_code_expires = $2,
           last_seen_at       = now()
     WHERE member_id = $3`,
   [code, exp, member.member_id]
 );
-    // Fire-and-forget send (never blocks redirect)
-    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
 
-    // Set the key cookie (member_id is your canonical code)
-    res.cookie('ff_member', member.member_id, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
-    });
+// Fire-and-forget send (never blocks redirect)
+sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
 
-    // Client expects signup_url to proceed
-    const u = new URL('/signup', 'https://fortifiedfantasy.com');
-    if (kind === 'email')  u.searchParams.set('email', value);
-    if (kind === 'phone')  u.searchParams.set('phone', value);
-    if (kind === 'handle') u.searchParams.set('handle', value);
+// Set the key cookie (member_id is your canonical code)
+res.cookie('ff_member', member.member_id, {
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+  maxAge: 1000 * 60 * 60 * 24 * 365
+});
 
-    return res.status(200).json({
-      ok: true,
-      sent: true,
-      member_id: member.member_id,
-      signup_url: u.pathname + u.search,
-      ms: Date.now() - start
-    });
+// Client expects signup_url to proceed
+const u = new URL('/signup', 'https://fortifiedfantasy.com');
+if (kind === 'email')  u.searchParams.set('email', value);
+if (kind === 'phone')  u.searchParams.set('phone', value);
+if (kind === 'handle') u.searchParams.set('handle', value);
+
+return res.status(200).json({
+  ok: true,
+  sent: true,
+  member_id: member.member_id,
+  signup_url: u.pathname + u.search,
+  ms: Date.now() - start
+});
+  
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok: false, error: 'internal_error' });
