@@ -270,6 +270,11 @@ const verifyRouter       = asRouter(require('./src/routes/verify'), 'src/routes/
 const handleLoginRouter  = asRouter(require('./routes/identity/handle-login.js'), 'routes/identity/handle-login');
 const contactsRouter     = asRouter(require('./routes/identity/contacts'), 'routes/identity/contacts');
 const espnIngestRouter = require('./src/routes/espn-injest.js')(pool);
+// server.js (or app.js)
+const createMembersRouter = require('./src/api/members'); // path to file above
+// ...
+app.use('/api/members', createMembersRouter(pool));
+
 app.use('/api/platforms/espn', espnIngestRouter);
 
 // ---------- Mounted Routers ----------
