@@ -178,8 +178,8 @@ function extractEspnCreds(req) {
 // ---------- Middlewares (order matters) ----------
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());                 // must be before routes that read cookies
+app.use(express.urlencoded({ extended: true }));
 app.use(corsMiddleware);
 app.use(rateLimit);
 
@@ -199,27 +199,52 @@ async function fetchByContactsOnly({ email, phone }) {
   return r.rows[0] || null;
 }
 
-async function fetchUsedColorsForHandle(handle) {
-  const r = await pool.query(`
-    SELECT COALESCE(color_hex, '${EFFECTIVE_WHITE}') AS hex
-      FROM ff_member
-     WHERE LOWER(username)=LOWER($1) AND deleted_at IS NULL
-  `, [handle]);
-  return new Set(r.rows.map(x => (x.hex || EFFECTIVE_WHITE).toUpperCase()));
-}
+// ✅ Trust the handle if it matches what's stored for the current cookie
+// GET /api/identity/handle/trust?u=<handle>&hex=<optionalColorHex>
+app.get('/api/identity/handle/trust', async (req, res) => {
+  try {
+    const uParam = String(req.query.u || '').trim();
+    const hexParam = String(req.query.hex || '').trim();
+    if (!uParam) return res.status(400).json({ ok:false, error:'bad_request' });
 
-function sanitizePalette(pal) {
-  if (!Array.isArray(pal)) return [];
-  return pal.map(normHex).filter(Boolean).map(x => x.toUpperCase());
-}
+    // Prefer the canonical member cookie set during request-code
+    const memberId = req.cookies?.ff_member || '';
+    let trusted = false;
 
-function pickAvailableColor(requestedHex, usedSet, palette) {
-  const req = (requestedHex || EFFECTIVE_WHITE).toUpperCase();
-  if (!usedSet.has(req)) return req;
-  const poolColors = palette.filter(h => !usedSet.has(h));
-  if (poolColors.length) return poolColors[(Math.random() * poolColors.length) | 0];
-  return null;
-}
+    if (memberId) {
+      const r = await pool.query(
+        `SELECT username, color_hex FROM ff_member
+         WHERE member_id = $1 AND deleted_at IS NULL
+         LIMIT 1`,
+        [memberId]
+      );
+      const row = r.rows[0];
+      if (row && row.username && row.username.toLowerCase() === uParam.toLowerCase()) {
+        // If hex is provided, also require a match (case-insensitive)
+        if (!hexParam || (row.color_hex || '').toLowerCase() === hexParam.toLowerCase()) {
+          trusted = true;
+        }
+      }
+    } else if (req.cookies?.ff_interacted) {
+      // Fallback: trust via ff_invite if first_identifier is the handle
+      const code = req.cookies.ff_interacted;
+      const r = await pool.query(
+        `SELECT first_identifier FROM ff_invite WHERE interacted_code = $1 LIMIT 1`,
+        [code]
+      );
+      const row = r.rows[0];
+      if (row && row.first_identifier && row.first_identifier.toLowerCase() === uParam.toLowerCase()) {
+        trusted = true;
+      }
+    }
+
+    res.json({ ok:true, trusted });
+  } catch (e) {
+    console.error('[GET /api/identity/handle/trust]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 
 async function handleStats(username) {
   const u = norm(username);
@@ -337,9 +362,6 @@ app.post('/api/members/lookup', async (req, res) => {
 // Aliases
 app.get('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
 app.post('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
-
-// Verify starter stub (kept for FE flows)
-
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
