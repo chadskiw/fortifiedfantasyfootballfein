@@ -276,22 +276,81 @@ async function sendCode({ identifierKind, identifierValue, code }) {
   if (viaNotif) return;
   await sendViaFallbackProviders({ identifierKind, identifierValue, code });
 }
+function normalizeByKind(kind, value) {
+  const s = String(value || '').trim();
+  if (kind === 'email' && EMAIL_RX.test(s)) {
+    return { kind: 'email', value: s.toLowerCase() };
+  }
+  if (kind === 'phone') {
+    const digits = s.replace(/[^\d+]/g, '');
+    const hasPlus = digits.startsWith('+');
+    const onlyDigits = digits.replace(/[^\d]/g, '');
+    const e164ish = hasPlus ? digits : (onlyDigits.length === 10 ? `+1${onlyDigits}` : `+${onlyDigits}`);
+    if (PHONE_RX.test(s) || /^\+\d{7,15}$/.test(e164ish)) {
+      return { kind: 'phone', value: e164ish };
+    }
+  }
+}
+// Uniqueness pre-check
+const me = cookieMemberId(req);
+if (kind === 'email') {
+  const hit = await findMemberByEmail(value);
+  if (hit && hit.member_id !== me) {
+    return res.status(409).json({
+      ok:false, error:'contact_conflict',
+      message:'Email already connected to a different account.',
+      conflicts:[{field:'email', member_id: hit.member_id, handle: hit.username || null}]
+    });
+  }
+}
+if (kind === 'phone') {
+  const hit = await findMemberByPhone(value);
+  if (hit && hit.member_id !== me) {
+    return res.status(409).json({
+      ok:false, error:'contact_conflict',
+      message:'Phone already connected to a different account.',
+      conflicts:[{field:'phone', member_id: hit.member_id, handle: hit.username || null}]
+    });
+  }
+}
+
 
 /* --------------------------------- route ---------------------------------- */
 // POST /api/identity/request-code
 router.post('/', async (req, res) => {
   const start = Date.now();
   try {
-    const { identifier } = req.body || {};
-    const { kind, value } = normalizeIdentifier(identifier);
+// TEMP DEBUG (remove in prod)
+if (process.env.NODE_ENV !== 'production') {
+  console.log('[request-code] body:', req.body);
+}
 
-    if (!value) {
-      return res.status(422).json({
-        ok: false,
-        error: 'invalid_identifier',
-        message: 'Provide a valid email, E.164 phone, or handle.',
-      });
-    }
+// Accept both payload styles: {identifier} OR {kind,value}
+let identifier = req.body?.identifier;
+let detected = { kind: null, value: null };
+
+if (identifier) {
+  detected = normalizeIdentifier(identifier);
+} else if (req.body?.kind && req.body?.value) {
+  // If caller sends {kind,value}, trust 'kind' and normalize the 'value'
+  const rawKind = String(req.body.kind || '').trim().toLowerCase();
+  const rawValue = String(req.body.value || '').trim();
+  detected = normalizeByKind(rawKind, rawValue); // add helper below
+} else {
+  detected = { kind: null, value: null };
+}
+
+const { kind, value } = detected;
+
+if (!value) {
+  return res.status(422).json({
+    ok: false,
+    error: 'invalid_identifier',
+    message: 'Provide a valid email, E.164 phone, or handle.',
+    received: req.body // TEMP: keep for a bit, remove later
+  });
+}
+
 
     // Rate-limit per (ip+identifier)
     const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');

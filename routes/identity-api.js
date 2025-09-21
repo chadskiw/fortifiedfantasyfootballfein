@@ -62,12 +62,65 @@ const CREATE_REQ_SQL = `
     id BIGSERIAL PRIMARY KEY,
     identifier_kind  TEXT NOT NULL,
     identifier_value TEXT NOT NULL,
+    code             TEXT,
+    expires_at       TIMESTAMPTZ,
+    used_at          TIMESTAMPTZ,
+    invite_id        BIGINT,
     ip_hash          TEXT,
     created_at       TIMESTAMPTZ DEFAULT now()
-  )
+  );
+  DO $do$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname = 'ff_ir_lookup_idx'
+    ) THEN
+      CREATE INDEX ff_ir_lookup_idx
+        ON ff_identity_requests (identifier_kind, identifier_value, code);
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname = 'ff_ir_expires_idx'
+    ) THEN
+      CREATE INDEX ff_ir_expires_idx
+        ON ff_identity_requests (expires_at);
+    END IF;
+  END
+  $do$;
 `;
+
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQ_SQL);
+}
+// --- contact existence helpers ---
+async function findMemberByEmail(email) {
+  if (!email) return null;
+  const r = await pool.query(
+    `SELECT member_id, username, email, phone_e164, color_hex
+       FROM ff_member
+      WHERE deleted_at IS NULL AND LOWER(email) = LOWER($1)
+      LIMIT 1`,
+    [email]
+  );
+  return r.rows[0] || null;
+}
+
+async function findMemberByPhone(phone) {
+  if (!phone) return null;
+  const r = await pool.query(
+    `SELECT member_id, username, email, phone_e164, color_hex
+       FROM ff_member
+      WHERE deleted_at IS NULL AND phone_e164 = $1
+      LIMIT 1`,
+    [phone]
+  );
+  return r.rows[0] || null;
+}
+
+function cookieMemberId(req) {
+  // your code already sets 'ff_member' in several flows
+  return (req.cookies && req.cookies.ff_member) ? String(req.cookies.ff_member) : null;
 }
 
 /* -------------------------------------------------------------------------- */
