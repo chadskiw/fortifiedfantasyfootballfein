@@ -176,19 +176,6 @@ function extractEspnCreds(req) {
 }
 
 
-app.use(cors({
-  origin: 'https://fortifiedfantasy.com',
-  credentials: true,
-  allowedHeaders: ['Content-Type','Authorization','x-espn-swid','x-espn-s2','x-fein-key'],
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  maxAge: 600,
-}));
-
-
-
-
-
-
 // ---------- Middlewares (order matters) ----------
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
