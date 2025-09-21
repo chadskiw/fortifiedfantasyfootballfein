@@ -1,4 +1,4 @@
-// POST /api/identity/contacts/validate
+// POST routes\identity\contacts\validate.js
 router.post('/contacts/validate', async (req, res) => {
   try {
     const rawEmail = String(req.body?.email || '').trim().toLowerCase();

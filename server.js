@@ -175,9 +175,25 @@ function extractEspnCreds(req) {
   return false;
 }
 
+
+app.use(cors({
+  origin: 'https://fortifiedfantasy.com',
+  credentials: true,
+  allowedHeaders: ['Content-Type','Authorization','x-espn-swid','x-espn-s2','x-fein-key'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  maxAge: 600,
+}));
+
+
+
+
+
+
 // ---------- Middlewares (order matters) ----------
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
+const router = express.Router();
+
 app.use(cookieParser());                 // must be before routes that read cookies
 app.use(express.urlencoded({ extended: true }));
 app.use(corsMiddleware);
@@ -294,6 +310,7 @@ app.use('/api/platforms/espn', espnRouter);
 // Identity API + request-code endpoints (your existing routers)
 app.use('/api/identity', identityRouter);
 app.use('/api/identity', handleLoginRouter);
+app.use('/api/identity', require('./routes/identity/contacts'));
 
 
 // Verify (server-side anagram flow)
@@ -359,9 +376,28 @@ app.post('/api/members/lookup', async (req, res) => {
   catch { res.status(500).json({ ok:false, error:'server_error' }); }
 });
 
-// Aliases
-app.get('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
-app.post('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
+// Single source-of-truth handler
+async function memberLookupHandler(req, res) {
+  const { memberId, email, phone } = req.body || {};
+  // TODO: perform lookup logic (by memberId/email/phone)
+  return res.json({ ok: true, member: null });
+}
+
+// Primary route
+app.post('/api/members/lookup', memberLookupHandler);
+
+// Explicit alias (no app._router.handle)
+app.post('/api/identity/member/lookup', memberLookupHandler);
+
+// (Optional) also allow GET with query params
+app.get('/api/identity/member/lookup', async (req, res) => {
+  req.body = {
+    memberId: req.query.memberId,
+    email: req.query.email,
+    phone: req.query.phone,
+  };
+  return memberLookupHandler(req, res);
+});
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
@@ -457,34 +493,12 @@ function cleanOrder(v) {
   return String(v || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 }
 
-// GET /api/members?limit=96&order=desc
-app.get('/api/members', async (req, res) => {
+async function listRecentMembersHandler(req, res) {
   try {
-    const limit = toLimit(req.query.limit);
-    const orderSql = cleanOrder(req.query.order);
-    const rows = (await pool.query(
-      `
-      SELECT
-        member_id, username, color_hex, email, phone_e164,
-        image_key, image_etag, image_format, image_width, image_height, image_version, last_image_at,
-        event_count, first_seen_at, last_seen_at
-      FROM ff_member
-      WHERE deleted_at IS NULL
-      ORDER BY last_seen_at ${orderSql}
-      LIMIT $1
-      `, [limit]
-    )).rows;
-
-    res.json({ ok: true, items: rows, limit, order: orderSql.toLowerCase() });
-  } catch (e) {
-    console.error('[GET /api/members]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-// GET /api/members/recent?limit=96
-app.get('/api/members/recent', async (req, res) => {
-  try {
+    const toLimit = (v, def=96) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
+    };
     const limit = toLimit(req.query.limit);
     const rows = (await pool.query(
       `
@@ -504,13 +518,47 @@ app.get('/api/members/recent', async (req, res) => {
     console.error('[GET /api/members/recent]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
-});
-// then in server.js
+}
 
-// alias used by some clients: /api/identity/members
-app.get('/api/identity/members', (req, res, next) =>
-  app._router.handle(Object.assign(req, { url: '/api/members' }), res, next)
-);
+app.get('/api/members/recent', listRecentMembersHandler);
+app.get('/api/identity/members/recent', listRecentMembersHandler);
+
+// 1) Extract your existing list handler into a function
+async function listMembersHandler(req, res) {
+  try {
+    const toLimit = (v, def=96) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
+    };
+    const cleanOrder = (v) => String(v || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const limit = toLimit(req.query.limit);
+    const orderSql = cleanOrder(req.query.order);
+
+    const rows = (await pool.query(
+      `
+      SELECT
+        member_id, username, color_hex, email, phone_e164,
+        image_key, image_etag, image_format, image_width, image_height, image_version, last_image_at,
+        event_count, first_seen_at, last_seen_at
+      FROM ff_member
+      WHERE deleted_at IS NULL
+      ORDER BY last_seen_at ${orderSql}
+      LIMIT $1
+      `, [limit]
+    )).rows;
+
+    res.json({ ok: true, items: rows, limit, order: orderSql.toLowerCase() });
+  } catch (e) {
+    console.error('[GET /api/members]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+}
+
+// 2) Mount it on BOTH paths (primary + identity alias)
+app.get('/api/members', listMembersHandler);
+app.get('/api/identity/members', listMembersHandler);
+
 
 // ---------- Static AFTER APIs ----------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
