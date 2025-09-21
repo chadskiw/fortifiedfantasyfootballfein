@@ -1,27 +1,13 @@
-// TRUE_LOCATION: server.js
-// IN_USE: TRUE
 // server.js
+// ---------- Boot ----------
 require('dotenv').config();
 
-const express       = require('express');
-const morgan        = require('morgan');
-const path          = require('path');
-const cookieParser  = require('cookie-parser');
-const { Pool }      = require('pg');
-
-const imageUpsertRouter = require('./routes/image-upsert');
-const identityRouter    = require('./routes/identity-api');
-const feinAuthRouter    = require('./routes/fein-auth');
-const authRouter        = require('./routes/fein-auth');            // alias used elsewhere
-const espnRouter        = require('./routers/espnRouter');
-const verifyRouter      = require('./src/routes/verify');           // POST /api/verify
-
-const { corsMiddleware } = require('./src/cors');
-const { rateLimit }      = require('./src/rateLimit');
-// const platformRouter  = require('./src/routes/platforms');        // (optional, not mounted below)
-const handleLoginRouter = require('./routes/identity/handle-login.js');
-
-
+const express      = require('express');
+const morgan       = require('morgan');
+const path         = require('path');
+const cookieParser = require('cookie-parser');
+const { Pool }     = require('pg');
+const crypto       = require('crypto');
 
 // ---------- App ----------
 const app = express();
@@ -40,31 +26,30 @@ module.exports = {
   pool,
 };
 
-const crypto = require('crypto');
-// use the *existing* `pool` you already created above (via `new Pool(...)`)
-// so REMOVE/DO NOT RE-IMPORT pool from './db.js'
-//const { notificationApi } = require('./notificationApi'); // adjust path/exports if needed
+// ---------- Helpers ----------
+function asRouter(mod, name) {
+  const candidate = (mod && (mod.router || mod.default || mod));
+  if (typeof candidate !== 'function') {
+    const keys = candidate && typeof candidate === 'object' ? Object.keys(candidate) : [];
+    throw new TypeError(`[${name}] does not export an Express middleware. Got: ${typeof candidate} keys=${keys.join(',')}`);
+  }
+  return candidate;
+}
 
 // Reads/writes the visitor token that keys the invite row
-const INVITE_COOKIE = 'ff_interacted'; // (name can be anything consistent)
+const INVITE_COOKIE = 'ff_interacted';
 
 function getLocale(req) {
   const h = String(req.headers['accept-language'] || '');
   return h.split(',')[0] || null;
 }
 function getTz(req) {
-  // if client didn’t send, you can let frontend POST tz later
   return String(req.headers['x-ff-tz'] || '') || null;
 }
-
 function makeInteractedCode() {
-  // short, human-ish code (8 chars). You already used formats like WLC77D2Y.
-  // This keeps that vibe but cryptographically random.
   return crypto.randomBytes(6).toString('base64url').slice(0, 8).toUpperCase();
 }
-
 async function upsertInviteForRequest(req, res) {
-  // 1) try cookie
   let code = (req.cookies?.[INVITE_COOKIE] || '').trim();
   if (!code) code = makeInteractedCode();
 
@@ -77,7 +62,6 @@ async function upsertInviteForRequest(req, res) {
   const locale     = getLocale(req);
   const tz         = getTz(req);
 
-  // 2) insert or update
   const { rows } = await pool.query(
     `
     INSERT INTO ff_invite (interacted_code, invited_at, source, medium, campaign,
@@ -107,7 +91,6 @@ async function upsertInviteForRequest(req, res) {
   );
 
   const invite = rows[0];
-  // 3) set cookie if missing
   if (!req.cookies?.[INVITE_COOKIE]) {
     res.cookie(INVITE_COOKIE, invite.interacted_code, {
       httpOnly: true,
@@ -116,25 +99,22 @@ async function upsertInviteForRequest(req, res) {
       maxAge: 1000 * 60 * 60 * 24 * 365, // 1y
     });
   }
-
-  return invite; // { invite_id, interacted_code }
+  return invite;
 }
 
-
-// ---------- Shared helpers ----------
+// Normalizers / validators
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
 const HANDLE_RE = /^[a-zA-Z0-9_.]{3,24}$/;
 const HEX_RE    = /^#?[0-9a-f]{6}$/i;
 
-const EFFECTIVE_WHITE = '#FFFFFF';
-const norm        = (v='') => String(v).trim();
-const normEmail   = (v='') => norm(v).toLowerCase();
-const normPhone   = (v='') => '+' + norm(v).replace(/[^\d]/g, '');
-const isEmail     = v => EMAIL_RE.test(norm(v));
-const isPhone     = v => PHONE_RE.test(norm(v));
-const isHandle    = v => HANDLE_RE.test(norm(v));
-const normHex     = (v) => {
+const norm      = (v='') => String(v).trim();
+const normEmail = (v='') => norm(v).toLowerCase();
+const normPhone = (v='') => '+' + norm(v).replace(/[^\d]/g, '');
+const isEmail   = v => EMAIL_RE.test(norm(v));
+const isPhone   = v => PHONE_RE.test(norm(v));
+const isHandle  = v => HANDLE_RE.test(norm(v));
+const normHex   = (v) => {
   if (!v) return null;
   const s = String(v).trim();
   if (!HEX_RE.test(s)) return null;
@@ -152,14 +132,11 @@ function readCookiesHeader(header = '') {
   });
   return out;
 }
-
 function normalizeSwid(raw = '') {
   const v = String(raw || '').trim();
   if (!v) return '';
   return v.startsWith('{') ? v.toUpperCase() : `{${v.replace(/[{}]/g,'').toUpperCase()}}`;
 }
-
-// ESPN creds extractor (used by /authcheck; not used as a gate in this file)
 function extractEspnCreds(req) {
   const swidH = req.get('x-espn-swid') || '';
   const s2H   = req.get('x-espn-s2')   || '';
@@ -175,80 +152,19 @@ function extractEspnCreds(req) {
   return false;
 }
 
-
-// ---------- Middlewares (order matters) ----------
+// ---------- Core Middlewares (order matters) ----------
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
-const router = express.Router();
-
-app.use(cookieParser());                 // must be before routes that read cookies
+app.use(cookieParser()); // before routes that read cookies
 app.use(express.urlencoded({ extended: true }));
+
+// Custom CORS + rate limit
+const { corsMiddleware } = require('./src/cors');
+const { rateLimit }      = require('./src/rateLimit');
 app.use(corsMiddleware);
 app.use(rateLimit);
 
-// ---------- Signup/Profile helpers used by FE pages ----------
-async function fetchByContactsOnly({ email, phone }) {
-  const params = [], conds = [];
-  if (email) { params.push(email); conds.push(`LOWER(email)=LOWER($${params.length})`); }
-  if (phone) { params.push(phone); conds.push(`phone_e164=$${params.length}`); }
-  if (!conds.length) return null;
-  const r = await pool.query(`
-    SELECT member_id, username, email, phone_e164, color_hex
-      FROM ff_member
-     WHERE (${conds.join(' OR ')}) AND deleted_at IS NULL
-     ORDER BY member_id ASC
-     LIMIT 1
-  `, params);
-  return r.rows[0] || null;
-}
-
-// ✅ Trust the handle if it matches what's stored for the current cookie
-// GET /api/identity/handle/trust?u=<handle>&hex=<optionalColorHex>
-app.get('/api/identity/handle/trust', async (req, res) => {
-  try {
-    const uParam = String(req.query.u || '').trim();
-    const hexParam = String(req.query.hex || '').trim();
-    if (!uParam) return res.status(400).json({ ok:false, error:'bad_request' });
-
-    // Prefer the canonical member cookie set during request-code
-    const memberId = req.cookies?.ff_member || '';
-    let trusted = false;
-
-    if (memberId) {
-      const r = await pool.query(
-        `SELECT username, color_hex FROM ff_member
-         WHERE member_id = $1 AND deleted_at IS NULL
-         LIMIT 1`,
-        [memberId]
-      );
-      const row = r.rows[0];
-      if (row && row.username && row.username.toLowerCase() === uParam.toLowerCase()) {
-        // If hex is provided, also require a match (case-insensitive)
-        if (!hexParam || (row.color_hex || '').toLowerCase() === hexParam.toLowerCase()) {
-          trusted = true;
-        }
-      }
-    } else if (req.cookies?.ff_interacted) {
-      // Fallback: trust via ff_invite if first_identifier is the handle
-      const code = req.cookies.ff_interacted;
-      const r = await pool.query(
-        `SELECT first_identifier FROM ff_invite WHERE interacted_code = $1 LIMIT 1`,
-        [code]
-      );
-      const row = r.rows[0];
-      if (row && row.first_identifier && row.first_identifier.toLowerCase() === uParam.toLowerCase()) {
-        trusted = true;
-      }
-    }
-
-    res.json({ ok:true, trusted });
-  } catch (e) {
-    console.error('[GET /api/identity/handle/trust]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-
+// ---------- DB helpers for identity ----------
 async function handleStats(username) {
   const u = norm(username);
   if (!isHandle(u)) return { count: 0, colors: [] };
@@ -279,44 +195,85 @@ async function fetchMemberByEmailPhoneOrHandle({ email, phone, handle }) {
   );
   return r.rows[0] || null;
 }
-
 async function doLookup(identifier) {
   const raw = norm(identifier);
-  if (isEmail(raw)) return await fetchMemberByEmailPhoneOrHandle({ email: normEmail(raw) });
-  if (isPhone(raw)) return await fetchMemberByEmailPhoneOrHandle({ phone: normPhone(raw) });
-  if (isHandle(raw))return await fetchMemberByEmailPhoneOrHandle({ handle: raw });
+  if (isEmail(raw))  return await fetchMemberByEmailPhoneOrHandle({ email: normEmail(raw) });
+  if (isPhone(raw))  return await fetchMemberByEmailPhoneOrHandle({ phone: normPhone(raw) });
+  if (isHandle(raw)) return await fetchMemberByEmailPhoneOrHandle({ handle: raw });
   return null;
 }
 
-// ---------- Routes (mount each once) ----------
+// ---------- Routers (normalized) ----------
+const imageUpsertRouter  = asRouter(require('./routes/image-upsert'), 'routes/image-upsert');
+const identityRouter     = asRouter(require('./routes/identity-api'), 'routes/identity-api');
+const feinAuthRouter     = asRouter(require('./routes/fein-auth'), 'routes/fein-auth');
+const authRouter         = feinAuthRouter; // alias
+const espnRouter         = asRouter(require('./routers/espnRouter'), 'routers/espnRouter');
+const verifyRouter       = asRouter(require('./src/routes/verify'), 'src/routes/verify');
+const handleLoginRouter  = asRouter(require('./routes/identity/handle-login.js'), 'routes/identity/handle-login');
+const contactsRouter     = asRouter(require('./routes/identity/contacts'), 'routes/identity/contacts');
 
-// ESPN auth (legacy alias) + router
+// ---------- Mounted Routers ----------
 app.use('/api/espn-auth', feinAuthRouter);
 app.use('/api/platforms/espn', espnRouter);
 
-// Identity API + request-code endpoints (your existing routers)
 app.use('/api/identity', identityRouter);
 app.use('/api/identity', handleLoginRouter);
-app.use('/api/identity', require('./routes/identity/contacts'));
+app.use('/api/identity', contactsRouter);
 
-
-// Verify (server-side anagram flow)
-app.use('/api', verifyRouter); // POST /api/verify
-
-// Image upsert
+app.use('/api', verifyRouter);                 // POST /api/verify
 app.use('/api/image', imageUpsertRouter);
-
-// Auth alias
 app.use('/api/auth', authRouter);
 
-// ---- Lightweight endpoints used by signup/UX ----
+// ---------- Lightweight identity/UX endpoints ----------
+app.get('/api/identity/handle/trust', async (req, res) => {
+  try {
+    const uParam  = String(req.query.u || '').trim();
+    const hexParam = String(req.query.hex || '').trim();
+    if (!uParam) return res.status(400).json({ ok:false, error:'bad_request' });
+
+    const memberId = req.cookies?.ff_member || '';
+    let trusted = false;
+
+    if (memberId) {
+      const r = await pool.query(
+        `SELECT username, color_hex FROM ff_member
+         WHERE member_id = $1 AND deleted_at IS NULL
+         LIMIT 1`,
+        [memberId]
+      );
+      const row = r.rows[0];
+      if (row && row.username && row.username.toLowerCase() === uParam.toLowerCase()) {
+        if (!hexParam || (row.color_hex || '').toLowerCase() === hexParam.toLowerCase()) {
+          trusted = true;
+        }
+      }
+    } else if (req.cookies?.ff_interacted) {
+      const code = req.cookies.ff_interacted;
+      const r = await pool.query(
+        `SELECT first_identifier FROM ff_invite WHERE interacted_code = $1 LIMIT 1`,
+        [code]
+      );
+      const row = r.rows[0];
+      if (row && row.first_identifier && row.first_identifier.toLowerCase() === uParam.toLowerCase()) {
+        trusted = true;
+      }
+    }
+
+    res.json({ ok:true, trusted });
+  } catch (e) {
+    console.error('[GET /api/identity/handle/trust]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 app.get('/api/profile/exists', async (req, res) => {
   try {
-    const u = req.query.username || req.query.u || '';
-    const hex = normHex(req.query.hex || '');
+    const u    = req.query.username || req.query.u || '';
+    const hex  = normHex(req.query.hex || '');
     const limit = Number(req.query.limit);
     const stats = await handleStats(u);
-    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes(hex) : null;
+    const pairTaken  = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes((hex||'').toLowerCase()) : null;
     const underLimit = Number.isFinite(limit) ? (stats.count < limit) : null;
     res.json({ ok:true, count:stats.count, colors:stats.colors, pairAvailable:(hex ? !pairTaken : null), handleUnderLimit: underLimit });
   } catch { res.status(500).json({ ok:false, error:'server_error' }); }
@@ -324,26 +281,27 @@ app.get('/api/profile/exists', async (req, res) => {
 
 app.get('/api/profile/check-username', async (req, res) => {
   try {
-    const u = req.query.u || req.query.username || '';
-    const hex = normHex(req.query.hex || '');
+    const u    = req.query.u || req.query.username || '';
+    const hex  = normHex(req.query.hex || '');
     const limit = Number(req.query.limit);
     const stats = await handleStats(u);
-    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes(hex) : null;
+    const pairTaken  = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes((hex||'').toLowerCase()) : null;
     res.json({ ok:true, count:stats.count, colors:stats.colors, pairAvailable:(hex ? !pairTaken : null), handleUnderLimit: Number.isFinite(limit) ? (stats.count < limit) : null });
   } catch { res.status(500).json({ ok:false, error:'server_error' }); }
 });
 
 app.get('/api/identity/handle/exists', async (req, res) => {
   try {
-    const u = req.query.u || req.query.username || '';
-    const hex = normHex(req.query.hex || '');
+    const u    = req.query.u || req.query.username || '';
+    const hex  = normHex(req.query.hex || '');
     const limit = Number(req.query.limit);
     const stats = await handleStats(u);
-    const pairTaken = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes(hex) : null;
+    const pairTaken  = hex ? stats.colors.map(c => (c||'').toLowerCase()).includes((hex||'').toLowerCase()) : null;
     res.json({ ok:true, available: Number.isFinite(limit) ? (stats.count < limit) : null, count:stats.count, colors:stats.colors, pairAvailable:(hex ? !pairTaken : null), handleUnderLimit: Number.isFinite(limit) ? (stats.count < limit) : null });
   } catch { res.status(500).json({ ok:false, error:'server_error' }); }
 });
 
+// Members find (email/phone explicit)
 app.get('/api/members/find', async (req, res) => {
   try {
     const email = req.query.email && isEmail(req.query.email) ? normEmail(req.query.email) : null;
@@ -354,37 +312,21 @@ app.get('/api/members/find', async (req, res) => {
   } catch { res.status(500).json({ ok:false, error:'server_error' }); }
 });
 
-app.get('/api/members/lookup', async (req, res) => {
-  try { res.json({ member: await doLookup(req.query.identifier || '') }); }
-  catch { res.status(500).json({ ok:false, error:'server_error' }); }
-});
-app.post('/api/members/lookup', async (req, res) => {
-  try { res.json({ member: await doLookup(req.body?.identifier || '') }); }
-  catch { res.status(500).json({ ok:false, error:'server_error' }); }
-});
-
-// Single source-of-truth handler
-async function memberLookupHandler(req, res) {
-  const { memberId, email, phone } = req.body || {};
-  // TODO: perform lookup logic (by memberId/email/phone)
-  return res.json({ ok: true, member: null });
+// Members lookup (identifier ← email|phone|handle) — single source of truth + alias
+async function membersLookupByIdentifier(req, res) {
+  try {
+    const id = (req.method === 'GET' ? req.query.identifier : req.body?.identifier) || '';
+    const member = await doLookup(id);
+    return res.json({ ok: true, member });
+  } catch (e) {
+    console.error('[members.lookup]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
 }
-
-// Primary route
-app.post('/api/members/lookup', memberLookupHandler);
-
-// Explicit alias (no app._router.handle)
-app.post('/api/identity/member/lookup', memberLookupHandler);
-
-// (Optional) also allow GET with query params
-app.get('/api/identity/member/lookup', async (req, res) => {
-  req.body = {
-    memberId: req.query.memberId,
-    email: req.query.email,
-    phone: req.query.phone,
-  };
-  return memberLookupHandler(req, res);
-});
+app.get('/api/members/lookup', membersLookupByIdentifier);
+app.post('/api/members/lookup', membersLookupByIdentifier);
+app.get('/api/identity/member/lookup', membersLookupByIdentifier);
+app.post('/api/identity/member/lookup', membersLookupByIdentifier);
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
@@ -437,7 +379,6 @@ app.get('/api/fein-auth/fein/meta/row', async (req, res) => {
 
 // DB + creds echo
 app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
-  //const { Pool } = require('pg');
   try {
     const testPool = new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -451,9 +392,10 @@ app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
     res.status(500).json({ ok:false, error:'db_error', code:e.code, message:e.message });
   }
 });
+
 // --- Health (place BEFORE static/catch-alls) ---
 app.get('/healthz', async (_req, res) => {
-  res.set('Cache-Control', 'no-store'); // avoid CDN/browser caching
+  res.set('Cache-Control', 'no-store');
   try {
     const r = await pool.query('SELECT 1 AS ok');
     res.type('application/json').json({
@@ -471,7 +413,7 @@ app.get('/healthz', async (_req, res) => {
   }
 });
 
-// --- MEMBERS LISTING ENDPOINTS (for faces.js) ---
+// --- Members listing (for faces.js) ---
 function toLimit(v, def=96) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
@@ -482,10 +424,6 @@ function cleanOrder(v) {
 
 async function listRecentMembersHandler(req, res) {
   try {
-    const toLimit = (v, def=96) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
-    };
     const limit = toLimit(req.query.limit);
     const rows = (await pool.query(
       `
@@ -506,22 +444,10 @@ async function listRecentMembersHandler(req, res) {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 }
-
-app.get('/api/members/recent', listRecentMembersHandler);
-app.get('/api/identity/members/recent', listRecentMembersHandler);
-
-// 1) Extract your existing list handler into a function
 async function listMembersHandler(req, res) {
   try {
-    const toLimit = (v, def=96) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : def;
-    };
-    const cleanOrder = (v) => String(v || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-
     const limit = toLimit(req.query.limit);
     const orderSql = cleanOrder(req.query.order);
-
     const rows = (await pool.query(
       `
       SELECT
@@ -542,10 +468,30 @@ async function listMembersHandler(req, res) {
   }
 }
 
-// 2) Mount it on BOTH paths (primary + identity alias)
 app.get('/api/members', listMembersHandler);
 app.get('/api/identity/members', listMembersHandler);
+app.get('/api/members/recent', listRecentMembersHandler);
+app.get('/api/identity/members/recent', listRecentMembersHandler);
 
+// --- OPTIONS helpers for common endpoints (preflight) ---
+const allow = {
+  'access-control-allow-origin': 'https://fortifiedfantasy.com',
+  'access-control-allow-credentials': 'true',
+  'access-control-allow-headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key',
+  'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  'access-control-max-age': '600',
+};
+app.options(
+  [
+    '/api/members/lookup',
+    '/api/identity/member/lookup',
+    '/api/members',
+    '/api/identity/members',
+    '/api/members/recent',
+    '/api/identity/members/recent',
+  ],
+  (req, res) => res.set(allow).sendStatus(204)
+);
 
 // ---------- Static AFTER APIs ----------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
@@ -563,9 +509,6 @@ app.use((err, req, res, _next) => {
   const status = err.status || 500;
   res.status(status).json({ ok:false, error: status === 400 ? 'bad_request' : 'server_error' });
 });
-
-// ---------- Health ----------
-// app.get('/healthz', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
 
 // ---------- Start ----------
 const port = process.env.PORT || 3000;
