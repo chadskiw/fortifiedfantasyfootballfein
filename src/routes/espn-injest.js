@@ -17,6 +17,55 @@ module.exports = function createEspnIngestRouter(pool){
     const v = String(s||'').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,24);
     return v || 'unk';
   }
+// GET /api/platforms/espn/my-teams?game=ffl&minSeason=2025
+router.get('/espn/my-teams', async (req, res) => {
+  try {
+    const game = String(req.query.game || 'ffl').toLowerCase();
+    if (!/^[a-z0-9_]{2,6}$/.test(game)) return res.status(400).json({ ok:false, error:'bad_game' });
+
+    const minSeason = Number(req.query.minSeason) || new Date().getFullYear();
+
+    // Identify the member (primary) and fall back to ESPN creds if present
+    const member_id = req.cookies?.ff_member || null;
+    const swid = req.get('x-espn-swid') || req.cookies?.ff_espn_swid || req.cookies?.SWID || null;
+    const s2   = req.get('x-espn-s2')   || req.cookies?.ff_espn_s2   || req.cookies?.espn_s2 || null;
+
+    // Make sure sport table exists
+    const tableName = await ensureSportTable(pool, game); // e.g. ff_sport_ffl
+
+    if (!member_id && !(swid && s2)) {
+      return res.status(401).json({ ok:false, error:'unauthorized' });
+    }
+
+    // Prefer member_id; also allow lookup by (swid,s2) if records were written as ghost/creds
+    const params = [minSeason, member_id, swid, s2].map(x => x ?? null);
+
+    const { rows } = await pool.query(`
+      SELECT DISTINCT ON (season, league_id, team_id)
+             season,
+             league_id,
+             team_id,
+             COALESCE(owner_name, team_abbrev)        AS team_name,
+             team_abbrev,
+             league_name,
+             NULLIF(team_logo_url, '')                AS team_logo_url,
+             NULLIF(league_logo_url, '')              AS league_logo_url
+        FROM ${tableName}
+       WHERE season >= $1
+         AND (
+              ($2 IS NOT NULL AND member_id = $2)
+              OR
+              ($3 IS NOT NULL AND $4 IS NOT NULL AND swid = $3 AND espn_s2 = $4)
+         )
+       ORDER BY season DESC, league_id, team_id
+    `, params);
+
+    return res.json({ ok:true, game, minSeason, teams: rows || [] });
+  } catch (e) {
+    console.error('[espn my-teams]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
   // variable-length sport code → deterministic 3-digit (0–999)
   function sportTo3DigitCodeFlex(code, offsets=[0,36,144,81,121,49,100]){
