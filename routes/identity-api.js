@@ -73,6 +73,52 @@ async function ensureRequestsTable() {
 /* -------------------------------------------------------------------------- */
 /* Member helpers                                                             */
 /* -------------------------------------------------------------------------- */
+// --- color helpers (respect shape & avoid handle clashes) ---
+const HEX_RX = /^#[0-9A-Fa-f]{6}$/;
+
+function hexOK(hex) { return HEX_RX.test(hex); }
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return null;
+  return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+}
+function rgbDist(a, b) {
+  const dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
+  return Math.sqrt(dr*dr + dg*dg + db*db); // 0..441
+}
+
+// curated palette: no pinks/purples, high-contrast
+const COLOR_PALETTE = [
+  '#1F77B4','#2CA02C','#D62728','#8C564B','#7F7F7F',
+  '#BCBD22','#17BECF','#FF7F0E','#0057E7','#008744',
+  '#D62D20','#FFA700','#4C4C4C'
+];
+
+// Avoid colors “too close” to ones already in use by this handle
+async function pickColorForHandle(handle, halo = 48) {
+  // Fetch colors already used by this handle (if any)
+  const { rows } = await pool.query(
+    `SELECT DISTINCT color_hex FROM ff_member WHERE username = $1 AND color_hex IS NOT NULL`,
+    [handle]
+  );
+  const used = rows.map(r => r.color_hex).filter(hexOK).map(hexToRgb);
+
+  // First, try palette colors that pass the halo distance
+  const candidates = COLOR_PALETTE.filter(hexOK);
+  for (const c of candidates) {
+    const rgb = hexToRgb(c);
+    if (!used.length || used.every(u => rgbDist(u, rgb) >= halo)) return c;
+  }
+  // No safe color available → signal to skip writing color
+  return null;
+}
+
+// For non-handle flows, keep the quick random (but shape-valid)
+function randomColorHexSafe() {
+  const c = COLOR_PALETTE[Math.floor(Math.random() * COLOR_PALETTE.length)];
+  return hexOK(c) ? c : '#4C4C4C';
+}
 
 // Strong, high-contrast, non-pink/purple palette
 function randomColorHex() {
@@ -129,33 +175,62 @@ async function findOrCreateMember(kind, value) {
 
   // Find existing
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
-  if (f.rows[0]) {
-    const row = f.rows[0];
+if (f.rows[0]) {
+  let row = f.rows[0];
 
-    // Backfill color if missing
-    if (!row.color_hex) {
+  // Backfill color if missing
+  if (!row.color_hex) {
+    let color = null;
+    if (kind === 'handle') {
+      color = await pickColorForHandle(value); // may be null (no safe color)
+    } else {
+      color = randomColorHexSafe();
+    }
+    if (color) {
       const upd = await pool.query(
         `UPDATE ff_member
             SET color_hex   = $1,
                 last_seen_at = now()
           WHERE member_id   = $2
           RETURNING *`,
-        [randomColorHex(), row.member_id]
+        [color, row.member_id]
       );
-      return upd.rows[0];
+      row = upd.rows[0];
     }
-    return row;
   }
+  return row;
+}
+
 
   // Create new
-  const memberId = await generateUniqueMemberId(pool);
-  const ins = await pool.query(
+const memberId = await generateUniqueMemberId(pool);
+
+let color = null;
+if (kind === 'handle') {
+  color = await pickColorForHandle(value); // may be null (skip if no safe)
+} else {
+  color = randomColorHexSafe();
+}
+
+let ins;
+if (color) {
+  ins = await pool.query(
     `INSERT INTO ff_member (member_id, ${col}, color_hex, first_seen_at, last_seen_at)
      VALUES ($1, $2, $3, now(), now())
      RETURNING *`,
-    [memberId, value, randomColorHex()]
+    [memberId, value, color]
   );
-  return ins.rows[0];
+} else {
+  // No safe color available → do not write color_hex (let it be NULL)
+  ins = await pool.query(
+    `INSERT INTO ff_member (member_id, ${col}, first_seen_at, last_seen_at)
+     VALUES ($1, $2, now(), now())
+     RETURNING *`,
+    [memberId, value]
+  );
+}
+return ins.rows[0];
+
 }
 
 /* -------------------------------------------------------------------------- */
