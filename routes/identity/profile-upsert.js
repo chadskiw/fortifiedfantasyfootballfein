@@ -3,7 +3,7 @@ const express = require('express');
 const { pool } = require('../../src/db/pool');
 const router = express.Router();
 router.use(express.json());
-
+router.use(express.urlencoded({ extended: true }));
 function cookieMemberId(req){ return String(req.cookies?.ff_member||'').trim() || null; }
 const HEX=/^#?[0-9a-f]{6}$/i;
 

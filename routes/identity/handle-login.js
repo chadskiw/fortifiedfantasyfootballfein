@@ -8,7 +8,7 @@ const { pool } = require('../../src/db/pool');
 
 const router = express.Router();
 router.use(express.json());
-
+router.use(express.urlencoded({ extended: true }));
 /* ------------------------------- tiny utils -------------------------------- */
 const EMAIL_RX  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RX  = /^\+?[0-9\s().-]{7,20}$/;

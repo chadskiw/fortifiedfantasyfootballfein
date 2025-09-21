@@ -14,7 +14,7 @@ const espnRouter = require(path.join(__dirname, '../../routers/espnRouter'));
 
 // Mount sub-routers
 router.use('/espn', espnRouter);
-
+router.use(express.urlencoded({ extended: true }));
 // List mounts (note: this belongs to the platforms router, not espnRouter)
 router.get('/__routes', (_req, res) => {
   res.json({ ok: true, mounts: ['/api/platforms/espn'] });

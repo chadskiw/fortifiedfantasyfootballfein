@@ -6,7 +6,7 @@ const { pool } = require('../db/pool');
 
 const router = express.Router();
 router.use(express.json());
-
+router.use(express.urlencoded({ extended: true }));
 // ===== invite helper (inline for now; move to /src/lib/invite.js later) =====
 const INVITE_COOKIE = 'ff_interacted';
 function getLocale(req){ const h = String(req.headers['accept-language'] || ''); return h.split(',')[0] || null; }
