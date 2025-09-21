@@ -2,13 +2,15 @@
 // IN_USE: TRUE
 const express = require('express');
 const crypto = require('crypto');
-const { pool } = require('../src/db/pool'); // adjust path if your pool lives elsewhere
+const { pool } = require('../src/db/pool');
 
 const router = express.Router();
 router.use(express.json());
 
-/* ----- health (optional) ----- */
-router.get('/health', async (req, res) => {
+/* -------------------------------------------------------------------------- */
+/* Health                                                                     */
+/* -------------------------------------------------------------------------- */
+router.get('/health', async (_req, res) => {
   try {
     const r = await pool.query('SELECT 1 AS ok');
     res.json({ ok: true, db: r.rows[0]?.ok === 1 });
@@ -17,7 +19,9 @@ router.get('/health', async (req, res) => {
   }
 });
 
-/* ----- id normalize ----- */
+/* -------------------------------------------------------------------------- */
+/* Identifier normalization                                                   */
+/* -------------------------------------------------------------------------- */
 const EMAIL_RX  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RX  = /^\+?[0-9\s().-]{7,20}$/;
 const HANDLE_RX = /^[a-zA-Z0-9_.]{3,24}$/;
@@ -34,8 +38,10 @@ function normalizeIdentifier(raw) {
   return { kind: null, value: null };
 }
 
-/* ----- tiny rate limit ----- */
-const recent = new Map();
+/* -------------------------------------------------------------------------- */
+/* Tiny rate limit                                                            */
+/* -------------------------------------------------------------------------- */
+const recent = new Map(); // key -> { count, resetAt }
 function ratelimit(key, limit = 6, ttlMs = 60_000) {
   const now = Date.now();
   const rec = recent.get(key);
@@ -47,35 +53,10 @@ function ratelimit(key, limit = 6, ttlMs = 60_000) {
   rec.count += 1;
   return { ok: true };
 }
-// Add this helper near the top of the file
-function randomColorHex() {
-  // curated palette: bold, neutral, sporty; no pinks/purples
-  const palette = [
-    '#1F77B4', // strong blue
-    '#2CA02C', // green
-    '#D62728', // red
-    //'#9467BD', // deep violet (optional: comment this if you want no purple at all)
-    '#8C564B', // brown
-    //'#E377C2', // pinkish (REMOVE if not allowed)
-    '#7F7F7F', // grey
-    '#BCBD22', // olive
-    '#17BECF', // teal
-    '#FF7F0E', // orange
-    '#0057E7', // royal blue
-    '#008744', // dark green
-    '#D62D20', // fire red
-    '#FFA700', // bright orange
-    '#4C4C4C'  // charcoal
-  ];
-  // filter out pinks/purples if you want to be strict:
-  const filtered = palette.filter(c =>
-    !c.includes('C2') && !c.includes('BD')
-  );
-  const arr = filtered.length ? filtered : palette;
-  return arr[Math.floor(Math.random() * arr.length)];
-}
 
-/* ----- bootstrap table for logging requests ----- */
+/* -------------------------------------------------------------------------- */
+/* Log table bootstrap                                                        */
+/* -------------------------------------------------------------------------- */
 const CREATE_REQ_SQL = `
   CREATE TABLE IF NOT EXISTS ff_identity_requests (
     id BIGSERIAL PRIMARY KEY,
@@ -89,84 +70,157 @@ async function ensureRequestsTable() {
   await pool.query(CREATE_REQ_SQL);
 }
 
-/* ----- LEGACY-SAFE 8-char code (fits CHAR(8)) ----- */
-function makeInteractedCode8() {
-  // no ambiguous chars; exactly 8 chars
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let out = '';
-  for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  return out; // e.g. 7KX94Q2N
+/* -------------------------------------------------------------------------- */
+/* Member helpers                                                             */
+/* -------------------------------------------------------------------------- */
+
+// Strong, high-contrast, non-pink/purple palette
+function randomColorHex() {
+  const palette = [
+    '#1F77B4', // blue
+    '#2CA02C', // green
+    '#D62728', // red
+    '#8C564B', // brown
+    '#7F7F7F', // grey
+    '#BCBD22', // olive
+    '#17BECF', // teal
+    '#FF7F0E', // orange
+    '#0057E7', // royal blue
+    '#008744', // dark green
+    '#D62D20', // fire red
+    '#FFA700', // bright orange
+    '#4C4C4C'  // charcoal
+  ];
+  return palette[Math.floor(Math.random() * palette.length)];
 }
 
-/* ----- member helpers ----- */
-async function findOrCreateMember(kind, value) {
-  const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
+// 8-char confusion-free ID (A-Z except I/O; digits 2-9)
+async function generateUniqueMemberId(pool) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  function makeId() {
+    let out = '';
+    for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return out;
+  }
+  // Try until unique (fast with proper index/PK)
+  // Assumes ff_member.member_id is CHAR(8)/TEXT PRIMARY KEY or UNIQUE
+  // If not yet changed, you can still store it in a separate column/cookie.
+  // Here we just ensure uniqueness before insert.
+  for (;;) {
+    const candidate = makeId();
+    const { rowCount } = await pool.query(
+      'SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1',
+      [candidate]
+    );
+    if (rowCount === 0) return candidate;
+  }
+}
 
-  // Try to find existing
+/**
+ * Find a member by identifier or create a new row with:
+ * - member_id: 8-char unique code
+ * - color_hex: random from sporty palette
+ * Also backfills color_hex if missing for existing members.
+ */
+async function findOrCreateMember(kind, value) {
+  const col = (kind === 'email') ? 'email'
+           : (kind === 'phone') ? 'phone_e164'
+           : 'username';
+
+  // Find existing
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
   if (f.rows[0]) {
-    // Backfill 8-char interacted_code if missing (CHAR(8) safe)
-if (f.rows[0]) {
-  // Backfill interacted_code if missing
-  if (!f.rows[0].interacted_code) {
-const memberId = await generateUniqueMemberId(pool);
-const ins = await pool.query(
-  `INSERT INTO ff_member (member_id, ${col}, color_hex, first_seen_at, last_seen_at)
-   VALUES ($1, $2, $3, now(), now())
-   RETURNING *`,
-  [memberId, value, randomColorHex()]
-);
-return ins.rows[0];
-  }
-  // 🔥 Backfill color_hex if missing
-  if (!f.rows[0].color_hex) {
-    const upd = await pool.query(
-      `UPDATE ff_member
-         SET color_hex = $1,
-             last_seen_at = now()
-       WHERE member_id = $2
-       RETURNING *`,
-      [randomColorHex(), f.rows[0].member_id]
-    );
-    return upd.rows[0];
+    const row = f.rows[0];
+
+    // Backfill color if missing
+    if (!row.color_hex) {
+      const upd = await pool.query(
+        `UPDATE ff_member
+            SET color_hex   = $1,
+                last_seen_at = now()
+          WHERE member_id   = $2
+          RETURNING *`,
+        [randomColorHex(), row.member_id]
+      );
+      return upd.rows[0];
+    }
+    return row;
   }
 
-  return f.rows[0];
+  // Create new
+  const memberId = await generateUniqueMemberId(pool);
+  const ins = await pool.query(
+    `INSERT INTO ff_member (member_id, ${col}, color_hex, first_seen_at, last_seen_at)
+     VALUES ($1, $2, $3, now(), now())
+     RETURNING *`,
+    [memberId, value, randomColorHex()]
+  );
+  return ins.rows[0];
 }
 
-
-  // Create minimal new member with interacted_code (NOT NULL, CHAR(8))
-  const interacted = makeInteractedCode8();
-// Create minimal new member with color_hex and timestamps
-const ins = await pool.query(
-  `INSERT INTO ff_member (${col}, color_hex, first_seen_at, last_seen_at)
-   VALUES ($1, $2, now(), now())
-   RETURNING *`,
-  [value, randomColorHex()]
-);
-return ins.rows[0];
-}
-}
+/* -------------------------------------------------------------------------- */
+/* Code sender (NOOP until creds provided)                                    */
+/* -------------------------------------------------------------------------- */
 function makeCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
 }
 
-/* ----- NOOP sender (keeps 200s even without creds) ----- */
 async function sendCode({ identifierKind, identifierValue, code }) {
   const mailReady = !!(process.env.SENDGRID_API_KEY || process.env.SMTP_HOST);
-  const smsReady = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
-  if (identifierKind === 'email' && !mailReady) {
-    console.log(`[MAIL:NOOP] ${identifierValue} code=${code}`);
-    return;
+  const smsReady  = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
+
+  try {
+    if (identifierKind === 'email') {
+      if (!mailReady) {
+        console.log(`[MAIL:NOOP] ${identifierValue} code=${code}`);
+        return;
+      }
+      const nodemailer = require('nodemailer');
+      let transporter;
+      if (process.env.SENDGRID_API_KEY) {
+        const sgTransport = require('nodemailer-sendgrid').default;
+        transporter = nodemailer.createTransport(sgTransport({ apiKey: process.env.SENDGRID_API_KEY }));
+      } else {
+        transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: false,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+      }
+      await transporter.sendMail({
+        from: process.env.MAIL_FROM || 'Fortified Fantasy <no-reply@fortifiedfantasy.com>',
+        to: identifierValue,
+        subject: 'Your Fortified Fantasy sign-in code',
+        text: `Your code is: ${code} (valid for 10 minutes)`,
+      });
+      return;
+    }
+
+    if (identifierKind === 'phone') {
+      if (!smsReady) {
+        console.log(`[SMS:NOOP] ${identifierValue} code=${code}`);
+        return;
+      }
+      const twilio = require('twilio')(
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN
+      );
+      await twilio.messages.create({
+        to: identifierValue,
+        from: process.env.TWILIO_FROM,
+        body: `Fortified Fantasy code: ${code}`,
+      });
+      return;
+    }
+  } catch (e) {
+    console.warn('[sendCode] failed:', e?.message || e);
   }
-  if (identifierKind === 'phone' && !smsReady) {
-    console.log(`[SMS:NOOP] ${identifierValue} code=${code}`);
-    return;
-  }
-  // hook up nodemailer / twilio as desired
 }
 
-/* ----- POST /api/identity/request-code ----- */
+/* -------------------------------------------------------------------------- */
+/* POST /api/identity/request-code                                            */
+/* -------------------------------------------------------------------------- */
 router.post('/request-code', async (req, res) => {
   const start = Date.now();
   try {
@@ -181,19 +235,28 @@ router.post('/request-code', async (req, res) => {
       });
     }
 
+    // Rate limit
     const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
     const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
     const rl = ratelimit(`${ipHash}:${value}`, 6, 60_000);
     if (!rl.ok) return res.status(429).json({ ok: false, error: 'rate_limited' });
 
+    // Log request
     await ensureRequestsTable();
     await pool.query(
-      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
+      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash)
+       VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
+    // Ensure member row
     const member = await findOrCreateMember(kind, value);
+    if (!member || !member.member_id) {
+      // Defensive guard — avoid "cannot read properties of undefined (member_id)"
+      throw new Error('member_creation_failed');
+    }
 
+    // Create login code
     const code = makeCode();
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await pool.query(
@@ -205,9 +268,18 @@ router.post('/request-code', async (req, res) => {
       [code, exp, member.member_id]
     );
 
-    await sendCode({ identifierKind: kind, identifierValue: value, code });
+    // Fire-and-forget send (never blocks redirect)
+    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
 
-    // IMPORTANT: return signup_url so the client navigates
+    // Set the key cookie (member_id is your canonical code)
+    res.cookie('ff_member', member.member_id, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 1000 * 60 * 60 * 24 * 365 // 1 year
+    });
+
+    // Client expects signup_url to proceed
     const u = new URL('/signup', 'https://fortifiedfantasy.com');
     if (kind === 'email')  u.searchParams.set('email', value);
     if (kind === 'phone')  u.searchParams.set('phone', value);
@@ -218,31 +290,12 @@ router.post('/request-code', async (req, res) => {
       sent: true,
       member_id: member.member_id,
       signup_url: u.pathname + u.search,
-      ms: Date.now() - start,
+      ms: Date.now() - start
     });
   } catch (err) {
     console.error('identity.request-code error:', err);
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
-async function generateUniqueMemberId(pool) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
-  function makeId() {
-    let out = '';
-    for (let i = 0; i < 8; i++) {
-      out += alphabet[Math.floor(Math.random() * alphabet.length)];
-    }
-    return out;
-  }
-
-  while (true) {
-    const candidate = makeId();
-    const check = await pool.query(
-      'SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1',
-      [candidate]
-    );
-    if (check.rowCount === 0) return candidate; // unique
-  }
-}
 
 module.exports = router;
