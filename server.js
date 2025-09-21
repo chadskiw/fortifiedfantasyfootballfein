@@ -40,6 +40,85 @@ module.exports = {
   pool,
 };
 
+import crypto from 'crypto';
+import { pool } from './db.js';             // adjust to your setup
+import { notificationApi } from './notificationApi.js'; // your existing notifier
+
+// Reads/writes the visitor token that keys the invite row
+const INVITE_COOKIE = 'ff_interacted'; // (name can be anything consistent)
+
+function getLocale(req) {
+  const h = String(req.headers['accept-language'] || '');
+  return h.split(',')[0] || null;
+}
+function getTz(req) {
+  // if client didn’t send, you can let frontend POST tz later
+  return String(req.headers['x-ff-tz'] || '') || null;
+}
+
+function makeInteractedCode() {
+  // short, human-ish code (8 chars). You already used formats like WLC77D2Y.
+  // This keeps that vibe but cryptographically random.
+  return crypto.randomBytes(6).toString('base64url').slice(0, 8).toUpperCase();
+}
+
+async function upsertInviteForRequest(req, res) {
+  // 1) try cookie
+  let code = (req.cookies?.[INVITE_COOKIE] || '').trim();
+  if (!code) code = makeInteractedCode();
+
+  const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
+  const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
+
+  const landingUrl = String(req.headers['x-ff-landing'] || req.originalUrl || req.url || '');
+  const referrer   = String(req.get('referer') || '');
+  const ua         = String(req.get('user-agent') || '');
+  const locale     = getLocale(req);
+  const tz         = getTz(req);
+
+  // 2) insert or update
+  const { rows } = await pool.query(
+    `
+    INSERT INTO ff_invite (interacted_code, invited_at, source, medium, campaign,
+                           landing_url, referrer, user_agent, ip_hash, locale, tz)
+    VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (interacted_code) DO UPDATE
+      SET landing_url = COALESCE(ff_invite.landing_url, EXCLUDED.landing_url),
+          referrer    = COALESCE(ff_invite.referrer,    EXCLUDED.referrer),
+          user_agent  = COALESCE(ff_invite.user_agent,  EXCLUDED.user_agent),
+          ip_hash     = COALESCE(ff_invite.ip_hash,     EXCLUDED.ip_hash),
+          locale      = COALESCE(ff_invite.locale,      EXCLUDED.locale),
+          tz          = COALESCE(ff_invite.tz,          EXCLUDED.tz)
+    RETURNING invite_id, interacted_code
+    `,
+    [
+      code,
+      req.query.source || null,
+      req.query.medium || null,
+      req.query.campaign || null,
+      landingUrl || null,
+      referrer || null,
+      ua || null,
+      ipHash || null,
+      locale || null,
+      tz || null,
+    ]
+  );
+
+  const invite = rows[0];
+  // 3) set cookie if missing
+  if (!req.cookies?.[INVITE_COOKIE]) {
+    res.cookie(INVITE_COOKIE, invite.interacted_code, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+      maxAge: 1000 * 60 * 60 * 24 * 365, // 1y
+    });
+  }
+
+  return invite; // { invite_id, interacted_code }
+}
+
 
 // ---------- Shared helpers ----------
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
