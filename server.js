@@ -19,6 +19,8 @@ const verifyRouter      = require('./src/routes/verify');           // POST /api
 const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 // const platformRouter  = require('./src/routes/platforms');        // (optional, not mounted below)
+const identityRouter = require('./routes/identity-api');
+const handleLoginRouter = require('./routes/identity/handle-login.js');
 
 
 
@@ -187,6 +189,8 @@ app.use('/api/platforms/espn', espnRouter);
 
 // Identity API + request-code endpoints (your existing routers)
 app.use('/api/identity', identityRouter);
+app.use('/api/identity', handleLoginRouter);
+
 
 // Verify (server-side anagram flow)
 app.use('/api', verifyRouter); // POST /api/verify
