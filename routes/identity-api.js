@@ -332,17 +332,17 @@ router.post('/request-code', async (req, res) => {
     }
 
     // Create login code
-    const code = makeCode();
-    const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    await pool.query(
-      `UPDATE ff_member
-          SET login_code         = $1,
-              login_code_expires = $2,
-              last_seen_at       = now()
-        WHERE member_id = $3`,
-      [code, exp, member.member_id]
-    );
+const code = makeCode(); // already 6 digits
+const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
+await pool.query(
+  `UPDATE ff_member
+      SET login_code         = LEFT(TRIM($1), 6),
+          login_code_expires = $2,
+          last_seen_at       = now()
+    WHERE member_id = $3`,
+  [code, exp, member.member_id]
+);
     // Fire-and-forget send (never blocks redirect)
     sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
 
