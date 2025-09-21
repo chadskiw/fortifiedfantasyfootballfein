@@ -71,7 +71,7 @@ async function findOrCreateMember(kind, value) {
   if (f.rows[0]) {
     // Backfill interacted_code if missing
     if (!f.rows[0].interacted_code) {
-      const interacted = makeInteractedCode(kind);
+const interacted = makeInteractedCode(kind, value);
       const upd = await pool.query(
         `UPDATE ff_member
            SET interacted_code = $1,
@@ -86,7 +86,7 @@ async function findOrCreateMember(kind, value) {
   }
 
   // Create minimal new member with interacted_code (NOT NULL)
-  const interacted = makeInteractedCode(kind);
+const interacted = makeInteractedCode(kind, value);
   const ins = await pool.query(
     `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
      VALUES ($1, $2, now(), now())
