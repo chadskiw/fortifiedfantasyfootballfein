@@ -52,6 +52,52 @@ const CREATE_REQUESTS_SQL = `
 async function ensureRequestsTable() {
   await pool.query(CREATE_REQUESTS_SQL);
 }
+const path = require('path');
+let WORDS;
+try {
+  WORDS = require('../../data/recovery_words.json');
+} catch (_e) {
+  WORDS = { adjectives: [], nouns: [] };
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function makeRecoveryTripleOnce() {
+  const adjs = WORDS.adjectives?.length ? WORDS.adjectives : ['mighty','fearless','electric','legendary'];
+  const nouns = WORDS.nouns?.length ? WORDS.nouns : ['endzone','touchdown','huddle','gridiron'];
+
+  let a1 = pick(adjs), a2 = pick(adjs);
+  // ensure different adjectives
+  for (let i = 0; i < 5 && a2 === a1; i++) a2 = pick(adjs);
+
+  const n1 = pick(nouns);
+  return { adj1: a1, adj2: a2, noun: n1 };
+}
+
+/**
+ * Generate a unique (adj1, adj2, noun) triple under the orderless constraint.
+ * - Checks existence using LEAST/GREATEST on adjectives
+ * - Retries up to 20 times (extremely unlikely to exhaust with decent lists)
+ */
+async function makeUniqueRecoveryTriple() {
+  for (let i = 0; i < 20; i++) {
+    const { adj1, adj2, noun } = makeRecoveryTripleOnce();
+    const { rows } = await pool.query(
+      `SELECT 1
+         FROM ff_member
+        WHERE LEAST(adj1, adj2) = LEAST($1, $2)
+          AND GREATEST(adj1, adj2) = GREATEST($1, $2)
+          AND noun = $3
+        LIMIT 1`,
+      [adj1, adj2, noun]
+    );
+    if (!rows[0]) return { adj1, adj2, noun };
+  }
+  // As a last resort, just return the last attempt; INSERT will 409 and we’ll retry there.
+  return makeRecoveryTripleOnce();
+}
 
 /* ------------------------------- member helpers --------------------------- */
 function makeInteractedCode(kind, value) {
@@ -69,32 +115,55 @@ async function findOrCreateMember(kind, value) {
   // Try to find existing
   const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
   if (f.rows[0]) {
-    // Backfill interacted_code if missing
-    if (!f.rows[0].interacted_code) {
-const interacted = makeInteractedCode(kind, value);
+    const row = f.rows[0];
+
+    // Backfill recovery triple if missing any part
+    if (!row.adj1 || !row.adj2 || !row.noun) {
+      const triple = await makeUniqueRecoveryTriple();
       const upd = await pool.query(
         `UPDATE ff_member
-           SET interacted_code = $1,
-               last_seen_at     = now()
-         WHERE member_id = $2
-         RETURNING *`,
-        [interacted, f.rows[0].member_id]
+            SET adj1 = $1,
+                adj2 = $2,
+                noun = $3,
+                last_seen_at = now()
+          WHERE member_id = $4
+          RETURNING *`,
+        [triple.adj1, triple.adj2, triple.noun, row.member_id]
       );
       return upd.rows[0];
     }
-    return f.rows[0];
+    return row;
   }
 
-  // Create minimal new member with interacted_code (NOT NULL)
-const interacted = makeInteractedCode(kind, value);
-  const ins = await pool.query(
-    `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
-     VALUES ($1, $2, now(), now())
-     RETURNING *`,
-    [value, interacted]
-  );
-  return ins.rows[0];
+  // Create new member with a unique triple
+  const triple = await makeUniqueRecoveryTriple();
+  // Note: interacted_code becomes optional; we can derive a legacy string if you still want the cookie
+  const legacy = `${triple.adj1}-${triple.adj2}-${triple.noun}`;
+
+  // Robust insert with retry on unique violation (extremely rare)
+  for (let tries = 0; tries < 5; tries++) {
+    try {
+      const ins = await pool.query(
+        `INSERT INTO ff_member (${col}, interacted_code, adj1, adj2, noun, first_seen_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, now(), now())
+         RETURNING *`,
+        [value, legacy, triple.adj1, triple.adj2, triple.noun]
+      );
+      return ins.rows[0];
+    } catch (e) {
+      // 23505 = unique_violation on the index; generate another triple and retry
+      if (e && e.code === '23505') {
+        const t2 = await makeUniqueRecoveryTriple();
+        triple.adj1 = t2.adj1; triple.adj2 = t2.adj2; triple.noun = t2.noun;
+        continue;
+      }
+      throw e;
+    }
+  }
+  // Should never reach here
+  throw new Error('could_not_insert_member_unique_triple');
 }
+
 
 function makeCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -244,16 +313,15 @@ router.post('/', async (req, res) => {
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     // IMPORTANT: also ensure interacted_code is set for older rows (COALESCE)
-const interacted = member.interacted_code || makeInteractedCode(kind, value);
 await pool.query(
   `UPDATE ff_member
-      SET interacted_code     = COALESCE(interacted_code, $1),
-          login_code          = $2,
-          login_code_expires  = $3,
-          last_seen_at        = now()
-    WHERE member_id = $4`,
-  [interacted, code, exp, member.member_id]
+      SET login_code         = $1,
+          login_code_expires = $2,
+          last_seen_at       = now()
+    WHERE member_id = $3`,
+  [code, exp, member.member_id]
 );
+
 
 
     // Set handoff cookie like signup flow expects
