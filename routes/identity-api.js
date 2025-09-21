@@ -65,16 +65,36 @@ async function ensureRequestsTable() {
 
 /* ----- member helpers ----- */
 async function findOrCreateMember(kind, value) {
-  const col = kind === 'email' ? 'email' : kind === 'phone' ? 'phone_e164' : 'username';
-  const { rows } = await pool.query(`select * from ff_member where ${col} = $1 limit 1`, [value]);
-  if (rows[0]) return rows[0];
+  const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
 
-  // minimal create
-  const insertCols = [col, 'first_seen_at', 'last_seen_at'];
-  const params = [value];
-  const sql = `insert into ff_member (${insertCols.join(',')})
-               values ($1, now(), now()) returning *`;
-  return (await pool.query(sql, params)).rows[0];
+  // Try to find existing
+  const f = await pool.query(`SELECT * FROM ff_member WHERE ${col} = $1 LIMIT 1`, [value]);
+  if (f.rows[0]) {
+    // Backfill interacted_code if missing
+    if (!f.rows[0].interacted_code) {
+const interacted = makeInteractedCode(kind, value);
+      const upd = await pool.query(
+        `UPDATE ff_member
+           SET interacted_code = $1,
+               last_seen_at     = now()
+         WHERE member_id = $2
+         RETURNING *`,
+        [interacted, f.rows[0].member_id]
+      );
+      return upd.rows[0];
+    }
+    return f.rows[0];
+  }
+
+  // Create minimal new member with interacted_code (NOT NULL)
+const interacted = makeInteractedCode(kind, value);
+  const ins = await pool.query(
+    `INSERT INTO ff_member (${col}, interacted_code, first_seen_at, last_seen_at)
+     VALUES ($1, $2, now(), now())
+     RETURNING *`,
+    [value, interacted]
+  );
+  return ins.rows[0];
 }
 
 function makeCode() {
