@@ -40,9 +40,10 @@ module.exports = {
   pool,
 };
 
-import crypto from 'crypto';
-import { pool } from './db.js';             // adjust to your setup
-import { notificationApi } from './notificationApi.js'; // your existing notifier
+const crypto = require('crypto');
+// use the *existing* `pool` you already created above (via `new Pool(...)`)
+// so REMOVE/DO NOT RE-IMPORT pool from './db.js'
+const { notificationApi } = require('./notificationApi'); // adjust path/exports if needed
 
 // Reads/writes the visitor token that keys the invite row
 const INVITE_COOKIE = 'ff_interacted'; // (name can be anything consistent)
@@ -338,10 +339,7 @@ app.get('/api/identity/member/lookup', (req, res, next) => app._router.handle(Ob
 app.post('/api/identity/member/lookup', (req, res, next) => app._router.handle(Object.assign(req, { url:'/api/members/lookup' }), res, next));
 
 // Verify starter stub (kept for FE flows)
-app.post('/api/verify/start', async (_req, res) => {
-  try { res.json({ ok:true, sent:true }); }
-  catch { res.status(500).json({ ok:false, error:'server_error' }); }
-});
+
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
@@ -486,23 +484,7 @@ app.get('/api/members/recent', async (req, res) => {
   }
 });
 // then in server.js
-app.post('/api/verify/start', async (req, res) => {
-  try {
-    const { kind, value, code } = req.body || {};
-    if (!value || !code) return res.status(400).json({ ok: false, error: 'bad_request' });
 
-    await notificationApi.send({
-      notificationId: 'signup-code',
-      user: { id: value, email: kind === 'email' ? value : undefined },
-      mergeTags: { code },
-    });
-
-    res.json({ ok: true, sent: true });
-  } catch (e) {
-    console.error('[verify/start]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
 // alias used by some clients: /api/identity/members
 app.get('/api/identity/members', (req, res, next) =>
   app._router.handle(Object.assign(req, { url: '/api/members' }), res, next)
