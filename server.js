@@ -102,6 +102,63 @@ async function upsertInviteForRequest(req, res) {
   return invite;
 }
 
+// Validate to known table names to avoid injection
+const SPORT_TABLES = new Set(['ff_sport_ffl','ff_sport_flb','ff_sport_fba','ff_sport_fhl']);
+
+async function ensureNumCode(pool, charCode) {
+  // Try existing
+  const ex = await pool.query('SELECT num_code FROM ff_sport_code_map WHERE char_code=$1', [charCode]);
+  if (ex.rows[0]) return ex.rows[0].num_code;
+
+  // Assign next index+1
+  const nx = await pool.query('SELECT COALESCE(MAX(num_code),0)+1 AS n FROM ff_sport_code_map');
+  const numCode = nx.rows[0].n;
+  await pool.query(
+    'INSERT INTO ff_sport_code_map (char_code, num_code) VALUES ($1,$2) ON CONFLICT (char_code) DO NOTHING',
+    [charCode, numCode]
+  );
+  return numCode;
+}
+
+async function refreshSportCatalog(pool, {
+  tableName,          // 'ff_sport_ffl' | ...
+  charCode,           // 'ffl'
+  season              // 2025
+}) {
+  if (!SPORT_TABLES.has(tableName)) throw new Error('invalid sport table');
+  const numCode = await ensureNumCode(pool, charCode);
+
+  // COUNTs for this season inside the per-sport table
+  // (sid is PK there; still use DISTINCT for safety)
+  const q = `
+    SELECT
+      COUNT(*)::int                              AS total_count,
+      COUNT(DISTINCT sid)::int                   AS unique_sid_count,
+      COUNT(DISTINCT member_id)::int             AS unique_member_count
+    FROM ${tableName}
+    WHERE season = $1
+  `;
+  const { rows:[stats] } = await pool.query(q, [season]);
+
+  // Upsert into catalog
+  await pool.query(`
+    INSERT INTO ff_sport (
+      char_code, season, num_code, total_count, unique_sid_count, unique_member_count, table_name
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+    ON CONFLICT (char_code, season) DO UPDATE
+      SET total_count         = EXCLUDED.total_count,
+          unique_sid_count    = EXCLUDED.unique_sid_count,
+          unique_member_count = EXCLUDED.unique_member_count,
+          num_code            = EXCLUDED.num_code,         -- stays stable
+          table_name          = EXCLUDED.table_name,
+          last_seen_at        = now()
+  `, [charCode, season, numCode,
+      stats.total_count || 0, stats.unique_sid_count || 0, stats.unique_member_count || 0,
+      tableName
+  ]);
+}
+
+
 // Normalizers / validators
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
@@ -212,6 +269,8 @@ const espnRouter         = asRouter(require('./routers/espnRouter'), 'routers/es
 const verifyRouter       = asRouter(require('./src/routes/verify'), 'src/routes/verify');
 const handleLoginRouter  = asRouter(require('./routes/identity/handle-login.js'), 'routes/identity/handle-login');
 const contactsRouter     = asRouter(require('./routes/identity/contacts'), 'routes/identity/contacts');
+const espnIngestRouter = require('./api/platforms/espn-ingest')(pool);
+app.use('/api/platforms/espn', espnIngestRouter);
 
 // ---------- Mounted Routers ----------
 app.use('/api/espn-auth', feinAuthRouter);
