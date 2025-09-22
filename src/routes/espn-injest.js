@@ -31,8 +31,7 @@ router.get('/espn/my-teams', async (req, res) => {
     const s2   = req.get('x-espn-s2')   || req.cookies?.ff_espn_s2   || req.cookies?.espn_s2 || null;
 
     // Make sure sport table exists
-    const tableName = await ensureSportTable(pool, game); // e.g. ff_sport_ffl
-
+const tableName = await ensureSportTable(game);
     if (!member_id && !(swid && s2)) {
       return res.status(401).json({ ok:false, error:'unauthorized' });
     }
