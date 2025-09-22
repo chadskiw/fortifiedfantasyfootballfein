@@ -215,6 +215,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser()); // before routes that read cookies
 app.use(express.urlencoded({ extended: true }));
 app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
+const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
 app.use('/api/identity/request-code', requestCodeRouter);
 // Custom CORS + rate limit
 const { corsMiddleware } = require('./src/cors');
@@ -230,7 +231,6 @@ app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
   }
 }));
 // --- add near other requires ---
-const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
 
 // --- add with other mounts (before static) ---
 
