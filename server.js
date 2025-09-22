@@ -228,11 +228,21 @@ app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
     if (filePath.endsWith('.wasm')) res.type('application/wasm');
   }
 }));
-// add near the other requires
-const identityIndexRouter = asRouter(require('./routes/identity'), 'routes/identity');
+// --- add near other requires ---
+const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
 
-// mount it before static
-app.use('/api/identity', identityIndexRouter);
+// --- add with other mounts (before static) ---
+app.use('/api/identity/request-code', requestCodeRouter);
+
+// (optional but handy) preflight for browsers
+const allow = {
+  'access-control-allow-origin': 'https://fortifiedfantasy.com',
+  'access-control-allow-credentials': 'true',
+  'access-control-allow-headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key',
+  'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  'access-control-max-age': '600',
+};
+app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
 
 // ---------- DB helpers for identity ----------
 async function handleStats(username) {
@@ -554,14 +564,6 @@ app.get('/api/identity/members', listMembersHandler);
 app.get('/api/members/recent', listRecentMembersHandler);
 app.get('/api/identity/members/recent', listRecentMembersHandler);
 
-// --- OPTIONS helpers for common endpoints (preflight) ---
-const allow = {
-  'access-control-allow-origin': 'https://fortifiedfantasy.com',
-  'access-control-allow-credentials': 'true',
-  'access-control-allow-headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key',
-  'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-  'access-control-max-age': '600',
-};
 app.options(
   [
     '/api/members/lookup',
