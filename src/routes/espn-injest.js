@@ -337,7 +337,7 @@ const tableName = await ensureSportTable(game);
   }
 
   // ===== Route: POST /api/platforms/espn/ingest-chui =====
-  router.post('/ingest-chui', async (req, res) => {
+  router.post('/espn-injest', async (req, res) => {
     try{
       const chui = req.body && typeof req.body === 'object' ? req.body : null;
       if (!chui) return res.status(400).json({ ok:false, error:'no_payload' });
