@@ -214,7 +214,8 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser()); // before routes that read cookies
 app.use(express.urlencoded({ extended: true }));
-
+app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
+app.use('/api/identity/request-code', requestCodeRouter);
 // Custom CORS + rate limit
 const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
@@ -232,7 +233,6 @@ app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
 const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
 
 // --- add with other mounts (before static) ---
-app.use('/api/identity/request-code', requestCodeRouter);
 
 // (optional but handy) preflight for browsers
 const allow = {
@@ -242,7 +242,7 @@ const allow = {
   'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
   'access-control-max-age': '600',
 };
-app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
+
 
 // ---------- DB helpers for identity ----------
 async function handleStats(username) {
