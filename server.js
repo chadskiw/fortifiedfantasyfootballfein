@@ -228,6 +228,11 @@ app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
     if (filePath.endsWith('.wasm')) res.type('application/wasm');
   }
 }));
+// add near the other requires
+const identityIndexRouter = asRouter(require('./routes/identity'), 'routes/identity');
+
+// mount it before static
+app.use('/api/identity', identityIndexRouter);
 
 // ---------- DB helpers for identity ----------
 async function handleStats(username) {
