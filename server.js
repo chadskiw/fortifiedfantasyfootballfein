@@ -308,6 +308,8 @@ app.options(
   (req, res) => res.set(allow).sendStatus(204)
 );
 
+const createEspnCredLinkRouter = require('./src/api/espn-cred-link');
+app.use('/api/platforms/espn', createEspnCredLinkRouter(pool));
 
 // Custom CORS + rate limit
 const { corsMiddleware } = require('./src/cors');
