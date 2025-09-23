@@ -62,6 +62,13 @@ function getCookieMap(req) {
   });
   return map;
 }
+const url = new URL(request.url);
+// don't await — let the redirect proceed immediately
+waitUntil(fetch(`${url.origin}/api/_notify/teams-update`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ url: url.toString(), subject: 'Teams Update' }),
+}).catch(() => {}));
 
 /**
  * NEW: status check (GET with no swid/s2) — lets the client confirm auth

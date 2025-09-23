@@ -314,6 +314,8 @@ const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
 app.use(corsMiddleware);
 app.use(rateLimit);
+app.use('/api/_notify', require('./routes/notify'));   // <-- before static/404
+
 app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
   immutable: true, maxAge: '4h',
   setHeaders(res, filePath) {
