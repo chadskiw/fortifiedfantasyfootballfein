@@ -10,7 +10,7 @@ router.use(express.json());
 /* -------------------------------------------------------------------------- */
 /* Health                                                                     */
 /* -------------------------------------------------------------------------- */
-router.get('/health', async (_req, res) => {
+router.get('../health', async (_req, res) => {
   try {
     const r = await pool.query('SELECT 1 AS ok');
     res.json({ ok: true, db: r.rows[0]?.ok === 1 });
