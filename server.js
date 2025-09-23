@@ -297,6 +297,7 @@ function normalizeBody(req, _res, next) { req.body = readAnyBody(req); next(); }
 
 app.use('/api/identity/request-code', normalizeBody, requestCodeRouter);
 app.use('/api/identity/send-code',    normalizeBody, requestCodeRouter);
+app.use('/api', require('./src/routes/espn-link-member'));
 
 // Handle upsert endpoints use the tolerant core:
 app.post('/api/identity/handle/upsert', (req, res) => upsertHandleCore(req, res));
