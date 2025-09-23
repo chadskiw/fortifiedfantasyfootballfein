@@ -1,7 +1,7 @@
 // routes/notify.js
 const express = require('express');
 const router = express.Router();
-const { sendTeamsUpdateEmail } = require('../src/notify');
+const { sendTeamsUpdateEmail } = require('../notify');
 
 // POST /api/_notify/teams-update  { url?, subject? }
 router.post('/teams-update', express.json(), async (req, res) => {
