@@ -1,14 +1,13 @@
-// routes/health.js
-const { Router } = require('express');
-const os = require('os');
+// src/routes/health.js
+import { Router } from 'express';
+import os from 'os';
 
 const STARTED_AT = Date.now();
 const SERVICE = process.env.SERVICE_NAME || 'fein-auth-service';
 
-function buildHealthRouter({ pool } = {}) {
+export default function buildHealthRouter({ pool } = {}) {
   const router = Router();
 
-  // Fast liveness
   router.head('/health', (req, res) => res.sendStatus(200));
   router.get('/health', (req, res) => {
     res.json({
@@ -23,7 +22,6 @@ function buildHealthRouter({ pool } = {}) {
     });
   });
 
-  // DB check (readiness)
   router.get('/health/db', async (req, res) => {
     if (!pool) return res.json({ ok: true, db: 'skipped' });
     try {
@@ -34,7 +32,6 @@ function buildHealthRouter({ pool } = {}) {
     }
   });
 
-  // Full readiness (add more checks if needed)
   router.get('/health/ready', async (req, res) => {
     try {
       if (pool) await pool.query('SELECT 1');
@@ -46,5 +43,3 @@ function buildHealthRouter({ pool } = {}) {
 
   return router;
 }
-
-module.exports = buildHealthRouter;
