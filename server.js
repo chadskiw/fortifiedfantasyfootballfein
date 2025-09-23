@@ -27,6 +27,56 @@ module.exports = {
 };
 
 // ---------- Helpers ----------
+
+// --- tolerant body helpers ---
+function coerceJsonMaybe(s) {
+  if (typeof s !== 'string') return null;
+  try { return JSON.parse(s); } catch { return null; }
+}
+
+// Accepts `{key:value}`, `{ key: "value" }`, `key=value`, or plain `value`
+function parseLooseObjectish(s) {
+  if (typeof s !== 'string') return null;
+  const trimmed = s.trim();
+
+  // {key:value}
+  let m = /^\{?\s*([^:{}"'\s]+)\s*:\s*(.+?)\s*\}?$/.exec(trimmed);
+  if (m) {
+    const k = String(m[1]).trim();
+    let v = String(m[2]).trim();
+    // strip optional quotes
+    v = v.replace(/^"(.*)"$/,'$1').replace(/^'(.*)'$/,'$1');
+    return { [k]: v };
+  }
+
+  // key=value
+  m = /^([^=]+)=(.+)$/.exec(trimmed);
+  if (m) return { [m[1]].trim(): m[2].trim() };
+
+  // fallback as { value }
+  if (trimmed) return { value: trimmed };
+  return null;
+}
+
+function readAnyBody(req) {
+  // If express.json already parsed a real object:
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) return req.body;
+
+  // If we captured a failed raw JSON body:
+  const raw = (typeof req.body === 'string' && req.body) || req._badJsonRaw || '';
+  const j = coerceJsonMaybe(raw);
+  if (j && typeof j === 'object') return j;
+
+  const loose = parseLooseObjectish(raw);
+  if (loose) return loose;
+
+  // last resort: merge whatever we have with query
+  return {
+    ...((req.body && typeof req.body === 'object') ? req.body : {}),
+    ...req.query,
+  };
+}
+
 function asRouter(mod, name) {
   const candidate = (mod && (mod.router || mod.default || mod));
   if (typeof candidate !== 'function') {
@@ -211,15 +261,36 @@ function extractEspnCreds(req) {
 
 // ---------- Core Middlewares (order matters) ----------
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '1mb' }));
+// JSON parser that doesn't kill the request on bad JSON
+app.use(express.json({ limit: '1mb', strict: false }));
+
+// If JSON parsing fails, keep the raw body and continue
+app.use(function jsonParseGuard(err, req, _res, next) {
+  if (err && err.type === 'entity.parse.failed') {
+    req._badJsonRaw = err.body || '';   // make available to routes
+    req.body = {};                       // neutralize body so routes can recover via readAnyBody()
+    return next();                       // DO NOT send 400 here
+  }
+  return next(err);
+});
 app.use(cookieParser()); // before routes that read cookies
 app.use(express.urlencoded({ extended: true }));
-app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
 const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
-app.use('/api/identity/request-code', requestCodeRouter);
-// Alias mount reusing the same router instance/logic
-app.use('/api/identity/send-code', requestCodeRouter);
 
+function normalizeBody(req, _res, next) { req.body = readAnyBody(req); next(); }
+
+app.use('/api/identity/request-code', normalizeBody, requestCodeRouter);
+app.use('/api/identity/send-code',    normalizeBody, requestCodeRouter);
+
+// Handle upsert endpoints use the tolerant core:
+app.post('/api/identity/handle/upsert', (req, res) => upsertHandleCore(req, res));
+app.post('/api/profile/claim-username', (req, res) => upsertHandleCore(req, res));
+
+// Preflights
+app.options(
+  ['/api/identity/request-code','/api/identity/send-code','/api/identity/handle/upsert','/api/profile/claim-username'],
+  (req, res) => res.set(allow).sendStatus(204)
+);
 
 
 // Custom CORS + rate limit
@@ -346,21 +417,15 @@ async function upsertHandleCore(req, res) {
   }
 }
 
-app.post('/api/identity/handle/upsert', upsertHandleCore);
-app.post('/api/profile/claim-username', upsertHandleCore);
 
 // (optional) preflights
-app.options(['/api/identity/handle/upsert','/api/profile/claim-username'], (req,res)=>res.set(allow).sendStatus(204));
 
 app.post('/api/identity/send-code', async (req, res, next) => {
   req.body = readAnyBody(req); // normalize first
   next();
 }, requestCodeRouter); // reuse your existing router
 
-// you already have the canonical mount:
-app.use('/api/identity/request-code', (req,res,next)=>{ req.body=readAnyBody(req); next(); }, requestCodeRouter);
 
-app.options('/api/identity/send-code', (req, res) => res.set(allow).sendStatus(204));
 
 
 
@@ -500,11 +565,6 @@ app.post('/api/members/lookup', membersLookupByIdentifier);
 app.get('/api/identity/member/lookup', membersLookupByIdentifier);
 app.post('/api/identity/member/lookup', membersLookupByIdentifier);
 
-
-
-app.post('/api/profile/claim-username', (req, res) => {
-  return upsertHandleCore(req, res, req.body?.username || req.body?.handle);
-});
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
