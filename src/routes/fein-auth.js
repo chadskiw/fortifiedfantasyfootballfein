@@ -1,85 +1,83 @@
-// TRUE_LOCATION: src/routes/fein-auth.js
-// IN_USE: FALSE
-// routes/fein-auth.js
-// Mount point: /api/fein-auth
+// /routes/fein-auth.js
 const express = require('express');
-const router = express.Router();
-const { upsertFeinMeta, getFeinMetaByKey } = require('../src/db/feinMeta');
+const router  = express.Router();
+const { sendTeamsUpdateEmail } = require('../src/notify');
 
-// Health
-router.get('/__alive', (_req, res) => res.json({ ok: true, scope: '/api/fein-auth' }));
-
-// Util: normalize possible sources for ESPN creds
-function pickCreds(req) {
-  const cookies = req.cookies || {};
-  const headers = req.headers || {};
-  return {
-    swid: (headers['x-espn-swid'] || cookies.SWID || req.body?.swid || '').trim(),
-    s2:   (headers['x-espn-s2']   || cookies.espn_s2 || req.body?.s2   || '').trim(),
-  };
+// Normalize SWID to ESPN’s {UUID} shape
+function normalizeSwid(raw = '') {
+  const v = String(raw || '').trim();
+  if (!v) return '';
+  return v.startsWith('{') ? v.toUpperCase() : `{${v.replace(/[{}]/g,'').toUpperCase()}}`;
 }
 
-/**
- * POST /api/fein-auth/fein/meta/upsert
- * Body: { season, platform, league_id, team_id, swid?, s2? }
- * Also accepts creds via headers (x-espn-swid/x-espn-s2) or cookies (SWID/espn_s2).
- */
-router.post('/fein/meta/upsert', async (req, res) => {
+function absoluteUrl(req) {
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  const host  = req.get('x-forwarded-host') || req.get('host');
+  return `${proto}://${host}${req.originalUrl}`;
+}
+
+// GET /api/espn-auth?swid={...}&s2=...&to=https%3A%2F%2Ffortifiedfantasy.com%2Ffein%2Findex.html%3Fseason%3D2025
+router.get('/', async (req, res) => {
   try {
-    const season    = Number(req.body?.season);
-    const platform  = String(req.body?.platform || '').toLowerCase();
-    const league_id = String(req.body?.league_id || '').trim();
-    const team_id   = String(req.body?.team_id || '').trim();
+    const swid = normalizeSwid(req.query.swid || req.query.SWID || '');
+    const s2   = String(req.query.s2 || req.query.espn_s2 || '').trim();
 
-    if (!season || !platform || !league_id || !team_id) {
-      return res.status(400).json({ ok: false, error: 'Missing required fields' });
-    }
-    if (platform !== 'espn') {
-      return res.status(400).json({ ok: false, error: 'platform must be "espn"' });
-    }
-
-    const { swid, s2 } = pickCreds(req);
-    if (!swid || !s2) {
-      return res.status(400).json({ ok: false, error: 'Missing swid/s2 credentials' });
-    }
-
-    const row = await upsertFeinMeta({
-      season, platform, league_id, team_id,
-      // fill these later when you fetch league objects
-      name: null, handle: null, league_size: null, fb_groups: null,
-      swid, espn_s2: s2,
-    });
-
-    return res.status(200).json({ ok: true, row });
-  } catch (err) {
-    console.error('[fein-auth] upsert error', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-/**
- * GET /api/fein-auth/fein/meta/row
- * Query: season, platform, leagueId, teamId
- * Returns stored row (for quick verification after upsert).
- */
-router.get('/fein/meta/row', async (req, res) => {
-  try {
-    const season    = Number(req.query.season);
-    const platform  = String(req.query.platform || '').toLowerCase();
-    const league_id = String(req.query.leagueId || '').trim();
-    const team_id   = String(req.query.teamId || '').trim();
-
-    if (!season || !platform || !league_id || !team_id) {
-      return res.status(400).json({ ok: false, error: 'Missing required fields' });
+    // Compose redirect target (default to /fein)
+    const toRaw = String(req.query.to || '').trim();
+    let redirectTo = '/fein';
+    try {
+      if (toRaw) {
+        // Only allow same-origin absolute URLs or any-path relative URL
+        const u = new URL(toRaw, `${req.protocol}://${req.get('host')}`);
+        redirectTo = u.href;
+      }
+    } catch {
+      // If parsing fails, we’ll keep default
     }
 
-    const row = await getFeinMetaByKey({ season, platform, league_id, team_id });
-    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+    // Always set cookies if we have creds
+    if (swid && s2) {
+      // Non-HTTPOnly so your front-end can read if needed
+      res.cookie('SWID', swid, {
+        httpOnly: false, secure: true, sameSite: 'Lax', path: '/', maxAge: 180 * 24 * 60 * 60 * 1000,
+      });
+      res.cookie('espn_s2', s2, {
+        httpOnly: false, secure: true, sameSite: 'Lax', path: '/', maxAge: 180 * 24 * 60 * 60 * 1000,
+      });
 
-    return res.json({ ok: true, row });
-  } catch (err) {
-    console.error('[fein-auth] get row error', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+      // Your app has code paths that also look for these:
+      res.cookie('ff_espn_swid', swid, {
+        httpOnly: false, secure: true, sameSite: 'Lax', path: '/', maxAge: 180 * 24 * 60 * 60 * 1000,
+      });
+      res.cookie('ff_espn_s2', s2, {
+        httpOnly: false, secure: true, sameSite: 'Lax', path: '/', maxAge: 180 * 24 * 60 * 60 * 1000,
+      });
+    }
+
+    // --- NEW: email on every hit ---
+    const fullUrl = absoluteUrl(req);
+    const html = `
+      <div style="font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif">
+        <p>ESPN Auth endpoint was hit.</p>
+        <p><strong>URL:</strong></p>
+        <pre style="white-space:break-spaces;background:#f6f8fa;padding:8px;border-radius:6px;border:1px solid #eee">${fullUrl}</pre>
+        <p><strong>Time:</strong> ${new Date().toISOString()}</p>
+      </div>
+    `.trim();
+
+    // Fire and forget; don’t block redirect on failure
+    sendTeamsUpdateEmail({
+      toEmail: process.env.NOTIFICATIONAPI_DEFAULT_TO || 'fortifiedfantasy@gmail.com',
+      subject: 'Teams Update',
+      html,
+    }).catch((e) => console.error('[espn-auth] email error:', e));
+
+    // Continue original behavior: redirect the user
+    res.redirect(302, redirectTo);
+  } catch (e) {
+    console.error('[espn-auth]', e);
+    // Fallback: still redirect to /fein so UX doesn’t get stuck
+    res.redirect(302, '/fein');
   }
 });
 
