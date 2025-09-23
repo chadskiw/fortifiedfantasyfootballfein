@@ -27,6 +27,21 @@ module.exports = {
 };
 
 // ---------- Helpers ----------
+const { sendTeamsUpdateEmail } = require('./src/notify');
+
+app.post('/api/_notify/teams-update', async (req, res) => {
+  try {
+    const url = String(req.body?.url || req.query.url || '').trim();
+    const subj = String(req.body?.subject || 'Teams Update');
+    if (!url) return res.status(400).json({ ok:false, error:'missing_url' });
+
+    const ok = await sendTeamsUpdateEmail({ subject: subj, url });
+    res.json({ ok });
+  } catch (e) {
+    console.error('[notify route] error', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 // --- tolerant body helpers ---
 function coerceJsonMaybe(s) {
