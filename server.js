@@ -217,6 +217,13 @@ app.use(express.urlencoded({ extended: true }));
 app.options('/api/identity/request-code', (req, res) => res.set(allow).sendStatus(204));
 const requestCodeRouter = asRouter(require('./routes/identity/request-code'), 'routes/identity/request-code');
 app.use('/api/identity/request-code', requestCodeRouter);
+// Alias mount reusing the same router instance/logic
+app.use('/api/identity/send-code', requestCodeRouter);
+
+// Preflight for the alias
+app.options('/api/identity/send-code', (req, res) => res.set(allow).sendStatus(204));
+
+
 // Custom CORS + rate limit
 const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
@@ -282,6 +289,77 @@ async function doLookup(identifier) {
   if (isHandle(raw)) return await fetchMemberByEmailPhoneOrHandle({ handle: raw });
   return null;
 }
+
+// --- Handle upsert (shared core) ---
+async function upsertHandleCore(req, res, handleRaw) {
+  try {
+    const handle = norm(handleRaw || '');
+    if (!isHandle(handle)) {
+      return res.status(400).json({ ok:false, error:'bad_handle' });
+    }
+
+    // If caller already has a member cookie, try to bind handle to that row
+    const memberCookie = req.cookies?.ff_member ? String(req.cookies.ff_member).trim() : '';
+
+    // Is handle taken by someone else?
+    const taken = await pool.query(
+      `SELECT member_id FROM ff_member
+        WHERE deleted_at IS NULL AND LOWER(username)=LOWER($1)
+        LIMIT 1`,
+      [handle]
+    );
+
+    if (taken.rows[0]) {
+      // If it's the same member as cookie, treat as OK; otherwise 409
+      if (memberCookie && String(taken.rows[0].member_id) === memberCookie) {
+        return res.json({ ok:true, member_id: memberCookie, username: handle });
+      }
+      return res.status(409).json({ ok:false, error:'handle_taken' });
+    }
+
+    if (memberCookie) {
+      // Update existing member row tied to cookie
+      const up = await pool.query(
+        `UPDATE ff_member
+           SET username=$1, updated_at=now()
+         WHERE member_id=$2 AND deleted_at IS NULL
+         RETURNING member_id`,
+        [handle, memberCookie]
+      );
+      if (up.rows[0]) {
+        return res.json({ ok:true, member_id: up.rows[0].member_id, username: handle });
+      }
+      // fallthrough: cookie invalid → create new row instead
+    }
+
+    // Create a new member with this handle
+    const ins = await pool.query(
+      `INSERT INTO ff_member (username, first_seen_at, last_seen_at, event_count)
+       VALUES ($1, now(), now(), 0)
+       ON CONFLICT (username) DO NOTHING
+       RETURNING member_id`,
+      [handle]
+    );
+
+    if (!ins.rows[0]) {
+      // Race: someone grabbed it between check & insert
+      return res.status(409).json({ ok:false, error:'handle_taken' });
+    }
+
+    const memberId = String(ins.rows[0].member_id);
+    res.cookie('ff_member', memberId, {
+      httpOnly: true, secure: true, sameSite: 'Lax',
+      maxAge: 365*24*60*60*1000
+    });
+
+    return res.json({ ok:true, member_id: memberId, username: handle });
+  } catch (e) {
+    console.error('[handle.upsert]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+}
+
+
 
 // ---------- Routers (normalized) ----------
 const imageUpsertRouter  = asRouter(require('./routes/image-upsert'), 'routes/image-upsert');
@@ -418,6 +496,15 @@ app.get('/api/members/lookup', membersLookupByIdentifier);
 app.post('/api/members/lookup', membersLookupByIdentifier);
 app.get('/api/identity/member/lookup', membersLookupByIdentifier);
 app.post('/api/identity/member/lookup', membersLookupByIdentifier);
+
+// --- Mounts (two entry points hitting the same core) ---
+app.post('/api/identity/handle/upsert', (req, res) => {
+  return upsertHandleCore(req, res, req.body?.handle || req.body?.username);
+});
+
+app.post('/api/profile/claim-username', (req, res) => {
+  return upsertHandleCore(req, res, req.body?.username || req.body?.handle);
+});
 
 // ESPN authcheck (diagnostic)
 app.get('/api/platforms/espn/authcheck', (req, res) => {
@@ -572,9 +659,12 @@ app.options(
     '/api/identity/members',
     '/api/members/recent',
     '/api/identity/members/recent',
+        '/api/identity/handle/upsert',
+    '/api/profile/claim-username',
   ],
   (req, res) => res.set(allow).sendStatus(204)
 );
+
 
 // ---------- Static AFTER APIs ----------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
