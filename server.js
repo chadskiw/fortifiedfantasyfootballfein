@@ -483,7 +483,7 @@ app.get('/api/fein-auth/fein/meta/selftest', async (req, res) => {
     res.status(500).json({ ok:false, error:'db_error', code:e.code, message:e.message });
   }
 });
-
+app.use('/api', require('./routes/health')({ pool }));
 // --- Health (place BEFORE static/catch-alls) ---
 app.get('/healthz', async (_req, res) => {
   res.set('Cache-Control', 'no-store');
