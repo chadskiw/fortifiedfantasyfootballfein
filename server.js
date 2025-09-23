@@ -51,7 +51,8 @@ function parseLooseObjectish(s) {
 
   // key=value
   m = /^([^=]+)=(.+)$/.exec(trimmed);
-  if (m) return { [m[1]].trim(): m[2].trim() };
+  if (m) return { [m[1].trim()]: m[2].trim() };
+
 
   // fallback as { value }
   if (trimmed) return { value: trimmed };
