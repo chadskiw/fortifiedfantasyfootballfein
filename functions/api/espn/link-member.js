@@ -1,5 +1,5 @@
 import { readCookies, sha256Hex, classifyIdentifier } from '../_lib/util.js';
-import { query, exec } from '../_lib/db.js';
+import { query, exec } from '../../_lib/db.js';
 
 export async function onRequestPost({ request, env }) {
   const cookies = readCookies(request.headers.get('cookie') || '');
