@@ -1,9 +1,9 @@
 // src/routes/identity.js
 // temporary stub: routes/identity/request-code.js or inline
 const express = require('express');
-const stub = express.Router();
-stub.post('/', (req,res)=> res.json({ ok:true, step:'stubbed' }));
-module.exports = stub;
+//const stub = express.Router();
+//stub.post('/', (req,res)=> res.json({ ok:true, step:'stubbed' }));
+//module.exports = stub;
 // mount: app.use('/api/identity/request-code', require('./routes/identity/request-code'));
 
 
@@ -64,4 +64,4 @@ router.post('/handle/upsert', async (req, res) => {
   }
 });
 
-//module.exports = router;
+module.exports = router;

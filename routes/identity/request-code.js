@@ -7,6 +7,7 @@
 
 const express = require('express');
 const crypto  = require('crypto');
+const pool    = require('../db/pool');
 
 module.exports = function createRequestCodeRouter(pool) {
   if (!pool) throw new Error('[request-code] pool required');
