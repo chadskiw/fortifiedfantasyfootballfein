@@ -14,6 +14,10 @@ const pool          = require('./src/db/pool'); // <- uses your existing pool.js
 const identityHandleRouter = require('./routes/identity/handle');        // /handle/exists, /handle/upsert
 const profileClaimRouter   = require('./routes/profile/claim-username');  // /claim-username
 const requestCodeRouter    = require('./routes/identity/request-code');   // POST request/send code
+// near other requires
+const createEspnIngestRouter = require('./src/api/platforms/espn-ingest');
+
+
 
 // ---------- App ----------
 const app = express();
@@ -303,7 +307,8 @@ app.use('/api/quickhitter', require('./src/routes/quickhitter')); // check, exis
 app.use('/api/identity', require('./src/routes/identity'));       // POST /request-code, /send-code
 app.use('/api/identity', require('./src/routes/upsert'));         // POST /handle/upsert
 app.use('/api/espn', require('./routes/espn-cred'));
-
+// after you create the pg Pool and before static/404 handlers:
+app.use('/api/platforms', createEspnIngestRouter(pool));
 // optional profile alias if you want /api/profile/claim-username to exist
 try { app.use('/api/profile', require('./src/routes/upsert')); } catch { /* optional */ }
 

@@ -138,7 +138,7 @@ router.get('/espn/ingest-fan', async (req, res) => {
     const minSeason = Number(req.query.minSeason) || new Date().getFullYear();
     const gameFilter = String(req.query.game || '').trim().toLowerCase(); // optional, e.g. 'ffl'
 
-    // Identify the member that will own the rows (require this like POST /espn-injest)
+    // Identify the member that will own the rows (require this like POST /espn-ingest)
     const member_id = req.cookies?.ff_member || null;
     if (!member_id) return res.status(401).json({ ok:false, error:'unauthorized' });
 
@@ -516,7 +516,7 @@ const tableName = await ensureSportTable(game);
   }
 
   // ===== Route: POST /api/platforms/espn/ingest-chui =====
-  router.post('/espn-injest', async (req, res) => {
+  router.post('/espn-ingest', async (req, res) => {
     try{
       const chui = req.body && typeof req.body === 'object' ? req.body : null;
       if (!chui) return res.status(400).json({ ok:false, error:'no_payload' });
