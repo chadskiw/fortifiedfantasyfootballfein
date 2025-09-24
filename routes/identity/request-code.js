@@ -1,363 +1,344 @@
 // routes/identity/request-code.js
-// COMPLETE + CONFLICT-CHECKS + FULL ff_identity_requests SCHEMA
+// POST /api/identity/request-code
+// Also compatible with /api/identity/send-code (mount the same router)
 
 const express = require('express');
-const crypto = require('crypto');
-const { pool } = require('../../src/db/pool');
+const crypto  = require('crypto');
+
+let pool;
+try {
+  // server.js exports { pool }
+  ({ pool } = require('../../server'));
+} catch {
+  // fallback if you keep a dedicated pool module
+  try { ({ pool } = require('../../src/db/pool')); } catch {}
+}
+if (!pool) throw new Error('[request-code] Could not resolve pg pool');
 
 const router = express.Router();
-router.use(express.json());
-router.use(express.urlencoded({ extended: true }));
-/* --------------------------- identifier detection -------------------------- */
-const EMAIL_RX  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const PHONE_RX  = /^\+?[0-9\s().-]{7,20}$/;
-const HANDLE_RX = /^[a-zA-Z0-9_.]{3,24}$/;
+router.use(express.json({ limit: '1mb' }));
+
+/* ------------------------ helpers ------------------------ */
+
+const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
+const HANDLE_RE = /^[a-zA-Z0-9_.](?:[a-zA-Z0-9_. ]{1,22})[a-zA-Z0-9_.]$/; // allow single spaces inside, no ends
+const HEX_RE    = /^#?[0-9a-f]{6}$/i;
+
+const nowIso = () => new Date().toISOString();
 
 function normalizeIdentifier(raw) {
   const s = String(raw || '').trim();
   if (!s) return { kind: null, value: null };
-  if (EMAIL_RX.test(s)) return { kind: 'email', value: s.toLowerCase() };
-  const digits = s.replace(/[^\d+]/g, '');
-  if (PHONE_RX.test(s) && (digits.match(/\d/g) || []).length >= 7) {
-    const e164ish = digits.startsWith('+') ? digits : `+${digits}`;
-    return { kind: 'phone', value: e164ish };
+
+  if (EMAIL_RE.test(s)) {
+    return { kind: 'email', value: s.toLowerCase() };
   }
-  if (HANDLE_RX.test(s)) return { kind: 'handle', value: s };
+  if (PHONE_RE.test(s)) {
+    const digits = s.replace(/[^\d]/g, '');
+    const e164 = digits.startsWith('1') && digits.length === 11 ? `+${digits}` :
+                 digits.length === 10 ? `+1${digits}` :
+                 `+${digits}`;
+    return { kind: 'phone', value: e164 };
+  }
+  if (HANDLE_RE.test(s)) {
+    // collapse inner multiple spaces to single, trim ends (regex already prevents ends)
+    const handle = s.replace(/\s{2,}/g, ' ');
+    return { kind: 'handle', value: handle };
+  }
   return { kind: null, value: null };
 }
 
-// When caller sends { kind, value } explicitly
-function normalizeByKind(kind, value) {
-  const k = String(kind || '').trim().toLowerCase();
-  const v = String(value || '').trim();
-  if (k === 'email' && EMAIL_RX.test(v)) return { kind: 'email', value: v.toLowerCase() };
-  if (k === 'phone') {
-    const digits = v.replace(/[^\d+]/g, '');
-    const only   = digits.replace(/[^\d]/g, '');
-    const e164   = digits.startsWith('+') ? digits : (only.length === 10 ? `+1${only}` : `+${only}`);
-    if (/^\+\d{7,15}$/.test(e164)) return { kind: 'phone', value: e164 };
-  }
-  if (k === 'handle' && HANDLE_RX.test(v)) return { kind: 'handle', value: v };
-  return { kind: null, value: null };
+function isValidHex(h) {
+  return HEX_RE.test(String(h || '').replace('#',''));
+}
+function normalizeHex(h) {
+  if (!h) return null;
+  const v = String(h).trim();
+  if (!isValidHex(v)) return null;
+  const hh = v.startsWith('#') ? v.toUpperCase() : ('#' + v.toUpperCase());
+  return hh;
 }
 
-/* ------------------------------ tiny rate limit --------------------------- */
-const recent = new Map(); // key -> { count, resetAt }
-function ratelimit(key, limit = 6, ttlMs = 60_000) {
+function makeCode() {
+  // 6-digit numeric, no leading zero bias
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ultra-simple, in-process rate limiter (keyed by ipHash:identifier)
+const RL_BUCKET = new Map(); // key -> {cnt, ts}
+function ratelimit(key, maxCount, windowMs) {
   const now = Date.now();
-  const rec = recent.get(key);
-  if (!rec || rec.resetAt <= now) {
-    recent.set(key, { count: 1, resetAt: now + ttlMs });
-    return { ok: true, remaining: limit - 1, resetAt: now + ttlMs };
+  const rec = RL_BUCKET.get(key);
+  if (!rec || (now - rec.ts) > windowMs) {
+    RL_BUCKET.set(key, { cnt: 1, ts: now });
+    return { ok: true, remaining: maxCount - 1 };
   }
-  if (rec.count >= limit) return { ok: false, remaining: 0, resetAt: rec.resetAt };
-  rec.count += 1;
-  return { ok: true, remaining: limit - rec.count, resetAt: rec.resetAt };
+  if (rec.cnt >= maxCount) return { ok: false, remaining: 0 };
+  rec.cnt++;
+  return { ok: true, remaining: maxCount - rec.cnt };
 }
 
-/* ----------------------- ff_identity_requests bootstrap -------------------- */
-// Match the fuller schema used by verify flow (code/expires/used/invite_id + indexes)
-const CREATE_REQUESTS_SQL = `
-  CREATE TABLE IF NOT EXISTS ff_identity_requests (
-    id BIGSERIAL PRIMARY KEY,
-    identifier_kind  TEXT NOT NULL,
-    identifier_value TEXT NOT NULL,
-    code             TEXT,
-    expires_at       TIMESTAMPTZ,
-    used_at          TIMESTAMPTZ,
-    invite_id        BIGINT,
-    ip_hash          TEXT,
-    created_at       TIMESTAMPTZ DEFAULT now()
-  );
-
-  DO $do$
-  BEGIN
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_indexes
-      WHERE schemaname = 'public' AND indexname = 'ff_ir_lookup_idx'
-    ) THEN
-      CREATE INDEX ff_ir_lookup_idx
-        ON ff_identity_requests (identifier_kind, identifier_value, code);
-    END IF;
-
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_indexes
-      WHERE schemaname = 'public' AND indexname = 'ff_ir_expires_idx'
-    ) THEN
-      CREATE INDEX ff_ir_expires_idx
-        ON ff_identity_requests (expires_at);
-    END IF;
-  END
-  $do$;
-`;
 async function ensureRequestsTable() {
-  await pool.query(CREATE_REQUESTS_SQL);
-}
-
-/* ------------------------------- member helpers --------------------------- */
-async function generateUniqueMemberId() {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  while (true) {
-    let id = '';
-    for (let i = 0; i < 8; i++) id += alphabet[(Math.random() * alphabet.length) | 0];
-    const { rowCount } = await pool.query('SELECT 1 FROM ff_member WHERE member_id=$1 LIMIT 1', [id]);
-    if (rowCount === 0) return id;
-  }
-}
-
-// read the current member from cookie if present
-function cookieMemberId(req) {
-  return String(req.cookies?.ff_member || '').trim() || null;
-}
-
-async function findMemberByEmail(email) {
-  const { rows } = await pool.query(
-    `SELECT member_id, username FROM ff_member WHERE LOWER(email)=LOWER($1) AND deleted_at IS NULL LIMIT 1`,
-    [email]
-  );
-  return rows[0] || null;
-}
-async function findMemberByPhone(phone) {
-  const { rows } = await pool.query(
-    `SELECT member_id, username FROM ff_member WHERE phone_e164=$1 AND deleted_at IS NULL LIMIT 1`,
-    [phone]
-  );
-  return rows[0] || null;
-}
-
-function makeRecoveryTripleOnce() {
-  const adjs = ['mighty','fearless','electric','legendary','prime','clutch','gritty','steady'];
-  const nouns = ['endzone','touchdown','huddle','gridiron','sideline','backfield'];
-  const a1 = adjs[(Math.random()*adjs.length)|0];
-  let a2 = adjs[(Math.random()*adjs.length)|0];
-  if (a2 === a1) a2 = adjs[(Math.random()*adjs.length)|0];
-  const n1 = nouns[(Math.random()*nouns.length)|0];
-  return { adj1:a1, adj2:a2, noun:n1 };
-}
-async function makeUniqueRecoveryTriple() {
-  for (let i=0;i<20;i++) {
-    const t = makeRecoveryTripleOnce();
-    const { rowCount } = await pool.query(
-      `SELECT 1 FROM ff_member
-        WHERE LEAST(adj1,adj2)=LEAST($1,$2)
-          AND GREATEST(adj1,adj2)=GREATEST($1,$2)
-          AND noun=$3 LIMIT 1`,
-      [t.adj1,t.adj2,t.noun]
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ff_identity_requests (
+      id                BIGSERIAL PRIMARY KEY,
+      identifier_kind   TEXT NOT NULL,
+      identifier_value  TEXT NOT NULL,
+      ip_hash           TEXT,
+      token             TEXT,          -- for link-based flows
+      phrase_hash       TEXT,          -- for A-A-N passphrase (optional)
+      sent_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      used_at           TIMESTAMPTZ,
+      expires_at        TIMESTAMPTZ
     );
-    if (rowCount === 0) return t;
-  }
-  return makeRecoveryTripleOnce();
+    CREATE INDEX IF NOT EXISTS ff_identity_requests_value_idx
+      ON ff_identity_requests (identifier_value);
+    CREATE INDEX IF NOT EXISTS ff_identity_requests_token_idx
+      ON ff_identity_requests (token);
+  `);
 }
 
-// ensure or create a member; also ensure a legacy interacted_code
+function newMemberId() {
+  // 8-char [0-9A-Z], collision-resistant
+  return crypto.randomBytes(6).toString('base64url')
+    .replace(/[^0-9A-Za-z]/g,'').slice(0, 8).toUpperCase();
+}
+
+async function findMemberBy(kind, value) {
+  const where =
+    kind === 'email'  ? 'LOWER(email) = LOWER($1)' :
+    kind === 'phone'  ? 'phone_e164 = $1' :
+    kind === 'handle' ? 'LOWER(username) = LOWER($1)' : '1=0';
+  const { rows } = await pool.query(`
+    SELECT member_id, username, email, phone_e164, color_hex,
+           email_verified_at, phone_verified_at
+      FROM ff_member
+     WHERE ${where} AND deleted_at IS NULL
+     ORDER BY member_id ASC
+     LIMIT 1
+  `, [value]);
+  return rows[0] || null;
+}
+
+async function createEmptyMemberSkeleton() {
+  // Try a few times for ID collisions (practically never happens)
+  for (let i=0;i<5;i++) {
+    const mid = newMemberId();
+    try {
+      await pool.query(`
+        INSERT INTO ff_member (member_id, first_seen_at, last_seen_at, event_count)
+        VALUES ($1, NOW(), NOW(), 0)
+      `, [mid]);
+      return mid;
+    } catch (e) {
+      if (e.code === '23505') continue; // unique violation → retry
+      throw e;
+    }
+  }
+  throw new Error('member_id_alloc_failed');
+}
+
 async function findOrCreateMember(kind, value) {
-  const col = (kind === 'email') ? 'email' : (kind === 'phone') ? 'phone_e164' : 'username';
-  const f = await pool.query(`SELECT * FROM ff_member WHERE ${col}=$1 LIMIT 1`, [value]);
-  if (f.rows[0]) return f.rows[0];
+  // 1) lookup by direct field
+  const existing = await findMemberBy(kind, value);
+  if (existing) return existing;
 
-  const member_id = await generateUniqueMemberId();
-  const triple = await makeUniqueRecoveryTriple();
-  const interacted_code = `${triple.adj1}-${triple.adj2}-${triple.noun}`;
-  const ins = await pool.query(
-    `INSERT INTO ff_member (member_id, ${col}, interacted_code, adj1, adj2, noun, first_seen_at, last_seen_at)
-     VALUES ($1,$2,$3,$4,$5,$6,now(),now())
-     RETURNING *`,
-    [member_id, value, interacted_code, triple.adj1, triple.adj2, triple.noun]
-  );
-  return ins.rows[0];
+  // 2) infer via quickhitter if present (e.g., phone/email/handle stored there)
+  const qhWhere =
+    kind === 'email'  ? 'LOWER(email) = LOWER($1)' :
+    kind === 'phone'  ? 'phone = $1' :
+    kind === 'handle' ? 'LOWER(handle) = LOWER($1)' : '1=0';
+  const qh = await pool.query(`
+    SELECT member_id, handle, color_hex, phone, email
+      FROM ff_quickhitter
+     WHERE ${qhWhere}
+     LIMIT 1
+  `, [value]);
+  if (qh.rows[0]?.member_id) {
+    // Ensure member row exists; if not, create and hydrate minimally
+    const { member_id, handle, color_hex, phone, email } = qh.rows[0];
+    const m = await pool.query(`SELECT member_id FROM ff_member WHERE member_id=$1`, [member_id]);
+    if (!m.rows[0]) {
+      await pool.query(`
+        INSERT INTO ff_member (
+          member_id, username, email, phone_e164, color_hex,
+          first_seen_at, last_seen_at, event_count
+        ) VALUES ($1,$2,$3,$4,$5, NOW(), NOW(), 0)
+      `, [
+        member_id,
+        handle || null,
+        email || null,
+        phone || null,
+        color_hex ? (color_hex.startsWith('#') ? color_hex.toUpperCase() : ('#' + color_hex.toUpperCase())) : null
+      ]);
+    }
+    // Return a consistent member shape
+    const back = await pool.query(`
+      SELECT member_id, username, email, phone_e164, color_hex,
+             email_verified_at, phone_verified_at
+        FROM ff_member WHERE member_id=$1
+    `, [member_id]);
+    return back.rows[0];
+  }
+
+  // 3) brand-new skeleton
+  const member_id = await createEmptyMemberSkeleton();
+
+  // If the identifier is email/phone we can write it immediately
+  if (kind === 'email' || kind === 'phone') {
+    const cols = kind === 'email' ? 'email' : 'phone_e164';
+    await pool.query(`
+      UPDATE ff_member
+         SET ${cols} = $1,
+             last_seen_at = NOW()
+       WHERE member_id = $2
+    `, [value, member_id]);
+  }
+
+  return (await pool.query(`
+    SELECT member_id, username, email, phone_e164, color_hex,
+           email_verified_at, phone_verified_at
+      FROM ff_member
+     WHERE member_id = $1
+  `, [member_id])).rows[0];
 }
 
-/* --------------------------- Notification sender --------------------------- */
-let notifInited = false, notifReady = false, notificationapi = null;
-function initNotificationAPI() {
-  if (notifInited) return notifReady;
-  notifInited = true;
-  try {
-    const clientId = process.env.NOTIFICATIONAPI_CLIENT_ID;
-    const clientSecret = process.env.NOTIFICATIONAPI_CLIENT_SECRET;
-    if (clientId && clientSecret) {
-      notificationapi = require('notificationapi-node-server-sdk').default;
-      notificationapi.init(clientId, clientSecret);
-      notifReady = true;
-      console.log('[notify] SDK initialized');
-    } else {
-      console.log('[notify] SDK not available; missing env credentials');
-    }
-  } catch (e) {
-    console.log('[notify] SDK not initialized:', e?.message || e);
-    notifReady = false;
-  }
-  return notifReady;
-}
-async function sendViaNotificationAPI({ identifierKind, identifierValue, code }) {
-  try {
-    if (!initNotificationAPI()) return false;
-    const user = { id: identifierValue };
-    if (identifierKind === 'email') user.email = identifierValue;
-    if (identifierKind === 'phone') user.phone = identifierValue;
-    await notificationapi.send({
-      notificationId: process.env.NOTIFICATIONAPI_TEMPLATE_ID || 'login-code',
-      user,
-      mergeTags: { code }
-    });
-    return true;
-  } catch (e) {
-    console.warn('[notify] send failed:', e?.message || e);
-    return false;
-  }
-}
-async function sendViaFallbackProviders({ identifierKind, identifierValue, code }) {
-  try {
-    if (identifierKind === 'email') {
-      const haveSendgrid = !!process.env.SENDGRID_API_KEY;
-      const haveSmtp     = !!process.env.SMTP_HOST;
-      if (!haveSendgrid && !haveSmtp) { console.log(`[MAIL:NOOP] to=${identifierValue} code=${code}`); return true; }
-      const nodemailer = require('nodemailer');
-      let transporter;
-      if (haveSendgrid) {
-        const sgTransport = require('nodemailer-sendgrid').default;
-        transporter = nodemailer.createTransport(sgTransport({ apiKey: process.env.SENDGRID_API_KEY }));
-      } else {
-        transporter = nodemailer.createTransport({
-          host: process.env.SMTP_HOST,
-          port: Number(process.env.SMTP_PORT || 587),
-          secure: false,
-          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-        });
-      }
-      await transporter.sendMail({
-        from: process.env.MAIL_FROM || 'Fortified Fantasy <no-reply@fortifiedfantasy.com>',
-        to: identifierValue,
-        subject: 'Your Fortified Fantasy sign-in code',
-        text: `Your code is: ${code} (valid for 10 minutes)`,
-      });
-      return true;
-    }
-    if (identifierKind === 'phone') {
-      const haveTwilio = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
-      if (!haveTwilio) { console.log(`[SMS:NOOP] to=${identifierValue} code=${code}`); return true; }
-      const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-      await twilio.messages.create({ to: identifierValue, from: process.env.TWILIO_FROM, body: `Fortified Fantasy code: ${code}` });
-      return true;
-    }
-  } catch (e) {
-    console.warn('[fallback send] failed:', e?.message || e);
-  }
-  return false;
-}
+// Plug your real Notification API here
 async function sendCode({ identifierKind, identifierValue, code }) {
-  if (await sendViaNotificationAPI({ identifierKind, identifierValue, code })) return;
-  await sendViaFallbackProviders({ identifierKind, identifierValue, code });
+  // prefer environment toggle; for now, just log
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[request-code] would send', { to: identifierValue, kind: identifierKind, code });
+    return;
+  }
+  try {
+    // TODO: integrate your real mail/SMS here
+    // await NotificationAPI.send({ to: identifierValue, template:'verify_code', data:{ code } });
+    console.log('[request-code] sent (stub)', { to: identifierValue, kind: identifierKind });
+  } catch (e) {
+    console.error('[request-code] send failed (non-fatal):', e.message);
+  }
 }
-function makeCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
 
-/* --------------------------------- route ---------------------------------- */
-// POST /api/identity/request-code
-router.post('/', async (req, res) => {
+/* ------------------------ route ------------------------ */
+
+router.post('/request-code', async (req, res) => {
   const start = Date.now();
   try {
-    // Accept {identifier} OR {kind,value}
-    let detected = { kind:null, value:null };
-    if (req.body?.identifier) {
-      detected = normalizeIdentifier(req.body.identifier);
-    } else if (req.body?.kind && req.body?.value) {
-      detected = normalizeByKind(req.body.kind, req.body.value);
-    }
-    const { kind, value } = detected;
+    const { identifier } = req.body || {};
+    const { kind, value } = normalizeIdentifier(identifier);
 
     if (!value) {
       return res.status(422).json({
-        ok:false, error:'invalid_identifier',
-        message:'Provide a valid email, E.164 phone, or handle.',
-        received: req.body
+        ok: false,
+        error: 'invalid_identifier',
+        message: 'Provide a valid email, E.164 phone, or handle.',
       });
-    }
-
-    // Uniqueness pre-check (email/phone cannot belong to a *different* member)
-    const me = cookieMemberId(req);
-    if (kind === 'email') {
-      const hit = await findMemberByEmail(value);
-      if (hit && hit.member_id !== me) {
-        return res.status(409).json({
-          ok:false, error:'contact_conflict',
-          message:'Email already connected to a different account.',
-          conflicts:[{ field:'email', member_id: hit.member_id, handle: hit.username || null }]
-        });
-      }
-    }
-    if (kind === 'phone') {
-      const hit = await findMemberByPhone(value);
-      if (hit && hit.member_id !== me) {
-        return res.status(409).json({
-          ok:false, error:'contact_conflict',
-          message:'Phone already connected to a different account.',
-          conflicts:[{ field:'phone', member_id: hit.member_id, handle: hit.username || null }]
-        });
-      }
     }
 
     // Rate limit
     const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
     const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
     const rl = ratelimit(`${ipHash}:${value}`, 6, 60_000);
-    if (!rl.ok) return res.status(429).json({ ok:false, error:'rate_limited', resetAt: rl.resetAt });
+    if (!rl.ok) return res.status(429).json({ ok: false, error: 'rate_limited' });
 
-    // Ensure table exists and log request row
+    // Log request
     await ensureRequestsTable();
     await pool.query(
-      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash) VALUES ($1,$2,$3)`,
+      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash)
+       VALUES ($1,$2,$3)`,
       [kind, value, ipHash]
     );
 
-    // Ensure member exists (or create)
+    // Ensure member row (may hydrate from quickhitter)
     const member = await findOrCreateMember(kind, value);
+    if (!member || !member.member_id) {
+      throw new Error('member_creation_failed');
+    }
 
-    // Create login code + expiry on member (kept on ff_member for your existing flows)
+    // Optional incoming patch for username / hex (never null-overwrite)
+    const incomingHandle = (req.body?.handle || '').trim() || null;
+    const incomingHex    = normalizeHex(req.body?.hex || null);
+
+    // Build next values
+    let nextUsername = member.username || null;
+    let nextHex      = member.color_hex || null;
+
+    if (incomingHandle && HANDLE_RE.test(incomingHandle)) {
+      // allow single spaces inside; collapse repeat spaces
+      nextUsername = incomingHandle.replace(/\s{2,}/g,' ');
+    }
+    if (incomingHex) {
+      nextHex = incomingHex;
+    }
+    // if user brings a username but still no hex, pick one (simple palette)
+    if (nextUsername && !nextHex) {
+      const palette = ['#1F77B4','#2CA02C','#D62728','#7F7F7F','#BCBD22','#17BECF','#FF7F0E','#008744','#D62D20','#FFA700','#4C4C4C','#0057E7'];
+      nextHex = palette[Math.floor(Math.random() * palette.length)];
+    }
+
+    if (nextUsername || nextHex) {
+      await pool.query(
+        `UPDATE ff_member
+           SET username     = COALESCE($1, username),
+               color_hex    = COALESCE($2, color_hex),
+               last_seen_at = NOW()
+         WHERE member_id = $3`,
+        [nextUsername, nextHex, member.member_id]
+      );
+    }
+
+    // Create login code (6-digit), 10-minute expiry
     const code = makeCode();
     const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await pool.query(
       `UPDATE ff_member
-          SET login_code=$1, login_code_expires=$2, last_seen_at=now()
-        WHERE member_id=$3`,
+          SET login_code         = $1,
+              login_code_expires = $2,
+              last_seen_at       = NOW()
+        WHERE member_id = $3`,
       [code, exp, member.member_id]
     );
 
-    // Set cookies for handoff
-    res.cookie('ff_member', String(member.member_id), {
+    // Fire-and-forget code dispatch
+    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
+
+    // Set member cookie
+    const secure = process.env.NODE_ENV === 'production';
+    res.cookie('ff_member', member.member_id, {
       httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 365*24*60*60*1000
-    });
-    const interacted = member.interacted_code || `${member.adj1}-${member.adj2}-${member.noun}`;
-    res.cookie('ff_interacted', interacted, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 365*24*60*60*1000
+      sameSite: 'Lax',
+      secure,
+      maxAge: 1000 * 60 * 60 * 24 * 365, // 1 year
     });
 
-    // Fire-and-forget send
-    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(()=>{});
-
-    // Where the client should go next
-    const u = new URL('/signup', 'https://fortifiedfantasy.com');
+    // Build next-step URL
+    const proto = (req.headers['x-forwarded-proto'] || (secure ? 'https' : 'http'));
+    const host  = req.headers['x-forwarded-host'] || req.headers.host || 'fortifiedfantasy.com';
+    const u = new URL('/signup', `${proto}://${host}`);
     if (kind === 'email')  u.searchParams.set('email', value);
     if (kind === 'phone')  u.searchParams.set('phone', value);
     if (kind === 'handle') u.searchParams.set('handle', value);
 
     return res.status(200).json({
-      ok:true,
-      sent:true,
+      ok: true,
+      sent: true,
       member_id: member.member_id,
-      interacted_code: interacted,
       signup_url: u.pathname + u.search,
       ms: Date.now() - start
     });
+
   } catch (err) {
     console.error('identity.request-code error:', err);
-    return res.status(500).json({ ok:false, error:'internal_error' });
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
+});
+
+/* Alias so you can mount this router at both endpoints */
+router.post('/send-code', (req, res, next) => {
+  // reuse the same logic
+  req.url = '/request-code';
+  next();
 });
 
 module.exports = router;

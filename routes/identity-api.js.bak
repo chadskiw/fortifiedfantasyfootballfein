@@ -1,229 +1,344 @@
-// routes/identity-api.js
+// routes/identity/request-code.js
+// POST /api/identity/request-code
+// Also compatible with /api/identity/send-code (mount the same router)
+
 const express = require('express');
+const crypto  = require('crypto');
+
+let pool;
+try {
+  // server.js exports { pool }
+  ({ pool } = require('../../server'));
+} catch {
+  // fallback if you keep a dedicated pool module
+  try { ({ pool } = require('../../src/db/pool')); } catch {}
+}
+if (!pool) throw new Error('[request-code] Could not resolve pg pool');
+
 const router = express.Router();
-const { Pool } = require('pg');
-const crypto = require('crypto');
+router.use(express.json({ limit: '1mb' }));
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
-});
+/* ------------------------ helpers ------------------------ */
 
-/* ---------- utils ---------- */
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const PHONE_RE = /^\+?[0-9\-\s().]{7,}$/;
-const HANDLE_RE = /^[a-zA-Z0-9_.]{3,24}$/;
+const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
+const HANDLE_RE = /^[a-zA-Z0-9_.](?:[a-zA-Z0-9_. ]{1,22})[a-zA-Z0-9_.]$/; // allow single spaces inside, no ends
+const HEX_RE    = /^#?[0-9a-f]{6}$/i;
+
+const nowIso = () => new Date().toISOString();
 
 function normalizeIdentifier(raw) {
-  const v = String(raw || '').trim();
-  if (!v) return '';
-  if (EMAIL_RE.test(v)) return v.toLowerCase();
-  if (PHONE_RE.test(v)) return '+' + v.replace(/[^\d]/g, '');
-  return v; // candidate username/handle
-}
+  const s = String(raw || '').trim();
+  if (!s) return { kind: null, value: null };
 
-function classifyIdentifier(idNorm) {
-  if (EMAIL_RE.test(idNorm)) return 'email';
-  if (/^\+\d{7,}$/.test(idNorm)) return 'phone';
-  if (HANDLE_RE.test(idNorm)) return 'handle';
-  return 'other';
-}
-
-function genInviteCode(len = 8) {
-  const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
-  let out = '';
-  for (let i = 0; i < len; i++) out += ALPHABET[(Math.random() * ALPHABET.length) | 0];
-  return out;
-}
-
-function hashIp(ip) {
-  const salt = process.env.IP_HASH_SALT || 'ff-default-salt';
-  return crypto.createHash('sha256').update(`${salt}|${ip || ''}`).digest('hex');
-}
-
-function firstLang(acceptLang = '') {
-  return (acceptLang.split(',')[0] || '').trim() || null;
-}
-
-/* ---------- CORS preflight ---------- */
-router.options('/request-code', (req, res) => {
-  const origin = req.headers.origin;
-  if (origin) {
-    res.set('Access-Control-Allow-Origin', origin);
-    res.set('Vary', 'Origin');
-    res.set('Access-Control-Allow-Credentials', 'true');
+  if (EMAIL_RE.test(s)) {
+    return { kind: 'email', value: s.toLowerCase() };
   }
-  res.set('Access-Control-Allow-Headers', 'content-type');
-  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.sendStatus(204);
-});
+  if (PHONE_RE.test(s)) {
+    const digits = s.replace(/[^\d]/g, '');
+    const e164 = digits.startsWith('1') && digits.length === 11 ? `+${digits}` :
+                 digits.length === 10 ? `+1${digits}` :
+                 `+${digits}`;
+    return { kind: 'phone', value: e164 };
+  }
+  if (HANDLE_RE.test(s)) {
+    // collapse inner multiple spaces to single, trim ends (regex already prevents ends)
+    const handle = s.replace(/\s{2,}/g, ' ');
+    return { kind: 'handle', value: handle };
+  }
+  return { kind: null, value: null };
+}
 
-/* ---------- POST /api/identity/request-code ---------- */
-router.post('/request-code', async (req, res) => {
-  const client = await pool.connect();
+function isValidHex(h) {
+  return HEX_RE.test(String(h || '').replace('#',''));
+}
+function normalizeHex(h) {
+  if (!h) return null;
+  const v = String(h).trim();
+  if (!isValidHex(v)) return null;
+  const hh = v.startsWith('#') ? v.toUpperCase() : ('#' + v.toUpperCase());
+  return hh;
+}
+
+function makeCode() {
+  // 6-digit numeric, no leading zero bias
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ultra-simple, in-process rate limiter (keyed by ipHash:identifier)
+const RL_BUCKET = new Map(); // key -> {cnt, ts}
+function ratelimit(key, maxCount, windowMs) {
+  const now = Date.now();
+  const rec = RL_BUCKET.get(key);
+  if (!rec || (now - rec.ts) > windowMs) {
+    RL_BUCKET.set(key, { cnt: 1, ts: now });
+    return { ok: true, remaining: maxCount - 1 };
+  }
+  if (rec.cnt >= maxCount) return { ok: false, remaining: 0 };
+  rec.cnt++;
+  return { ok: true, remaining: maxCount - rec.cnt };
+}
+
+async function ensureRequestsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ff_identity_requests (
+      id                BIGSERIAL PRIMARY KEY,
+      identifier_kind   TEXT NOT NULL,
+      identifier_value  TEXT NOT NULL,
+      ip_hash           TEXT,
+      token             TEXT,          -- for link-based flows
+      phrase_hash       TEXT,          -- for A-A-N passphrase (optional)
+      sent_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      used_at           TIMESTAMPTZ,
+      expires_at        TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS ff_identity_requests_value_idx
+      ON ff_identity_requests (identifier_value);
+    CREATE INDEX IF NOT EXISTS ff_identity_requests_token_idx
+      ON ff_identity_requests (token);
+  `);
+}
+
+function newMemberId() {
+  // 8-char [0-9A-Z], collision-resistant
+  return crypto.randomBytes(6).toString('base64url')
+    .replace(/[^0-9A-Za-z]/g,'').slice(0, 8).toUpperCase();
+}
+
+async function findMemberBy(kind, value) {
+  const where =
+    kind === 'email'  ? 'LOWER(email) = LOWER($1)' :
+    kind === 'phone'  ? 'phone_e164 = $1' :
+    kind === 'handle' ? 'LOWER(username) = LOWER($1)' : '1=0';
+  const { rows } = await pool.query(`
+    SELECT member_id, username, email, phone_e164, color_hex,
+           email_verified_at, phone_verified_at
+      FROM ff_member
+     WHERE ${where} AND deleted_at IS NULL
+     ORDER BY member_id ASC
+     LIMIT 1
+  `, [value]);
+  return rows[0] || null;
+}
+
+async function createEmptyMemberSkeleton() {
+  // Try a few times for ID collisions (practically never happens)
+  for (let i=0;i<5;i++) {
+    const mid = newMemberId();
+    try {
+      await pool.query(`
+        INSERT INTO ff_member (member_id, first_seen_at, last_seen_at, event_count)
+        VALUES ($1, NOW(), NOW(), 0)
+      `, [mid]);
+      return mid;
+    } catch (e) {
+      if (e.code === '23505') continue; // unique violation → retry
+      throw e;
+    }
+  }
+  throw new Error('member_id_alloc_failed');
+}
+
+async function findOrCreateMember(kind, value) {
+  // 1) lookup by direct field
+  const existing = await findMemberBy(kind, value);
+  if (existing) return existing;
+
+  // 2) infer via quickhitter if present (e.g., phone/email/handle stored there)
+  const qhWhere =
+    kind === 'email'  ? 'LOWER(email) = LOWER($1)' :
+    kind === 'phone'  ? 'phone = $1' :
+    kind === 'handle' ? 'LOWER(handle) = LOWER($1)' : '1=0';
+  const qh = await pool.query(`
+    SELECT member_id, handle, color_hex, phone, email
+      FROM ff_quickhitter
+     WHERE ${qhWhere}
+     LIMIT 1
+  `, [value]);
+  if (qh.rows[0]?.member_id) {
+    // Ensure member row exists; if not, create and hydrate minimally
+    const { member_id, handle, color_hex, phone, email } = qh.rows[0];
+    const m = await pool.query(`SELECT member_id FROM ff_member WHERE member_id=$1`, [member_id]);
+    if (!m.rows[0]) {
+      await pool.query(`
+        INSERT INTO ff_member (
+          member_id, username, email, phone_e164, color_hex,
+          first_seen_at, last_seen_at, event_count
+        ) VALUES ($1,$2,$3,$4,$5, NOW(), NOW(), 0)
+      `, [
+        member_id,
+        handle || null,
+        email || null,
+        phone || null,
+        color_hex ? (color_hex.startsWith('#') ? color_hex.toUpperCase() : ('#' + color_hex.toUpperCase())) : null
+      ]);
+    }
+    // Return a consistent member shape
+    const back = await pool.query(`
+      SELECT member_id, username, email, phone_e164, color_hex,
+             email_verified_at, phone_verified_at
+        FROM ff_member WHERE member_id=$1
+    `, [member_id]);
+    return back.rows[0];
+  }
+
+  // 3) brand-new skeleton
+  const member_id = await createEmptyMemberSkeleton();
+
+  // If the identifier is email/phone we can write it immediately
+  if (kind === 'email' || kind === 'phone') {
+    const cols = kind === 'email' ? 'email' : 'phone_e164';
+    await pool.query(`
+      UPDATE ff_member
+         SET ${cols} = $1,
+             last_seen_at = NOW()
+       WHERE member_id = $2
+    `, [value, member_id]);
+  }
+
+  return (await pool.query(`
+    SELECT member_id, username, email, phone_e164, color_hex,
+           email_verified_at, phone_verified_at
+      FROM ff_member
+     WHERE member_id = $1
+  `, [member_id])).rows[0];
+}
+
+// Plug your real Notification API here
+async function sendCode({ identifierKind, identifierValue, code }) {
+  // prefer environment toggle; for now, just log
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[request-code] would send', { to: identifierValue, kind: identifierKind, code });
+    return;
+  }
   try {
-    if (!req.is('application/json')) {
-      return res.status(415).json({ ok:false, error:'unsupported_media_type' });
+    // TODO: integrate your real mail/SMS here
+    // await NotificationAPI.send({ to: identifierValue, template:'verify_code', data:{ code } });
+    console.log('[request-code] sent (stub)', { to: identifierValue, kind: identifierKind });
+  } catch (e) {
+    console.error('[request-code] send failed (non-fatal):', e.message);
+  }
+}
+
+/* ------------------------ route ------------------------ */
+
+router.post('/request-code', async (req, res) => {
+  const start = Date.now();
+  try {
+    const { identifier } = req.body || {};
+    const { kind, value } = normalizeIdentifier(identifier);
+
+    if (!value) {
+      return res.status(422).json({
+        ok: false,
+        error: 'invalid_identifier',
+        message: 'Provide a valid email, E.164 phone, or handle.',
+      });
     }
 
-    const { identifier, tz, locale, utm_source, utm_medium, utm_campaign, landing_url, color_hex } = req.body || {};
-    const idNorm = normalizeIdentifier(identifier);
-    if (!idNorm) {
-      return res.status(400).json({ ok:false, error:'bad_request', detail:'identifier required' });
+    // Rate limit
+    const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
+    const ipHash = crypto.createHash('sha256').update(ip).digest('hex');
+    const rl = ratelimit(`${ipHash}:${value}`, 6, 60_000);
+    if (!rl.ok) return res.status(429).json({ ok: false, error: 'rate_limited' });
+
+    // Log request
+    await ensureRequestsTable();
+    await pool.query(
+      `INSERT INTO ff_identity_requests (identifier_kind, identifier_value, ip_hash)
+       VALUES ($1,$2,$3)`,
+      [kind, value, ipHash]
+    );
+
+    // Ensure member row (may hydrate from quickhitter)
+    const member = await findOrCreateMember(kind, value);
+    if (!member || !member.member_id) {
+      throw new Error('member_creation_failed');
     }
 
-    // metadata
-    const source   = (utm_source   || req.query.utm_source   || null) ?? null;
-    const medium   = (utm_medium   || req.query.utm_medium   || null) ?? null;
-    const campaign = (utm_campaign || req.query.utm_campaign || null) ?? null;
-    const landing  = landing_url || req.body?.landingUrl || req.get('referer') || null;
-    const referer  = req.get('referer') || null;
-    const ua       = req.get('user-agent') || null;
-    const iphash   = hashIp(req.headers['cf-connecting-ip'] || req.ip);
-    const loc      = locale || firstLang(req.get('accept-language'));
-    const timezone = tz || null;
+    // Optional incoming patch for username / hex (never null-overwrite)
+    const incomingHandle = (req.body?.handle || '').trim() || null;
+    const incomingHex    = normalizeHex(req.body?.hex || null);
 
-    const code = genInviteCode(8); // X9K2F7QZ etc.
+    // Build next values
+    let nextUsername = member.username || null;
+    let nextHex      = member.color_hex || null;
 
-    await client.query('BEGIN');
+    if (incomingHandle && HANDLE_RE.test(incomingHandle)) {
+      // allow single spaces inside; collapse repeat spaces
+      nextUsername = incomingHandle.replace(/\s{2,}/g,' ');
+    }
+    if (incomingHex) {
+      nextHex = incomingHex;
+    }
+    // if user brings a username but still no hex, pick one (simple palette)
+    if (nextUsername && !nextHex) {
+      const palette = ['#1F77B4','#2CA02C','#D62728','#7F7F7F','#BCBD22','#17BECF','#FF7F0E','#008744','#D62D20','#FFA700','#4C4C4C','#0057E7'];
+      nextHex = palette[Math.floor(Math.random() * palette.length)];
+    }
 
-    // 1) INSERT invite
-    const insertInvite = await client.query(
-      `
-      INSERT INTO ff_invite
-        (interacted_code, invited_at, source, medium, campaign, landing_url, referrer,
-         user_agent, ip_hash, locale, tz, first_identifier)
-      VALUES
-        ($1, NOW(), $2, $3, $4, $5, $6,
-         $7, $8, $9, $10, $11)
-      RETURNING invite_id
-      `,
-      [code, source, medium, campaign, landing, referer, ua, iphash, loc, timezone, idNorm]
-    );
-    const inviteId = insertInvite.rows[0].invite_id;
+    if (nextUsername || nextHex) {
+      await pool.query(
+        `UPDATE ff_member
+           SET username     = COALESCE($1, username),
+               color_hex    = COALESCE($2, color_hex),
+               last_seen_at = NOW()
+         WHERE member_id = $3`,
+        [nextUsername, nextHex, member.member_id]
+      );
+    }
 
-    await client.query(
-      `UPDATE ff_invite
-         SET source = COALESCE(NULLIF(source,''),'web') || ':ffint-' || $1
-       WHERE invite_id = $2`,
-      [code, inviteId]
-    );
-
-    // 2) UPSERT member on interacted_code
-    const kind = classifyIdentifier(idNorm);
-    const emailVal  = kind === 'email'  ? idNorm : null;
-    const phoneVal  = kind === 'phone'  ? idNorm : null;
-    const handleVal = kind === 'handle' ? idNorm : null;
-
-    // Pick color: prefer validated incoming, else default DB default
-    const color = (typeof color_hex === 'string' && /^#[0-9A-Fa-f]{6}$/.test(color_hex))
-      ? color_hex.toUpperCase()
-      : null;
-
-    // Create if missing; if exists, do not overwrite existing email/phone/username,
-    // just refresh last_seen_at, last_referrer, last_page, etc.
-    const upsertMember = await client.query(
-      `
-      INSERT INTO ff_member
-        (interacted_code, email, phone_e164, username,
-         first_seen_at, last_seen_at, user_agent, ip_hash, locale, tz,
-         first_referrer, last_referrer, first_page, last_page, color_hex)
-      VALUES
-        ($1,
-         $2, $3, $4,
-         NOW(), NOW(), $5, $6, $7, $8,
-         $9, $10, $11, $12, COALESCE($13, DEFAULT(ff_member.color_hex)))
-      ON CONFLICT (interacted_code) DO UPDATE
-        SET last_seen_at = NOW(),
-            last_referrer = EXCLUDED.last_referrer,
-            last_page     = EXCLUDED.last_page,
-            user_agent    = EXCLUDED.user_agent,
-            locale        = COALESCE(ff_member.locale, EXCLUDED.locale),
-            tz            = COALESCE(ff_member.tz, EXCLUDED.tz),
-            -- only set identifiers if currently empty (never overwrite)
-            email         = COALESCE(ff_member.email, EXCLUDED.email),
-            phone_e164    = COALESCE(ff_member.phone_e164, EXCLUDED.phone_e164),
-            username      = COALESCE(ff_member.username, EXCLUDED.username),
-            color_hex     = COALESCE(ff_member.color_hex, EXCLUDED.color_hex)
-      RETURNING member_id
-      `,
-      [
-        code,
-        emailVal, phoneVal, handleVal,
-        ua, iphash, loc, timezone,
-        referer, referer, landing, landing,
-        color
-      ]
-    );
-    const memberId = upsertMember.rows[0].member_id;
-
-    // 3) Link invite → member
-    await client.query(
-      `UPDATE ff_invite SET member_id = $1 WHERE invite_id = $2`,
-      [memberId, inviteId]
+    // Create login code (6-digit), 10-minute expiry
+    const code = makeCode();
+    const exp  = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await pool.query(
+      `UPDATE ff_member
+          SET login_code         = $1,
+              login_code_expires = $2,
+              last_seen_at       = NOW()
+        WHERE member_id = $3`,
+      [code, exp, member.member_id]
     );
 
-    await client.query('COMMIT');
+    // Fire-and-forget code dispatch
+    sendCode({ identifierKind: kind, identifierValue: value, code }).catch(() => {});
 
-    // 4) Build signup redirect
-    const base = 'https://fortifiedfantasy.com';
-    const signupUrl = `${base}/signup?source=${encodeURIComponent('ffint-' + code)}`;
+    // Set member cookie
+    const secure = process.env.NODE_ENV === 'production';
+    res.cookie('ff_member', member.member_id, {
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+      maxAge: 1000 * 60 * 60 * 24 * 365, // 1 year
+    });
+
+    // Build next-step URL
+    const proto = (req.headers['x-forwarded-proto'] || (secure ? 'https' : 'http'));
+    const host  = req.headers['x-forwarded-host'] || req.headers.host || 'fortifiedfantasy.com';
+    const u = new URL('/signup', `${proto}://${host}`);
+    if (kind === 'email')  u.searchParams.set('email', value);
+    if (kind === 'phone')  u.searchParams.set('phone', value);
+    if (kind === 'handle') u.searchParams.set('handle', value);
 
     return res.status(200).json({
       ok: true,
-      invite_id: inviteId,
-      interacted_code: code,
-      member_id: memberId,
-      signup_url: signupUrl
+      sent: true,
+      member_id: member.member_id,
+      signup_url: u.pathname + u.search,
+      ms: Date.now() - start
     });
+
   } catch (err) {
-    try { await pool.query('ROLLBACK'); } catch {}
     console.error('identity.request-code error:', err);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  } finally {
-    client.release();
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
-router.post('/signup-email', async (req, res) => {
-  try {
-    const ffSess = req.cookies?.ff_sess;
-    if (!ffSess) return res.status(400).json({ ok:false, error:'no_session' });
 
-    const rawEmail = norm(req.body?.email || '');
-    const rawPhone = norm(req.body?.phone || '');
-    const email = rawEmail && EMAIL_RE.test(rawEmail) ? normEmail(rawEmail) : null;
-    const phone = !email && rawPhone && PHONE_RE.test(rawPhone) ? normPhone(rawPhone) : null;
-    if (!email && !phone) return res.status(400).json({ ok:false, error:'missing_identifier' });
-
-    const code = buildCodeFromCookie(ffSess);
-    // Mock “send”
-    console.log(`[Mock Send] To: ${email || phone} — Code: ${code}`);
-
-    // Record invite (best effort; table columns per your schema)
-    try {
-      await pool.query(
-        `INSERT INTO ff_invite (
-           interacted_code, member_id, invited_at, source, medium, landing_url, referrer, user_agent, ip_hash, first_identifier
-         ) VALUES ($1, NULL, NOW(), $2, $3, $4, $5, $6, $7, $8)`,
-        [
-          code,                                // storing the code itself (since it’s deterministic & mock)
-          'signup',                            // source
-          email ? 'email' : 'sms',             // medium
-          String(req.headers['x-landing-url'] || ''),  // optional passthroughs
-          String(req.get('referer') || ''),
-          String(req.get('user-agent') || '').slice(0, 512),
-          hashIP(req.headers['cf-connecting-ip'] || req.ip || ''),
-          email || phone
-        ]
-      );
-    } catch (e) {
-      console.warn('[signup-email] invite insert skipped:', e.code || e.message);
-    }
-
-    return res.json({ ok:true, sent:true });
-  } catch (e) {
-    console.error('[signup-email]', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
+/* Alias so you can mount this router at both endpoints */
+router.post('/send-code', (req, res, next) => {
+  // reuse the same logic
+  req.url = '/request-code';
+  next();
 });
+
 module.exports = router;
