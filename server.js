@@ -1,6 +1,7 @@
-// server.js — add whoami, keep identity
-
+// server.js — FF Platform Service (identity + whoami + espn)
+// ---------------------------------------------------------
 require('dotenv').config();
+
 const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
@@ -33,13 +34,25 @@ app.get('/healthz', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-// Identity
+// ---- APIs ----
+
+// Identity (request/send code)
 app.use('/api/identity', require('./src/routes/identity/request-code'));
 
-// WhoAmI (root + api alias)
-const whoami = require('./routes/whoami');
+// WhoAmI (root + alias)
+//   GET /check
+//   GET /lookup?identifier=...
+const whoami = require('./src/routes/whoami');
 app.use('/', whoami);
 app.use('/api/whoami', whoami);
+
+// ESPN (root + /api/espn):
+//   GET /status           (also /api/espn/status)
+//   GET /login            (also /api/espn/login)
+//   GET /leagues?season=2025 (also /api/espn/leagues?season=2025)
+const espnRouter = require('./src/routes/espn');
+app.use('/', espnRouter);
+app.use('/api/espn', espnRouter);
 
 // static
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
