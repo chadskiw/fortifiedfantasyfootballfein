@@ -52,11 +52,11 @@ app.use('/api/whoami', whoami);
 //   GET /leagues?season=2025 (also /api/espn/leagues?season=2025)
 // server.js
 const espnRouter = require('./src/routes/espn');
-
+const espnLog = require('./src/routes/espn/login');
 // PRIMARY mount (all ESPN endpoints live here)
 app.use('/api/espn', espnRouter);
 app.use('/api/debug', require('./src/routes/debug/db'));
-
+app.use('/api/espn/login', espnLog);
 // Root service status (fixes your /status 404 without polluting /login)
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
