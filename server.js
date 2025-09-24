@@ -8,7 +8,7 @@ const cookieParser  = require('cookie-parser');
 const cors          = require('cors');
 const crypto        = require('crypto');
 
-const pool          = require('./pool'); // <- uses your existing pool.js (exports pg.Pool instance)
+const pool          = require('./src/db/pool'); // <- uses your existing pool.js (exports pg.Pool instance)
 
 // Routers (CommonJS)
 const identityHandleRouter = require('./routes/identity/handle');        // /handle/exists, /handle/upsert
