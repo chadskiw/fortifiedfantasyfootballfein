@@ -1,83 +1,59 @@
-// routes/identity/handle-upsert.js  (CommonJS)
+// src/routes/identity.js
 const express = require('express');
-const crypto = require('crypto');
+const pool    = require('../db/pool');
+const router  = express.Router();
 
-// must match your client-side rule
 const HANDLE_RE = /^[a-zA-Z0-9_.]{3,24}$/;
+const norm = v => String(v||'').trim();
 
-function norm(x = '') { return String(x).trim(); }
-function isHandle(x) { return HANDLE_RE.test(norm(x)); }
+function currentMemberId(req){
+  // adjust to your cookie/session. For now, use cookie "ff_member".
+  const m = norm(req.cookies?.ff_member);
+  return m || null;
+}
 
-module.exports = function createHandleUpsertRouter(pool) {
-  const router = express.Router();
+// GET /api/identity/handle/exists?u=foo
+router.get('/handle/exists', async (req, res) => {
+  const u = norm(req.query.u || req.query.username);
+  if (!HANDLE_RE.test(u)) return res.json({ ok:true, handle:u, available:false, reason:'invalid_shape' });
 
-  // POST /
-  // body: { handle }
-  // cookie in/out: ff_member (set if we create a new member)
-  router.post('/', async (req, res) => {
-    try {
-      const handleRaw = norm(req.body?.handle || req.body?.username || '');
-      if (!isHandle(handleRaw)) {
-        return res.status(400).json({ ok:false, error:'bad_handle' });
-      }
-      const handle = handleRaw;
+  const r = await pool.query(
+    `SELECT 1 FROM ff_member WHERE deleted_at IS NULL AND LOWER(username)=LOWER($1) LIMIT 1`,
+    [u]
+  );
+  res.json({ ok:true, handle:u, available: r.rowCount === 0, taken: r.rowCount > 0 });
+});
 
-      // if caller already has a member cookie, attempt to set username on that row
-      const memberCookie = req.cookies?.ff_member ? String(req.cookies.ff_member).trim() : '';
+// POST /api/identity/handle/upsert { handle }
+router.post('/handle/upsert', async (req, res) => {
+  const me = currentMemberId(req);
+  if (!me) return res.status(401).json({ ok:false, error:'unauthorized' });
 
-      // check if handle already taken (ignoring deleted_at)
-      const taken = await pool.query(
-        `SELECT member_id FROM ff_member WHERE deleted_at IS NULL AND LOWER(username)=LOWER($1) LIMIT 1`,
-        [handle]
-      );
-      if (taken.rows[0]) {
-        // if it's this same member, treat as OK; else 409
-        if (memberCookie && String(taken.rows[0].member_id) === memberCookie) {
-          return res.json({ ok:true, member_id: memberCookie, username: handle });
-        }
-        return res.status(409).json({ ok:false, error:'handle_taken' });
-      }
+  const h = norm(req.body?.handle || req.body?.username);
+  if (!HANDLE_RE.test(h)) return res.status(422).json({ ok:false, error:'invalid_handle' });
 
-      if (memberCookie) {
-        // update existing member
-        const up = await pool.query(
-          `UPDATE ff_member
-             SET username=$1, updated_at=now()
-           WHERE member_id=$2 AND deleted_at IS NULL
-           RETURNING member_id`,
-          [handle, memberCookie]
-        );
-        if (up.rows[0]) {
-          return res.json({ ok:true, member_id: up.rows[0].member_id, username: handle });
-        }
-        // fallthrough: cookie invalid; create new
-      }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-      // create a new member row and set cookie
-      const r = await pool.query(
-        `INSERT INTO ff_member (username, first_seen_at, last_seen_at, event_count)
-         VALUES ($1, now(), now(), 0)
-         ON CONFLICT (username) DO NOTHING
-         RETURNING member_id`,
-        [handle]
-      );
+    const m = await client.query(`SELECT member_id FROM ff_member WHERE member_id=$1 AND deleted_at IS NULL FOR UPDATE`, [me]);
+    if (!m.rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ ok:false, error:'member_not_found' }); }
 
-      if (!r.rows[0]) {
-        // race: someone grabbed it between checks
-        return res.status(409).json({ ok:false, error:'handle_taken' });
-      }
+    const upd = await client.query(
+      `UPDATE ff_member SET username=$1, updated_at=NOW() WHERE member_id=$2 RETURNING member_id, username`,
+      [h, me]
+    );
 
-      const memberId = String(r.rows[0].member_id);
-      res.cookie('ff_member', memberId, {
-        httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 365*24*60*60*1000
-      });
+    await client.query('COMMIT');
+    return res.json({ ok:true, member_id: upd.rows[0].member_id, handle: upd.rows[0].username });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    if (String(e.code) === '23505') return res.status(409).json({ ok:false, error:'handle_taken' });
+    console.error('[handle/upsert]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  } finally {
+    client.release();
+  }
+});
 
-      return res.json({ ok:true, member_id: memberId, username: handle });
-    } catch (e) {
-      console.error('[identity/handle/upsert]', e);
-      res.status(500).json({ ok:false, error:'server_error' });
-    }
-  });
-
-  return router;
-};
+module.exports = router;

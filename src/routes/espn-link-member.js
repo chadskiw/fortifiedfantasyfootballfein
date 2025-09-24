@@ -11,7 +11,7 @@ router.use(express.urlencoded({ extended: true }));
 router.options('/espn/link-member', (_req, res) => res.sendStatus(204));
 
 // DB (reuses the Pool exported by server.js)
-const { pool } = require('../../server');
+const { pool } = require('../../server.js.bak');
 
 // ---------------- helpers ----------------
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;

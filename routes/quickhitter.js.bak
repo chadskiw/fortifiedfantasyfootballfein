@@ -1,0 +1,107 @@
+const express = require('express');
+
+// resolve pool regardless of where this file sits
+let pool;
+try { pool = require('../src/db/pool'); } catch { try { pool = require('../src/db/pool'); } catch {} }
+if (!pool) {
+  console.warn('[quickhitter] WARNING: could not resolve ../src/db/pool; using no-op queries');
+  pool = { query: async () => ({ rows: [], rowCount: 0 }) };
+}
+
+const router = express.Router();
+const UPPERHEX = s => String(s||'').replace(/^#/,'').toUpperCase();
+const HANDLE = s => String(s||'').trim();
+const ok = (res, obj) => res.json({ ok:true, ...obj });
+
+// GET /api/quickhitter/check
+router.get('/check', async (req, res) => {
+  try {
+    // You likely have a cookie; fetch what you need. For now, return incomplete=false safely.
+    ok(res, { complete:false });
+  } catch (e) {
+    console.error('[qh/check]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// GET /api/quickhitter/exists?handle=|email=|phone=
+router.get('/exists', async (req, res) => {
+  try {
+    const handle = HANDLE(req.query.handle);
+    const email  = String(req.query.email||'').trim().toLowerCase();
+    const phone  = String(req.query.phone||'').trim();
+    let exists=false, verified=null;
+
+    if (handle) {
+      const r = await pool.query(
+        `SELECT 1 FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1) LIMIT 1`, [handle]
+      );
+      exists = r.rowCount > 0;
+    } else if (email) {
+      const r = await pool.query(
+        `SELECT email_is_verified FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) LIMIT 1`, [email]
+      );
+      exists = r.rowCount > 0;
+      verified = exists ? !!r.rows[0].email_is_verified : null;
+    } else if (phone) {
+      const r = await pool.query(
+        `SELECT phone_is_verified FROM ff_quickhitter WHERE phone=$1 LIMIT 1`, [phone]
+      );
+      exists = r.rowCount > 0;
+      verified = exists ? !!r.rows[0].phone_is_verified : null;
+    }
+
+    ok(res, { exists, verified });
+  } catch (e) {
+    console.error('[qh/exists]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// GET /api/quickhitter/colors?handle=...
+router.get('/colors', async (req, res) => {
+  try {
+    const handle = HANDLE(req.query.handle);
+    let used = [];
+    if (handle) {
+      const r = await pool.query(
+        `SELECT DISTINCT UPPER(color_hex) AS hex
+           FROM ff_quickhitter
+          WHERE LOWER(handle)=LOWER($1) AND color_hex IS NOT NULL`,
+        [handle]
+      );
+      used = r.rows.map(r => '#' + r.hex);
+    }
+    const palette = ['#77E0FF','#61D095','#FFD166','#FF6B6B','#A78BFA','#F472B6','#34D399','#F59E0B','#22D3EE','#E879F9'];
+    ok(res, { used, palette });
+  } catch (e) {
+    console.error('[qh/colors]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// GET /api/quickhitter/handle/:handle
+router.get('/handle/:handle', async (req, res) => {
+  try {
+    const handle = HANDLE(req.params.handle);
+    const r = await pool.query(
+      `SELECT member_id, handle, color_hex, image_key, adj1, adj2, noun
+         FROM ff_quickhitter
+        WHERE LOWER(handle)=LOWER($1)`,
+      [handle]
+    );
+    const items = r.rows.map(x => ({
+      member_id: x.member_id,
+      handle: x.handle,
+      color_hex: x.color_hex ? ('#'+UPPERHEX(x.color_hex)) : null,
+      image_key: x.image_key || null,
+      adj1: x.adj1 || null, adj2: x.adj2 || null, noun: x.noun || null
+    }));
+    ok(res, { items });
+  } catch (e) {
+    console.error('[qh/handle]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+module.exports = router;
