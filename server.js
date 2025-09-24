@@ -314,6 +314,7 @@ app.use('/api/images', require('./src/routes/images'));
 try { app.use('/api/members', require('./src/routes/members')); } catch { /* optional */ }
 app.use('/api/platforms/espn', require('./routes/platforms/espn-link'));
 app.use('/api/identity', require('./routes/identity/promote'));
+app.use('/api/platforms/espn', require('./routes/platforms/espn-ingest'));
 
 // JSON 404 for /api
 app.use('/api', (req, res) => res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl }));
