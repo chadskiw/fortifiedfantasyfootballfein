@@ -37,7 +37,7 @@ app.get('/healthz', (_req, res) => {
 app.use('/api/identity', require('./src/routes/identity/request-code'));
 
 // WhoAmI (root + api alias)
-const whoami = require('./src/routes/whoami');
+const whoami = require('./routes/whoami');
 app.use('/', whoami);
 app.use('/api/whoami', whoami);
 
