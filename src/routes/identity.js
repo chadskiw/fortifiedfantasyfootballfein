@@ -7,7 +7,7 @@ module.exports = stub;
 // mount: app.use('/api/identity/request-code', require('./routes/identity/request-code'));
 
 
-const express = require('express');
+// const express = require('express');
 const pool    = require('../db/pool');
 const router  = express.Router();
 
@@ -65,3 +65,4 @@ router.post('/handle/upsert', async (req, res) => {
 });
 
 module.exports = router;
+
