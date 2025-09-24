@@ -1,6 +1,6 @@
 // routes/identity/handle.js (CommonJS)
 const express = require('express');
-const pool    = require('../pool'); // adjust path if needed (must export a pg.Pool)
+const pool    = require('../../src/db/pool'); // adjust path if needed (must export a pg.Pool)
 const router  = express.Router();
 
 const HANDLE_RE = /^[a-zA-Z0-9_.]{3,24}$/;
