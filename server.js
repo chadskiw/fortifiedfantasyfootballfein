@@ -42,7 +42,7 @@ app.use('/api/identity', require('./src/routes/identity/request-code'));
 // WhoAmI (root + alias)
 //   GET /check
 //   GET /lookup?identifier=...
-const whoami = require('./src/routes/whoami');
+const whoami = require('./routes/whoami');
 app.use('/', whoami);
 app.use('/api/whoami', whoami);
 
@@ -50,9 +50,28 @@ app.use('/api/whoami', whoami);
 //   GET /status           (also /api/espn/status)
 //   GET /login            (also /api/espn/login)
 //   GET /leagues?season=2025 (also /api/espn/leagues?season=2025)
+// server.js
 const espnRouter = require('./src/routes/espn');
-app.use('/', espnRouter);
+
+// PRIMARY mount (all ESPN endpoints live here)
 app.use('/api/espn', espnRouter);
+
+// Root service status (fixes your /status 404 without polluting /login)
+app.get('/status', (req, res) => {
+  const c = req.cookies || {};
+  const h = req.headers || {};
+  const swid = c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || null;
+  const s2   = c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null;
+
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    name: 'ff-platform-service',
+    ts: new Date().toISOString(),
+    espn: { hasCookies: !!(swid && s2) }
+  });
+});
+
 
 // static
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
