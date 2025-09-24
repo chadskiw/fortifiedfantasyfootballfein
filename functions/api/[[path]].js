@@ -1,61 +1,44 @@
-// TRUE_LOCATION: functions/api/[[path]].js
-// IN_USE: TRUE
+// functions/api/[[path]].js
+// Proxies /api/* from CF Pages → your Render service
+export async function onRequest({ request }) {
+  const RENDER_ORIGIN = 'https://<YOUR-RENDER-SERVICE>.onrender.com'; // 👈 set this!
 
-// Proxy ALL /api/* calls from fortifiedfantasy.com to the Render Express app.
-// Keeps method, headers, body, and query string intact.
-// Also handles OPTIONS preflight locally to avoid 405s at the edge.
-
-const RENDER_BASE = 'https://fein-auth-service.onrender.com'; // <-- set to your Render service base (no trailing slash)
-
-export async function onRequest(context) {
-  const { request } = context;
   const inUrl = new URL(request.url);
+  // Preserve the /api/* subpath after /api
+  const backendPath = inUrl.pathname; // e.g. /api/quickhitter/check
 
-  // Handle preflight at the edge so browsers never see 405 on OPTIONS
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders(request),
+  // Build target URL on Render
+  const target = new URL(backendPath, RENDER_ORIGIN);
+  target.search = inUrl.search;
+
+  // Copy headers, tweak a couple
+  const headers = new Headers(request.headers);
+  headers.delete('host');
+  headers.set('x-forwarded-host', inUrl.host);
+  headers.set('x-ff-proxy', 'cf-pages');
+
+  const method = request.method.toUpperCase();
+  const init = {
+    method,
+    headers,
+    body: (method === 'GET' || method === 'HEAD') ? undefined : await request.arrayBuffer(),
+    redirect: 'follow',
+    cf: { cacheTtl: 0, cacheEverything: false }
+  };
+
+  try {
+    const resp = await fetch(target, init);
+    // Mirror status/headers/body to the browser
+    return new Response(resp.body, {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: resp.headers
+    });
+  } catch (err) {
+    // Return a tiny JSON so you can see it from the browser console
+    return new Response(JSON.stringify({ ok:false, error:'proxy_failed', message: String(err) }), {
+      status: 502,
+      headers: { 'content-type': 'application/json' }
     });
   }
-
-  // Strip the leading /api, then re-append it to target (so /api/identity/... -> /api/identity/...)
-  const stripped = inUrl.pathname.replace(/^\/api(\/?)/, '$1'); // '/identity/...'
-  const targetUrl = new URL('/api' + stripped + inUrl.search, RENDER_BASE);
-
-  // Build a new Request that reuses the original method/headers/body
-  const outbound = new Request(targetUrl.toString(), {
-    method: request.method,
-    headers: request.headers,
-    body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
-    redirect: 'manual',
-    duplex: 'half' // helps streaming body in some runtimes
-  });
-
-  // Forward the request to Render
-  const upstream = await fetch(outbound);
-
-  // Mirror upstream response and add permissive CORS so your front-end can read it
-  const resHeaders = new Headers(upstream.headers);
-  applyCors(resHeaders, request);
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: resHeaders,
-  });
-}
-
-function corsHeaders(req) {
-  const h = new Headers();
-  applyCors(h, req);
-  return h;
-}
-
-function applyCors(h, req) {
-  const origin = req.headers.get('Origin') || '*';
-  h.set('Access-Control-Allow-Origin', origin);
-  h.set('Vary', 'Origin');
-  h.set('Access-Control-Allow-Credentials', 'true');
-  h.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  h.set('Access-Control-Allow-Headers', req.headers.get('Access-Control-Request-Headers') || 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key');
 }
