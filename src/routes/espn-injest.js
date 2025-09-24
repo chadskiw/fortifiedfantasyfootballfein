@@ -17,6 +17,74 @@ module.exports = function createEspnIngestRouter(pool){
     const v = String(s||'').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,24);
     return v || 'unk';
   }
+
+  // ===== Route: GET /api/platforms/espn/ingest-fan =====
+// Calls ESPN Fan API with SWID + S2, ingests CHUI payload, creates tables, upserts rows.
+// Query:  minSeason?=YYYY   swid?={UUID}   s2?=<espn_s2>   game?=ffl (optional filter on write)
+// If swid/s2 omitted in query, they'll be read from headers/cookies.
+router.get('/espn/ingest-fan', async (req, res) => {
+  try {
+    const minSeason = Number(req.query.minSeason) || new Date().getFullYear();
+    const gameFilter = String(req.query.game || '').trim().toLowerCase(); // optional, e.g. 'ffl'
+
+    // Identify the member that will own the rows (require this like POST /espn-injest)
+    const member_id = req.cookies?.ff_member || null;
+    if (!member_id) return res.status(401).json({ ok:false, error:'unauthorized' });
+
+    // ESPN creds: from query, headers, or cookies
+    const swidRaw = req.query.swid || req.get('x-espn-swid') || req.cookies?.SWID || req.cookies?.ff_espn_swid || '';
+    const s2Raw   = req.query.s2   || req.get('x-espn-s2')   || req.cookies?.espn_s2 || req.cookies?.ff_espn_s2 || '';
+    const swid    = String(swidRaw || '').trim();
+    const s2      = String(s2Raw   || '').trim();
+    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_espn_creds' });
+
+    // Build Fan API URL
+    const fanUrl = `https://fan.api.espn.com/apis/v2/fans/${encodeURIComponent(swid)}`;
+
+    // Fetch CHUI/Fan JSON — ESPN expects cookies
+    const resp = await fetch(fanUrl, {
+      headers: {
+        'accept': 'application/json',
+        'cookie': `SWID=${swid}; espn_s2=${encodeURIComponent(s2)}`
+      }
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(()=> '');
+      return res.status(resp.status).json({ ok:false, error:'espn_fetch_failed', status:resp.status, body:text.slice(0,400) });
+    }
+    const chui = await resp.json();
+
+    // Make sure catalog/table infra exists
+    await ensureCatalogTables();
+
+    // Turn ESPN blob into per-sport rows (uses your helper)
+    const grouped = extractRowsFromChuiAll({ chui, minSeason, member_id, swid, s2 });
+
+    const results = {};
+    for (const charCodeRaw of Object.keys(grouped)) {
+      // Optional filter by sport (e.g. only write 'ffl')
+      if (gameFilter && charCodeRaw.toLowerCase() !== gameFilter) continue;
+
+      const charCode  = safeIdent(charCodeRaw);
+      const tableName = await ensureSportTable(charCode);
+      await upsertSportRows(tableName, grouped[charCodeRaw]);
+      await refreshSportCatalog({ charCode, season: minSeason, tableName });
+      results[charCode] = grouped[charCodeRaw].length;
+    }
+
+    return res.json({
+      ok: true,
+      minSeason,
+      member_id,
+      wrote: results,
+      sports: Object.keys(results).sort()
+    });
+  } catch (e) {
+    console.error('[espn ingest-fan]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 // GET /api/platforms/espn/my-teams?game=ffl&minSeason=2025
 router.get('/espn/my-teams', async (req, res) => {
   try {
