@@ -4,18 +4,13 @@
 //   GET /api/espn/status
 //   GET /api/espn/login
 //   GET /api/espn/leagues?season=2025&inject=1888700373,12345678
-//
-// Reads creds from cookies SWID/espn_s2, or headers x-espn-swid/x-espn-s2,
-// or TEST_ESPN_SWID / TEST_ESPN_S2 env vars (dev).
-//
-// DB tables auto-created:
-//   ff_league(platform, league_id, season, name, scoring_type, created_at, updated_at)
-//   ff_team  (platform, league_id, season, team_id, name, owner_guid, logo, record, updated_at)
 
 const express = require('express');
 const router  = express.Router();
 const { normalizeLeague } = require('./normalize');
-const pool = require('../../db/pool'); // pg.Pool instance
+
+// IMPORTANT: get the *instance* via destructuring
+const { pool } = require('../../db/pool'); // pg.Pool instance
 
 // ---------- creds helpers ----------
 function readEspnCreds(req) {
@@ -149,8 +144,9 @@ async function upsertTeams({ platform, league }) {
 
   const flat = rows.flat();
 
+  // NOTE: we intentionally omit updated_at in INSERT columns to use DEFAULT
   const q = `
-    INSERT INTO ff_team (platform, league_id, season, team_id, name, owner_guid, logo, record, updated_at)
+    INSERT INTO ff_team (platform, league_id, season, team_id, name, owner_guid, logo, record)
     VALUES ${valuesSql}
     ON CONFLICT (platform, league_id, season, team_id)
     DO UPDATE SET
