@@ -1,7 +1,7 @@
 // functions/api/[[path]].js
 // Proxies /api/* from CF Pages → your Render service
 export async function onRequest({ request }) {
-  const RENDER_ORIGIN = 'https://<YOUR-RENDER-SERVICE>.onrender.com'; // 👈 set this!
+  const RENDER_ORIGIN = 'https://fein-auth-service.onrender.com'; // 👈 set this!
 
   const inUrl = new URL(request.url);
   // Preserve the /api/* subpath after /api
