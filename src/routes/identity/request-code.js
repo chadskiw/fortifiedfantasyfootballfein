@@ -7,7 +7,7 @@ const crypto  = require('crypto');
 
 let pool;
   // server.js exports { pool }
-  ({ pool } = require('../../db/pool'));
+  ({ pool } = require('../../../server'));
 
 if (!pool) throw new Error('[request-code] Could not resolve pg pool');
 
