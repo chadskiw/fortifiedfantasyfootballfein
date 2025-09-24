@@ -100,6 +100,37 @@ router.get('/by-swid/:swid', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+// ADD to routes/quickhitter.js
+router.get('/lookup', async (req, res) => {
+  try {
+    const email = (req.query.email || '').trim().toLowerCase();
+    const phone = (req.query.phone || '').replace(/[^\d+]/g,'');
+    const handle = (req.query.handle || '').trim();
+    let row;
+    if (email) {
+      row = (await pool.query(
+        `SELECT * FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) ORDER BY updated_at DESC LIMIT 1`,
+        [email]
+      )).rows[0];
+    } else if (phone) {
+      row = (await pool.query(
+        `SELECT * FROM ff_quickhitter WHERE phone=$1 ORDER BY updated_at DESC LIMIT 1`,
+        [phone]
+      )).rows[0];
+    } else if (handle) {
+      row = (await pool.query(
+        `SELECT * FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1) ORDER BY updated_at DESC LIMIT 1`,
+        [handle]
+      )).rows[0];
+    } else {
+      return res.status(400).json({ ok:false, error:'bad_request' });
+    }
+    return res.json({ ok:true, member: row ? rowToMember(row) : null });
+  } catch (e) {
+    console.error('[qh.lookup]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 // ---------- Upsert (owner writes) ----------
 // POST /api/quickhitter/upsert

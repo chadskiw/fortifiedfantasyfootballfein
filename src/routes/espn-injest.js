@@ -17,6 +17,117 @@ module.exports = function createEspnIngestRouter(pool){
     const v = String(s||'').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,24);
     return v || 'unk';
   }
+// POST /api/platforms/espn/ingest-from-quickhitter
+// Body (any): { member_id?, handle?, minSeason?, game? }  game e.g. 'ffl'
+// Resolves swid from ff_quickhitter.quick_snap and espn_s2 from ff_espn_cred (or headers/cookies)
+router.post('/ingest-from-quickhitter', async (req, res) => {
+  try {
+    const member_id = String(req.cookies?.ff_member || req.body?.member_id || '').trim().toUpperCase();
+    const handle    = String(req.body?.handle || '').trim();
+    const minSeason = Number(req.body?.minSeason) || new Date().getFullYear();
+    const gameFilter = String(req.body?.game || '').trim().toLowerCase(); // optional ('ffl', etc)
+
+    if (!member_id && !handle) {
+      return res.status(400).json({ ok:false, error:'missing_member_or_handle' });
+    }
+
+    // 1) Look up quick_snap (SWID) from ff_quickhitter
+    let qh;
+    if (member_id) {
+      qh = await pool.query(
+        `SELECT id, member_id, handle, quick_snap
+           FROM ff_quickhitter
+          WHERE member_id = $1
+          LIMIT 1`,
+        [member_id]
+      );
+    } else {
+      qh = await pool.query(
+        `SELECT id, member_id, handle, quick_snap
+           FROM ff_quickhitter
+          WHERE LOWER(handle) = LOWER($1)
+          LIMIT 1`,
+        [handle]
+      );
+    }
+
+    const row = qh.rows[0];
+    if (!row || !row.quick_snap) {
+      return res.status(404).json({ ok:false, error:'quick_snap_not_found' });
+    }
+    const swid = String(row.quick_snap).trim();
+
+    // 2) Resolve espn_s2 (prefer DB; fallback to header/cookie/body)
+    let s2 = null;
+
+    // Try ff_espn_cred linked to this member (latest)
+    if (row.member_id) {
+      const cred = await pool.query(
+        `SELECT espn_s2
+           FROM ff_espn_cred
+          WHERE member_id = $1
+          ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+          LIMIT 1`,
+        [row.member_id]
+      );
+      if (cred.rows[0]?.espn_s2) s2 = String(cred.rows[0].espn_s2);
+    }
+
+    // Fallbacks: headers, cookies, body
+    if (!s2) s2 = req.get('x-espn-s2') || req.cookies?.espn_s2 || req.body?.s2 || null;
+    if (!s2) {
+      return res.status(400).json({ ok:false, error:'missing_espn_s2' });
+    }
+
+    // 3) Call ESPN Fan API
+    const fanUrl = `https://fan.api.espn.com/apis/v2/fans/${encodeURIComponent(swid)}`;
+    const resp = await fetch(fanUrl, {
+      headers: {
+        'accept': 'application/json',
+        'cookie': `SWID=${swid}; espn_s2=${encodeURIComponent(s2)}`
+      }
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>'');
+      return res.status(resp.status).json({ ok:false, error:'espn_fetch_failed', status:resp.status, body: txt.slice(0,400) });
+    }
+    const chui = await resp.json();
+
+    // 4) Ensure catalog/table infra and upsert rows (reuse your helpers)
+    await ensureCatalogTables();
+
+    const grouped = extractRowsFromChuiAll({
+      chui,
+      minSeason,
+      member_id: row.member_id || member_id || null,
+      swid,
+      s2
+    });
+
+    const results = {};
+    for (const code of Object.keys(grouped)) {
+      if (gameFilter && code.toLowerCase() !== gameFilter) continue;
+      const charCode = safeIdent(code);                    // e.g., 'ffl'
+      const tableName = await ensureSportTable(charCode);  // e.g., 'ff_sport_ffl'
+      await upsertSportRows(tableName, grouped[code]);     // bulk upsert
+      await refreshSportCatalog({ charCode, season: minSeason, tableName });
+      results[charCode] = grouped[code].length;
+    }
+
+    return res.json({
+      ok: true,
+      member_id: row.member_id || member_id || null,
+      handle: row.handle || null,
+      swid,
+      minSeason,
+      wrote: results,
+      sports: Object.keys(results).sort()
+    });
+  } catch (e) {
+    console.error('[ingest-from-quickhitter]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
   // ===== Route: GET /api/platforms/espn/ingest-fan =====
 // Calls ESPN Fan API with SWID + S2, ingests CHUI payload, creates tables, upserts rows.

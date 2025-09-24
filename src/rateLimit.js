@@ -15,7 +15,7 @@ const limiter = rateLimit({
   // Keep your skips
   skip: (req) => {
     if (req.method === 'OPTIONS') return true;                   // don’t rate-limit preflights
-    if (req.path && req.path.startsWith('/api/identity/')) return true; // skip identity endpoints
+    if (req.path && req.path.startsWith('/api/quickhitter/')) return true; // skip identity endpoints
     return false;
   },
 });

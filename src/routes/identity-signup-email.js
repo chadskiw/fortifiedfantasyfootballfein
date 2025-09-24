@@ -3,7 +3,7 @@
 // routes/identity-signup-email.js
 const express = require('express');
 const router = express.Router();
-const { pool } = require('../server');
+const pool = require('../db/pool'); // direct, no circular dep
 const crypto = require('crypto');
 const { buildCodeFromCookie } = require('../src/anagram');
 

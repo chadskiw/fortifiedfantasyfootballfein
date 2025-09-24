@@ -2,8 +2,7 @@
 const express = require('express');
 
 // You exported pool & query from server.js; import accordingly:
-const { pool } = require('../server'); // adjust if you export differently
-
+const pool = require('../src/db/pool'); // direct, no circular dep
 const router = express.Router();
 router.use(express.json());
 
