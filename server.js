@@ -13,7 +13,7 @@ const pool          = require('./src/db/pool'); // <- uses your existing pool.js
 // Routers (CommonJS)
 const identityHandleRouter = require('./routes/identity/handle');        // /handle/exists, /handle/upsert
 const profileClaimRouter   = require('./routes/profile/claim-username');  // /claim-username
-const requestCodeRouter    = require('./routes/identity/request-code');   // POST request/send code
+//const requestCodeRouter    = require('./routes/identity/request-code');   // POST request/send code
 
 // ---------- App ----------
 const app = express();
@@ -127,11 +127,11 @@ function extractEspnCreds(req) {
 }
 
 // ---------- Identity: request-code ----------
-app.post('/api/identity/request-code', (req, res, next) => {
+//app.post('/api/identity/request-code', (req, res, next) => {
   // requestCodeRouter already expects JSON; req.body is set by express.json()
-  res.set(corsHeaders(req));
-  return requestCodeRouter(req, res, next);
-});
+//  res.set(corsHeaders(req));
+//  return requestCodeRouter(req, res, next);
+//});
 app.post('/api/identity/send-code', (req, res, next) => {
   res.set(corsHeaders(req));
   return requestCodeRouter(req, res, next);
