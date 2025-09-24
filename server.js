@@ -8,11 +8,52 @@ const path         = require('path');
 const cookieParser = require('cookie-parser');
 const { Pool }     = require('pg');
 const crypto       = require('crypto');
+// server.js (snippets)
+
+const cors = require('cors');
+
+// Routers (CommonJS)
+const identityHandleRouter = require('./routes/identity/handle');        // <- CJS file below
+const profileClaimRouter   = require('./routes/profile/claim-username');  // <- CJS file below
+
+
+// … your 404/500 handlers …
 
 // ---------- App ----------
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+
+
+// --- CORS (adjust origins as needed) ---
+app.use(cors({
+  origin: [/^https?:\/\/localhost(?::\d+)?$/i, /^https?:\/\/.*fortifiedfantasy\.com$/i],
+  credentials: true,
+}));
+
+// --- Logging + cookies + bodies ---
+app.use(morgan('dev'));
+app.use(cookieParser());
+
+// IMPORTANT: define CORS allow headers BEFORE handling OPTIONS
+const allow = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key'
+};
+app.options('/api/*', (req, res) => res.set(allow).status(204).end());
+
+// If you want global parsers (you can also use per-route):
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// --- Mount APIs ---
+app.use('/api/identity', identityHandleRouter); // /handle/exists, /handle/upsert
+app.use('/api/profile',  profileClaimRouter);   // /claim-username
+
+
+
 
 // ---------- DB ----------
 const pool = new Pool({
@@ -275,10 +316,6 @@ function extractEspnCreds(req) {
   return false;
 }
 
-// ---------- Core Middlewares (order matters) ----------
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-// JSON parser that doesn't kill the request on bad JSON
-app.use(express.json({ limit: '1mb', strict: false }));
 
 // If JSON parsing fails, keep the raw body and continue
 app.use(function jsonParseGuard(err, req, _res, next) {
@@ -299,9 +336,9 @@ app.use('/api/identity/request-code', normalizeBody, requestCodeRouter);
 app.use('/api/identity/send-code',    normalizeBody, requestCodeRouter);
 app.use('/api', require('./src/routes/espn-link-member'));
 
-// Handle upsert endpoints use the tolerant core:
-app.post('/api/identity/handle/upsert', (req, res) => upsertHandleCore(req, res));
-app.post('/api/profile/claim-username', (req, res) => upsertHandleCore(req, res));
+// Mount under /api
+app.use('/api/identity', identityHandleRouter);  // /api/identity/handle/exists, /api/identity/handle/upsert
+app.use('/api/profile',  profileClaimRouter);    // /api/profile/claim-username
 
 // Preflights
 app.options(
@@ -313,9 +350,9 @@ const createEspnCredLinkRouter = require('./src/api/espn-cred-link');
 app.use('/api/platforms/espn', createEspnCredLinkRouter(pool));
 
 // Custom CORS + rate limit
-const { corsMiddleware } = require('./src/cors');
+//const { corsMiddleware } = require('./src/cors');
 const { rateLimit }      = require('./src/rateLimit');
-app.use(corsMiddleware);
+//app.use(corsMiddleware);
 app.use(rateLimit);
 app.use('/api/_notify', require('./src/routes/notify'));   // <-- before static/404
 
@@ -332,13 +369,7 @@ app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
 // --- add with other mounts (before static) ---
 
 // (optional but handy) preflight for browsers
-const allow = {
-  'access-control-allow-origin': 'https://fortifiedfantasy.com',
-  'access-control-allow-credentials': 'true',
-  'access-control-allow-headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2,x-fein-key',
-  'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-  'access-control-max-age': '600',
-};
+
 
 
 // ---------- DB helpers for identity ----------
@@ -767,3 +798,4 @@ app.use((err, req, res, _next) => {
 // ---------- Start ----------
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`FF Platform Service listening on :${port}`));
+
