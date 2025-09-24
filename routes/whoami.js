@@ -4,7 +4,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const pool    = require('../../db/pool'); // src/db/pool.js (pg Pool)
+const pool    = require('../src/db/pool'); // src/db/pool.js (pg Pool)
 
 if (!pool) throw new Error('[whoami] pg pool missing');
 
