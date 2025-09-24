@@ -1,8 +1,8 @@
 // api/platforms/espn-ingest.js
 const express = require('express');
-
+const router = express.Router();
 module.exports = function createEspnIngestRouter(pool){
-  const router = express.Router();
+  
 
   // parse JSON for this router
   router.use(express.json({ limit: '2mb' }));
