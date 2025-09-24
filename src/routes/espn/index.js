@@ -370,56 +370,45 @@ router.get('/leagues', async (req, res) => {
 // ---------- NEW: /api/espn/link ----------
 // Usage: /api/espn/link?swid=%7B...%7D&s2=... [&games=all] [&season=2025|&seasons=2019-2025]
 // Behavior: sets cookies, upserts ff_espn_cred, ingests, then 302 -> /fein
+// ---------- /api/espn/link (hardened) ----------
 router.get('/link', async (req, res) => {
   try {
-    // 1) validate creds from query
+    // 1) read + normalize creds from query
     let swid = req.query.swid ? decodeURIComponent(String(req.query.swid)) : '';
     let s2   = req.query.s2   ? String(req.query.s2) : '';
     if (!swid || !s2) return res.status(400).send('missing swid or s2');
-
     if (!/^\{.*\}$/.test(swid)) swid = `{${swid.replace(/^\{?|\}?$/g,'')}}`;
 
-    // 2) persist creds
+    // 2) upsert creds
     await ensureCredsTable();
     await upsertCred({ swid, s2 });
 
-    // 3) set cookies for subsequent calls
-    const secure = process.env.NODE_ENV === 'production';
+    // 3) set cookies
+    const secure  = process.env.NODE_ENV === 'production';
     const oneYear = 1000 * 60 * 60 * 24 * 365;
-
-    // httpOnly for real auth cookies (server reads them)
     res.cookie('SWID', swid,         { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
     res.cookie('espn_s2', s2,        { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
-
-    // non-httpOnly flag for frontend bootstrap
-    res.cookie('fein_has_espn', '1', { httpOnly: false, sameSite: 'Lax', secure, maxAge: 60*60*24*90*1000, path: '/' });
-
-    // also set ff_* fallbacks some codepaths check
+    res.cookie('fein_has_espn', '1', { httpOnly: false, sameSite: 'Lax', secure, maxAge: 1000*60*60*24*90, path: '/' });
     res.cookie('ff_espn_swid', swid, { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
     res.cookie('ff_espn_s2',   s2,   { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
 
-    // 4) run ingest (defaults: games=all, current season)
+    // 4) multi-game/multi-season defaults (games=all, seasons=current..-5)
     const seasons = parseSeasons(req.query.season, req.query.seasons);
     const games   = parseGames(req.query.game, req.query.games || 'all');
 
     await ensureTables();
 
-    const discovered = { games, seasons, byGame: {}, totalIds: 0 };
+    // discover & ingest (sync). If you want faster UX, you can fire-and-forget this block.
     const keys = new Set();
-
     for (const game of games) {
-      discovered.byGame[game] = {};
       for (const season of seasons) {
         const d = await discoverSeason({ game, season, swid, s2 });
-        discovered.byGame[game][season] = d;
         d.ids.forEach(id => keys.add(`${game}:${season}:${id}`));
-        discovered.totalIds += d.ids.length;
       }
     }
 
     let leaguesIngested = 0;
     let teamsIngested   = 0;
-
     for (const key of keys) {
       const [game, seasonStr, id] = key.split(':');
       const season = parseInt(seasonStr, 10);
@@ -431,19 +420,26 @@ router.get('/link', async (req, res) => {
         leaguesIngested++;
         teamsIngested += await upsertTeams(L);
       } catch (e) {
-        // continue; we redirect regardless
         console.warn('[espn/link] league ingest failed', { game, season, id, msg: e.message });
       }
     }
 
-    // 5) redirect to /fein (include tiny summary in query)
-    const summary = new URLSearchParams({
-      linked: '1',
-      leagues: String(leaguesIngested),
-      teams: String(teamsIngested)
-    }).toString();
+    // 5) redirect target
+    const returnTo = (req.query.to || req.query.return || req.query.next || '/fein').toString();
+    const proto = req.headers['x-forwarded-proto'] || (secure ? 'https' : 'http');
+    const host  = req.headers['x-forwarded-host']  || req.headers.host;
+    const origin = `${proto}://${host}`;
+    const dest = new URL(returnTo, origin);
+    dest.searchParams.set('linked','1');
+    dest.searchParams.set('leagues', String(leaguesIngested));
+    dest.searchParams.set('teams',   String(teamsIngested));
 
-    res.redirect(302, `/fein?${summary}`);
+    // Optional debug mode: ?debug=1 returns JSON instead of redirect
+    if (String(req.query.debug || '') === '1') {
+      return res.json({ ok:true, redirect: dest.toString(), leaguesIngested, teamsIngested });
+    }
+
+    res.redirect(302, dest.toString());
   } catch (e) {
     console.error('[espn/link] error', e);
     res.status(500).send('link_failed');
