@@ -1,6 +1,7 @@
 // api/platforms/espn-ingest.js
 const express = require('express');
 const router = express.Router();
+const pool = require('../../db/pool');
 module.exports = function createEspnIngestRouter(pool){
   
 

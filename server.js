@@ -133,12 +133,7 @@ function extractEspnCreds(req) {
   return false;
 }
 
-// ---------- Identity: request-code ----------
-//app.post('/api/identity/request-code', (req, res, next) => {
-  // requestCodeRouter already expects JSON; req.body is set by express.json()
-//  res.set(corsHeaders(req));
-//  return requestCodeRouter(req, res, next);
-//});
+
 app.post('/api/identity/send-code', (req, res, next) => {
   res.set(corsHeaders(req));
   return requestCodeRouter(req, res, next);
