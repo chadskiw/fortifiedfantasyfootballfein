@@ -7,6 +7,8 @@ const express = require('express');
 // Node 18+ has global fetch. If you’re on older Node, uncomment:
 // const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
 const router = express.Router();
+const pool          = require('../../../src/db/pool'); // <- uses your existing pool.js (exports pg.Pool instance)
+
 module.exports = function createEspnIngestRouter(pool) {
   router.use(express.json({ limit: '2mb' }));
 
