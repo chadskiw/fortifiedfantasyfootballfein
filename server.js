@@ -15,7 +15,7 @@ const identityHandleRouter = require('./routes/identity/handle');        // /han
 const profileClaimRouter   = require('./routes/profile/claim-username');  // /claim-username
 const requestCodeRouter    = require('./routes/identity/request-code');   // POST request/send code
 // near other requires
-const createEspnIngestRouter = require('./src/api/platforms/espn-ingest');
+const createEspnIngestRouter = require('./routes/espn-ingest');
 
 
 
@@ -308,7 +308,7 @@ app.use('/api/identity', require('./src/routes/identity'));       // POST /reque
 app.use('/api/identity', require('./src/routes/upsert'));         // POST /handle/upsert
 app.use('/api/espn', require('./routes/espn-cred'));
 // after you create the pg Pool and before static/404 handlers:
-app.use('/api/platforms', createEspnIngestRouter(pool));
+app.use('/api/platforms/espn', createEspnIngestRouter(pool));
 // optional profile alias if you want /api/profile/claim-username to exist
 try { app.use('/api/profile', require('./src/routes/upsert')); } catch { /* optional */ }
 
