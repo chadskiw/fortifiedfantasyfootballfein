@@ -16,7 +16,8 @@ const profileClaimRouter   = require('./routes/profile/claim-username');  // /cl
 const requestCodeRouter    = require('./routes/identity/request-code');   // POST request/send code
 // near other requires
 const createEspnIngestRouter = require('./routes/espn-ingest');
-
+// ...
+const createRequestCodeRouter = require('./routes/identity/request-code');
 
 
 // ---------- App ----------
@@ -54,6 +55,8 @@ function corsHeaders(req) {
   return h;
 }
 
+// normalizeBody no longer required; the router does its own JSON + tolerant logic
+app.use('/api/identity', createRequestCodeRouter(pool));
 // Global preflight for anything under /api/*
 app.options('/api/*', (req, res) => {
   res.set(corsHeaders(req)).status(204).end();
