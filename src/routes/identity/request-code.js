@@ -5,7 +5,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 
-const pool          = require('../../../src/db/pool'); // <- uses your existing pool.js (exports pg.Pool instance)
+const pool          = require('../../db/pool'); // <- uses your existing pool.js (exports pg.Pool instance)
 
 
 if (!pool) throw new Error('[request-code] Could not resolve pg pool');
