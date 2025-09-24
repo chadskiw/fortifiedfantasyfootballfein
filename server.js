@@ -303,7 +303,6 @@ app.use('/api/quickhitter', require('./src/routes/quickhitter')); // check, exis
 app.use('/api/identity', require('./src/routes/identity'));       // POST /request-code, /send-code
 app.use('/api/identity', require('./src/routes/upsert'));         // POST /handle/upsert
 app.use('/api/espn', require('./routes/espn-cred'));
-app.use('/api/platforms/espn', require('./routes/platforms/espn-link'));
 
 // optional profile alias if you want /api/profile/claim-username to exist
 try { app.use('/api/profile', require('./src/routes/upsert')); } catch { /* optional */ }
@@ -313,6 +312,8 @@ app.use('/api/images', require('./src/routes/images'));
 
 // legacy shims so older JS doesn’t 404
 try { app.use('/api/members', require('./src/routes/members')); } catch { /* optional */ }
+app.use('/api/platforms/espn', require('./routes/platforms/espn-link'));
+app.use('/api/identity', require('./routes/identity/promote'));
 
 // JSON 404 for /api
 app.use('/api', (req, res) => res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl }));

@@ -1,6 +1,6 @@
 // routes/platforms/espn-link.js
 const express = require('express');
-const { pool } = require('../../server'); // adjust path if needed
+const pool = require('../../src/db/pool');
 
 const router = express.Router();
 router.use(express.json());
@@ -22,33 +22,39 @@ function normalizeSwid(raw = '') {
   return v.startsWith('{') ? v.toUpperCase() : `{${v.replace(/[{}]/g,'').toUpperCase()}}`;
 }
 
+// GET /api/platforms/espn/authcheck  → { ok:true, authed:boolean }
+router.get('/authcheck', (req, res) => {
+  const cookies = readCookiesHeader(req.headers.cookie || '');
+  const swid = normalizeSwid(req.get('x-espn-swid') || cookies.SWID || cookies.ff_espn_swid || '');
+  const s2   = (req.get('x-espn-s2') || cookies.espn_s2 || cookies.ff_espn_s2 || '').trim();
+  res.json({ ok:true, authed: !!(swid || s2) });
+});
+
 // POST /api/platforms/espn/link-via-cookie
-// Reads SWID/S2 from cookies/headers, finds ff_quickhitter.quick_snap, sets ff_member cookie.
+// - Reads SWID/S2 from headers/cookies
+// - Finds matching ff_quickhitter.quick_snap
+// - Sets ff_member cookie
+// - Upserts ff_espn_cred with s2 (if present)
 router.post('/link-via-cookie', async (req, res) => {
   try {
     const cookies = readCookiesHeader(req.headers.cookie || '');
-    const swidH = req.get('x-espn-swid') || '';
-    const s2H   = req.get('x-espn-s2')   || '';
-    const swidC = cookies.SWID || cookies.ff_espn_swid || '';
-    const s2C   = cookies.espn_s2 || cookies.ff_espn_s2 || '';
-
-    const swid = normalizeSwid(swidH || swidC);
-    const s2   = decodeURIComponent((s2H || s2C || '').trim());
+    const swid = normalizeSwid(req.get('x-espn-swid') || cookies.SWID || cookies.ff_espn_swid || '');
+    const s2   = decodeURIComponent((req.get('x-espn-s2') || cookies.espn_s2 || cookies.ff_espn_s2 || '').trim());
 
     if (!swid) return res.status(400).json({ ok:false, error:'missing_swid' });
 
-    // find a quickhitter with matching quick_snap
-    const q = await pool.query(
-      `SELECT * FROM ff_quickhitter WHERE LOWER(quick_snap)=LOWER($1) LIMIT 1`,
+    // Find quickhitter by quick_snap (case-insensitive)
+    const qh = await pool.query(
+      `SELECT member_id, handle, quick_snap FROM ff_quickhitter WHERE LOWER(quick_snap)=LOWER($1) LIMIT 1`,
       [swid]
     );
-    const row = q.rows[0];
+    const row = qh.rows[0];
     if (!row) return res.status(404).json({ ok:false, error:'no_quickhitter_for_swid' });
 
-    // set ff_member so /quickhitter/check can see session
+    // Set session cookie
     res.cookie('ff_member', row.member_id, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
 
-    // (optional) upsert S2 into ff_espn_cred for this SWID
+    // Upsert s2 so we remember it (optional but requested)
     if (s2) {
       await pool.query(`
         INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, first_seen, last_seen)
@@ -58,7 +64,7 @@ router.post('/link-via-cookie', async (req, res) => {
       `, [swid, s2]);
     }
 
-    return res.json({ ok:true, member_id: row.member_id, handle: row.handle, quick_snap: row.quick_snap });
+    res.json({ ok:true, member_id: row.member_id, handle: row.handle, quick_snap: row.quick_snap });
   } catch (e) {
     console.error('[espn.link-via-cookie]', e);
     res.status(500).json({ ok:false, error:'server_error' });
