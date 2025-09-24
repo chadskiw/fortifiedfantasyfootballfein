@@ -1,12 +1,15 @@
 // src/routes/espn/index.js
-// Multi-game ESPN ingest (no HTML, JSON only)
+// Multi-game ESPN ingest + link endpoint (no HTML, JSON only)
+//
 // Endpoints:
 //   GET /api/espn/status
 //   GET /api/espn/discover?season=2025[&game=ffl|games=all|games=ffl,fba]
 //   GET /api/espn/leagues?season=2025[&inject=ID,ID][&game=ffl|games=all|games=ffl,fba]
 //   GET /api/espn/leagues?seasons=2019-2025[&games=all]
+//   GET /api/espn/link?swid={...}&s2=... [&games=all|ffl,fba] [&season=2025|&seasons=2019-2025]
+//     → sets cookies, upserts ff_espn_cred, ingests, then 302 → /fein
 //
-// Default game is ffl (Fantasy Football). Supported list is extendable.
+// Default game is ffl. Supported: ffl (football), fba (basketball), flb (baseball), fhl (hockey).
 
 const express = require('express');
 const router  = express.Router();
@@ -21,7 +24,7 @@ if (!pool || typeof pool.query !== 'function') {
 router.use(express.json({ limit: '1mb' }));
 
 /* ------------------------------- config ------------------------------ */
-const SUPPORTED_GAMES = ['ffl','fba','flb','fhl']; // football, basketball, baseball, hockey
+const SUPPORTED_GAMES = ['ffl','fba','flb','fhl'];
 const DEFAULT_GAME = 'ffl';
 
 /* -------------------------------- utils ------------------------------ */
@@ -42,7 +45,7 @@ function parseSeasons(qSeason, qSeasons) {
   if (qSeasons) {
     const s = String(qSeasons).trim().toLowerCase();
     if (s === 'all') {
-      const from = thisYear - 5; // last 6 seasons
+      const from = thisYear - 5; // last 6 years
       return Array.from({length: (thisYear - from + 1)}, (_,i)=>from+i);
     }
     const range = s.match(/^(\d{4})\s*-\s*(\d{4})$/);
@@ -127,7 +130,7 @@ function mapLeague(json, game) {
 }
 
 /* ----------------------------- DB schema ----------------------------- */
-// We add a `game` column if it's missing (default 'ffl') to keep backward compat
+// Base tables + evolve schema to include `game`
 async function ensureTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ff_league (
@@ -150,7 +153,6 @@ async function ensureTables() {
       record     JSONB,
       PRIMARY KEY (platform, league_id, season, team_id)
     );
-    -- evolve schema (no-op if already added)
     ALTER TABLE ff_league ADD COLUMN IF NOT EXISTS game TEXT NOT NULL DEFAULT 'ffl';
     ALTER TABLE ff_team   ADD COLUMN IF NOT EXISTS game TEXT NOT NULL DEFAULT 'ffl';
     CREATE INDEX IF NOT EXISTS ff_league_game_idx ON ff_league (platform, game, season);
@@ -158,9 +160,24 @@ async function ensureTables() {
   `);
 }
 
-// NOTE: PK remains (platform, league_id, season) for now to avoid breaking existing data.
-// ESPN league IDs are effectively disjoint across games; if we ever see a collision,
-// we'll migrate PK to include `game`. (Easy migration plan available.)
+async function ensureCredsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ff_espn_cred (
+      swid       TEXT PRIMARY KEY,
+      s2         TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+}
+
+async function upsertCred({ swid, s2 }) {
+  await pool.query(`
+    INSERT INTO ff_espn_cred (swid, s2, created_at, updated_at)
+    VALUES ($1,$2, NOW(), NOW())
+    ON CONFLICT (swid) DO UPDATE SET s2 = EXCLUDED.s2, updated_at = NOW()
+  `, [swid, s2]);
+}
 
 async function upsertLeague(league) {
   await pool.query(`
@@ -282,7 +299,7 @@ router.get('/leagues', async (req, res) => {
     const games   = parseGames(req.query.game, req.query.games);
 
     const injectStr = String(req.query.inject || '').trim();
-    // inject can be just IDs (apply to first season/game) OR triplets "game:season:id"
+    // inject can be bare IDs (attach to first game/season) OR triplets "game:season:id"
     const injectTokens = injectStr ? injectStr.split(/[,\s]+/).filter(Boolean) : [];
 
     const { swid, s2 } = readCreds(req);
@@ -309,14 +326,10 @@ router.get('/leagues', async (req, res) => {
     // Parse injects
     for (const tok of injectTokens) {
       if (/^\d+$/.test(tok)) {
-        // bare ID → attach to first game/season
         keys.add(`${games[0]}:${seasons[0]}:${tok}`);
       } else {
-        // game:season:id
         const m = /^([a-z]+):(\d{4}):(\d+)$/.exec(tok.toLowerCase());
-        if (m && SUPPORTED_GAMES.includes(m[1])) {
-          keys.add(`${m[1]}:${m[2]}:${m[3]}`);
-        }
+        if (m && SUPPORTED_GAMES.includes(m[1])) keys.add(`${m[1]}:${m[2]}:${m[3]}`);
       }
     }
 
@@ -351,6 +364,89 @@ router.get('/leagues', async (req, res) => {
   } catch (e) {
     console.error('[espn/leagues] error', e);
     res.status(500).json({ ok:false, error:'internal_error' });
+  }
+});
+
+// ---------- NEW: /api/espn/link ----------
+// Usage: /api/espn/link?swid=%7B...%7D&s2=... [&games=all] [&season=2025|&seasons=2019-2025]
+// Behavior: sets cookies, upserts ff_espn_cred, ingests, then 302 -> /fein
+router.get('/link', async (req, res) => {
+  try {
+    // 1) validate creds from query
+    let swid = req.query.swid ? decodeURIComponent(String(req.query.swid)) : '';
+    let s2   = req.query.s2   ? String(req.query.s2) : '';
+    if (!swid || !s2) return res.status(400).send('missing swid or s2');
+
+    if (!/^\{.*\}$/.test(swid)) swid = `{${swid.replace(/^\{?|\}?$/g,'')}}`;
+
+    // 2) persist creds
+    await ensureCredsTable();
+    await upsertCred({ swid, s2 });
+
+    // 3) set cookies for subsequent calls
+    const secure = process.env.NODE_ENV === 'production';
+    const oneYear = 1000 * 60 * 60 * 24 * 365;
+
+    // httpOnly for real auth cookies (server reads them)
+    res.cookie('SWID', swid,         { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
+    res.cookie('espn_s2', s2,        { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
+
+    // non-httpOnly flag for frontend bootstrap
+    res.cookie('fein_has_espn', '1', { httpOnly: false, sameSite: 'Lax', secure, maxAge: 60*60*24*90*1000, path: '/' });
+
+    // also set ff_* fallbacks some codepaths check
+    res.cookie('ff_espn_swid', swid, { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
+    res.cookie('ff_espn_s2',   s2,   { httpOnly: true, sameSite: 'Lax', secure, maxAge: oneYear, path: '/' });
+
+    // 4) run ingest (defaults: games=all, current season)
+    const seasons = parseSeasons(req.query.season, req.query.seasons);
+    const games   = parseGames(req.query.game, req.query.games || 'all');
+
+    await ensureTables();
+
+    const discovered = { games, seasons, byGame: {}, totalIds: 0 };
+    const keys = new Set();
+
+    for (const game of games) {
+      discovered.byGame[game] = {};
+      for (const season of seasons) {
+        const d = await discoverSeason({ game, season, swid, s2 });
+        discovered.byGame[game][season] = d;
+        d.ids.forEach(id => keys.add(`${game}:${season}:${id}`));
+        discovered.totalIds += d.ids.length;
+      }
+    }
+
+    let leaguesIngested = 0;
+    let teamsIngested   = 0;
+
+    for (const key of keys) {
+      const [game, seasonStr, id] = key.split(':');
+      const season = parseInt(seasonStr, 10);
+      try {
+        const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${id}?view=mTeam&view=mSettings`;
+        const json = await fetchJSON(url, { swid, s2 });
+        const L = mapLeague(json, game);
+        await upsertLeague(L);
+        leaguesIngested++;
+        teamsIngested += await upsertTeams(L);
+      } catch (e) {
+        // continue; we redirect regardless
+        console.warn('[espn/link] league ingest failed', { game, season, id, msg: e.message });
+      }
+    }
+
+    // 5) redirect to /fein (include tiny summary in query)
+    const summary = new URLSearchParams({
+      linked: '1',
+      leagues: String(leaguesIngested),
+      teams: String(teamsIngested)
+    }).toString();
+
+    res.redirect(302, `/fein?${summary}`);
+  } catch (e) {
+    console.error('[espn/link] error', e);
+    res.status(500).send('link_failed');
   }
 });
 
