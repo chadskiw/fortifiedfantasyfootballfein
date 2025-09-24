@@ -303,6 +303,7 @@ app.use('/api/quickhitter', require('./src/routes/quickhitter')); // check, exis
 app.use('/api/identity', require('./src/routes/identity'));       // POST /request-code, /send-code
 app.use('/api/identity', require('./src/routes/upsert'));         // POST /handle/upsert
 app.use('/api/espn', require('./routes/espn-cred'));
+app.use('/api/platforms/espn', require('./routes/platforms/espn-link'));
 
 // optional profile alias if you want /api/profile/claim-username to exist
 try { app.use('/api/profile', require('./src/routes/upsert')); } catch { /* optional */ }
