@@ -28,6 +28,11 @@ const SUPPORTED_GAMES = ['ffl','fba','flb','fhl'];
 const DEFAULT_GAME = 'ffl';
 
 /* -------------------------------- utils ------------------------------ */
+
+
+
+
+
 function readCreds(req) {
   const c = req.cookies || {};
   const h = req.headers || {};
@@ -259,6 +264,73 @@ async function discoverSeason({ game, season, swid, s2 }) {
 
   return { ids: Array.from(ids), trace };
 }
+// in src/routes/espn/index.js (near other middleware)
+router.use(express.urlencoded({ extended: false }));
+
+// unify handler to read from body OR query
+async function linkHandler(req, res) {
+  try {
+    let swid = (req.body.swid ?? req.query.swid ?? '').toString();
+    let s2   = (req.body.s2   ?? req.query.s2   ?? '').toString();
+    if (!swid || !s2) return res.status(400).send('missing swid or s2');
+    try { swid = decodeURIComponent(swid); } catch {}
+    if (!/^\{.*\}$/.test(swid)) swid = `{${swid.replace(/^\{?|\}?$/g,'')}}`;
+    try { s2 = decodeURIComponent(s2); } catch {}
+    s2 = s2.replace(/ /g, '+'); // recover '+' turned into spaces by form/url encoding
+
+    await ensureCredsTable();
+    await upsertCred({ swid, s2 });
+
+    const secure  = process.env.NODE_ENV === 'production';
+    const oneYear = 1000*60*60*24*365;
+    res.cookie('SWID', swid,         { httpOnly:true, sameSite:'Lax', secure, maxAge:oneYear, path:'/' });
+    res.cookie('espn_s2', s2,        { httpOnly:true, sameSite:'Lax', secure, maxAge:oneYear, path:'/' });
+    res.cookie('fein_has_espn','1',  { httpOnly:false,sameSite:'Lax', secure, maxAge:1000*60*60*24*90, path:'/' });
+    res.cookie('ff_espn_swid', swid, { httpOnly:true, sameSite:'Lax', secure, maxAge:oneYear, path:'/' });
+    res.cookie('ff_espn_s2',   s2,   { httpOnly:true, sameSite:'Lax', secure, maxAge:oneYear, path:'/' });
+
+    const seasons = parseSeasons(req.query.season, req.query.seasons);
+    const games   = parseGames(req.query.game, req.query.games || 'all');
+    await ensureTables();
+
+    const keys = new Set();
+    for (const game of games) for (const season of seasons) {
+      const d = await discoverSeason({ game, season, swid, s2 });
+      d.ids.forEach(id => keys.add(`${game}:${season}:${id}`));
+    }
+
+    let leaguesIngested = 0, teamsIngested = 0;
+    for (const key of keys) {
+      const [game, seasonStr, id] = key.split(':'); const season = parseInt(seasonStr,10);
+      try {
+        const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${id}?view=mTeam&view=mSettings`;
+        const json = await fetchJSON(url, { swid, s2 });
+        const L = mapLeague(json, game);
+        await upsertLeague(L); leaguesIngested++;
+        teamsIngested += await upsertTeams(L);
+      } catch (e) { console.warn('[espn/link] ingest failed', { game, season, id, msg:e.message }); }
+    }
+
+    const to = (req.body.to || req.query.to || req.body.return || req.query.return || req.body.next || req.query.next || '/fein').toString();
+    const proto = req.headers['x-forwarded-proto'] || (secure ? 'https':'http');
+    const host  = req.headers['x-forwarded-host']  || req.headers.host;
+    const dest  = new URL(to, `${proto}://${host}`);
+    dest.searchParams.set('linked','1');
+    dest.searchParams.set('leagues', String(leaguesIngested));
+    dest.searchParams.set('teams',   String(teamsIngested));
+
+    if (String(req.query.debug||req.body.debug||'') === '1') {
+      return res.json({ ok:true, redirect: dest.toString(), leaguesIngested, teamsIngested });
+    }
+    res.redirect(302, dest.toString());
+  } catch (e) {
+    console.error('[espn/link] error', e);
+    res.status(500).send('link_failed');
+  }
+}
+
+router.get('/link',  linkHandler);
+router.post('/link', linkHandler);
 
 /* -------------------------------- routes ----------------------------- */
 
