@@ -270,6 +270,11 @@ app.get('/healthz', async (_req, res) => {
     res.status(500).type('application/json').json({ ok: false, db: false, error: e.message, ts: new Date().toISOString() });
   }
 });
+// at top
+const quickhitterRouter = require('./routes/quickhitter');
+
+// after your other app.use(...) APIs (before static/404)
+app.use('/api/quickhitter', quickhitterRouter);
 
 // ---------- Static AFTER APIs ----------
 app.use('/fein', express.static(path.join(__dirname, 'public/fein'), {
