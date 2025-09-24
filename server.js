@@ -55,6 +55,7 @@ const espnRouter = require('./src/routes/espn');
 
 // PRIMARY mount (all ESPN endpoints live here)
 app.use('/api/espn', espnRouter);
+app.use('/api/debug', require('./src/routes/debug/db'));
 
 // Root service status (fixes your /status 404 without polluting /login)
 app.get('/status', (req, res) => {
