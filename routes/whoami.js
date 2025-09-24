@@ -1,11 +1,11 @@
-// src/routes/whoami.js
+// routes/whoami.js
 // Provides:
 //   GET /check           → session summary (safe, anon OK)
 //   GET /lookup?identifier=... → existence check (email/phone/handle), safe boolean
 
 const express = require('express');
 const router  = express.Router();
-const pool    = require('../../db/pool'); // pg Pool (src/db/pool.js)
+const pool    = require('../src/db/pool'); // pg Pool (src/db/pool.js)
 
 if (!pool) throw new Error('[whoami] pg pool missing');
 
