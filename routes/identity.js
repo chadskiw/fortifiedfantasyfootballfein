@@ -1,4 +1,4 @@
-// routes/identity/handle-upsert.js  (CommonJS)
+// routes/identity.js  (CommonJS)
 const express = require('express');
 const crypto = require('crypto');
 
