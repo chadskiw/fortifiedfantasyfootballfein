@@ -380,6 +380,15 @@ router.get('/leagues', async (req, res) => {
     }
 
     await ensureTables();
+// Quick status for FE bootstrap
+router.get('/login', (req, res) => {
+  const c = req.cookies || {};
+  const h = req.headers || {};
+  const swid = c.SWID || c.swid || h['x-espn-swid'] || null;
+  const s2   = c.espn_s2 || c.ESPN_S2 || h['x-espn-s2'] || null;
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: true, step: (swid && s2) ? 'logged_in' : 'link_needed' });
+});
 
     // Discover per (game, season)
     const discovered = { games, seasons, byGame: {}, totalIds: 0 };

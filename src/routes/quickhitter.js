@@ -138,6 +138,74 @@ function verify(signed){
   const want = crypto.createHmac('sha256', FLOW_SECRET).update(val).digest('base64url');
   return crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want)) ? val : null;
 }
+// --- Add near the other helpers ---
+async function existsInMemberOrQH({ handle=null, email=null, phone=null }) {
+  const out = { handle:false, email:false, phone:false };
+  if (handle) {
+    const r1 = await pool.query(`SELECT 1 FROM ff_member WHERE LOWER(username)=LOWER($1) LIMIT 1`, [handle]);
+    const r2 = await pool.query(`SELECT 1 FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1) LIMIT 1`, [handle]);
+    out.handle = !!(r1.rows[0] || r2.rows[0]);
+  }
+  if (email) {
+    const r1 = await pool.query(`SELECT 1 FROM ff_member WHERE LOWER(email)=LOWER($1) LIMIT 1`, [email]);
+    const r2 = await pool.query(`SELECT 1 FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) LIMIT 1`, [email]);
+    out.email = !!(r1.rows[0] || r2.rows[0]);
+  }
+  if (phone) {
+    const r1 = await pool.query(`SELECT 1 FROM ff_member WHERE phone_e164=$1 LIMIT 1`, [phone]);
+    const r2 = await pool.query(`SELECT 1 FROM ff_quickhitter WHERE phone=$1 LIMIT 1`, [phone]);
+    out.phone = !!(r1.rows[0] || r2.rows[0]);
+  }
+  return out;
+}
+
+// --- New: /api/identity/status ---
+router.get('/status', async (req, res) => {
+  try {
+    await ensureTables();
+    const memberId = req.cookies?.ff_member || null;
+
+    let qh = null;
+    if (memberId) {
+      const { rows } = await pool.query(`
+        SELECT handle, email, phone, color_hex, avatar_url
+          FROM ff_quickhitter
+         WHERE member_id=$1
+         ORDER BY updated_at DESC
+         LIMIT 1
+      `, [memberId]);
+      qh = rows[0] || null;
+    }
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      memberId: memberId || null,
+      quickhitter: qh || null
+    });
+  } catch (e) {
+    console.error('[identity/status]', e);
+    res.status(500).json({ ok:false, error:'internal_error' });
+  }
+});
+
+// --- New: /api/quickhitter/check (legacy path, but we can mount this router there too) ---
+router.get('/check', async (req, res) => {
+  try {
+    const h = req.query.handle ? normHandle(req.query.handle) : null;
+    const e = req.query.email  ? normEmail(req.query.email)   : null;
+    const p = req.query.phone  ? normPhone(req.query.phone)   : null;
+    if (!h && !e && !p) return res.status(422).json({ ok:false, error:'missing_params' });
+
+    await ensureTables();
+    const exists = await existsInMemberOrQH({ handle:h, email:e, phone:p });
+
+    res.json({ ok:true, exists });
+  } catch (e) {
+    console.error('[quickhitter/check]', e);
+    res.status(500).json({ ok:false, error:'internal_error' });
+  }
+});
 
 /* ----------------------------- routes ---------------------------- */
 
