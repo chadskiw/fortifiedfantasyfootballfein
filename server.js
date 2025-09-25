@@ -44,7 +44,10 @@ app.get('/status', (req, res) => {
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
-app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
+//app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
+app.use('/api/whoami', require('./routes/whoami'));
+app.use('/api/ghosts', require('./routes/ghosts'));
+app.use('/api/identity', require('./routes/identity/resolve'));  // adds /api/identity/resolve
 
 app.use('/api/identity',         require('./routes/identity/request-code')); // /request-code, /send-code
 const qh = require('./routes/quickhitter');  
