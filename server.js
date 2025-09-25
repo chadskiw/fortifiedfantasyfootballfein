@@ -53,8 +53,22 @@ app.use('/api/whoami', whoami);
 // server.js
 const espnRouter = require('./src/routes/espn');
 const espnLog = require('./src/routes/espn/login');
+
+// Modern routes
+app.use('/api/identity', require('./src/routes/identity/quickhitter'));
+app.use('/api/session',  require('./src/routes/session')); // if you added it earlier
+
+// Legacy/compat aliases
+app.use('/api/platforms/espn', require('./src/routes/platforms/espn')); // fixes /api/platforms/espn/*
+app.use('/api/quickhitter',    require('./src/routes/identity/quickhitter')); // exposes /check
+app.use('/api/members',        require('./src/routes/members')); // fixes /api/members/lookup
+
+
+// (optional) make sure body parsers exist once globally:
+// app.use(express.json({ limit: '5mb' }));
+// app.use(express.urlencoded({ extended:false }));
+
 // PRIMARY mount (all ESPN endpoints live here)
-app.use('/api/espn', espnRouter);
 app.use('/api/debug', require('./src/routes/debug/db'));
 app.use('/api/espn/login', espnLog);
 // Root service status (fixes your /status 404 without polluting /login)

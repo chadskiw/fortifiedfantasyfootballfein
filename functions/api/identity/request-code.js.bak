@@ -1,0 +1,11 @@
+// POST /api/identity/request-code  body:{identifier}
+const token = crypto.randomBytes(16).toString('base64url');
+await db.query(`
+  INSERT INTO ff_identity_requests(identifier, token, sent_at, used_at)
+  VALUES ($1,$2, now(), NULL)
+  ON CONFLICT (identifier) DO UPDATE SET token=$2, sent_at=now(), used_at=NULL
+`, [identifier, token]);
+
+const url = `https://fortifiedfantasy.com/api/identity/confirm?token=${encodeURIComponent(token)}`;
+await NotificationAPI.send({ to: identifier, template: 'verify_link', data:{ url } });
+res.json({ ok:true });
