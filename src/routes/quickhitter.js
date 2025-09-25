@@ -11,18 +11,24 @@
 
 const express = require('express');
 const crypto  = require('crypto');
-const sharp   = require('sharp');
 
+const { putAvatarReturnBoth } = require('../../lib/rs');
 // Works with default or named export
 let pool = require('../db/pool');
 if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool;
 if (!pool || typeof pool.query !== 'function') throw new Error('[qh] pool missing');
 
-const { putAvatarFromDataUrl } = require('../../lib/rs');
+// replace the old rs import with:
+const { putAvatarReturnBoth } = require('../../lib/rs');
 
 const router = express.Router();
 router.use(express.json({ limit: '5mb' }));
 router.use(express.urlencoded({ extended: false }));
+// replace: const sharp = require('sharp');
+let Sharp = null;
+try { Sharp = require('sharp'); } catch (e) {
+  console.warn('[identity] sharp not available; will store raw images:', e.message);
+}
 
 /* ---------------------- validation + utils ---------------------- */
 
@@ -119,7 +125,11 @@ async function upsertQuickhitter({ member_id=null, handle=null, email=null, phon
   `, [next.member_id, next.handle, next.email, next.phone, next.color_hex, next.avatar_url]);
 
   return next;
+}function detectContentType(dataUrl) {
+  const m = /^data:([^;]+);base64,/.exec(String(dataUrl));
+  return m ? m[1] : 'image/jpeg';
 }
+
 
 /* -------------------------- flow cookie -------------------------- */
 // httpOnly, HMAC-signed flow marker (not readable from JS)
@@ -270,18 +280,35 @@ router.post('/qh-upsert', async (req,res) => {
     }
 
     // avatar upload if provided
-    let avatarUrl = null;
-    if (b.avatarDataUrl && String(b.avatarDataUrl).startsWith('data:')){
-      // resize to square ~256px jpg
-      const out = await sharp(Buffer.from(b.avatarDataUrl.split(',')[1], 'base64'))
-        .resize(256, 256, { fit:'cover' })
-        .jpeg({ quality:78 })
-        .toBuffer();
-      avatarUrl = await putAvatarFromDataUrl({ bytes: out, memberId: memberId || 'anon', contentType:'image/jpeg' });
+// avatar upload if provided
+// avatar upload if provided — sharp is optional
+let image_key = null, public_url = null;
+if (b.avatarDataUrl && String(b.avatarDataUrl).startsWith('data:')) {
+  const ct = detectContentType(b.avatarDataUrl);
+  const raw = Buffer.from(String(b.avatarDataUrl).split(',')[1], 'base64');
+
+  let bytes = raw; // default to raw
+  if (Sharp) {
+    try {
+      bytes = await Sharp(raw).resize(256, 256, { fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
+    } catch (e) {
+      console.warn('[qh-upsert] sharp resize failed; storing raw:', e.message);
+      bytes = raw;
     }
+  }
 
-    const rec = await upsertQuickhitter({ member_id:memberId, handle, email, phone, hex, avatar_url: avatarUrl || undefined });
+  const put = await putAvatarReturnBoth({ bytes, memberId: memberId || 'anon', contentType: ct });
+  image_key = put.key; public_url = put.url;
+}
 
+
+
+    const rec = await upsertQuickhitter({
+  member_id: memberId,
+  handle, email, phone, hex,
+  image_key,
+  avatar_url: public_url || null // optional legacy column if you kept it
+});
     // mirror into ff_member when possible
     if (memberId){
       await pool.query(`
@@ -298,7 +325,10 @@ router.post('/qh-upsert', async (req,res) => {
     // mark flow step
     res.cookie(FLOW_COOKIE, sign('signup:qh'), { httpOnly:true, sameSite:'Lax', secure:process.env.NODE_ENV==='production', path:'/' });
 
-    res.json({ ok:true, record: rec, avatar_url: avatarUrl || rec.avatar_url || null });
+
+
+// respond with both for UI convenience
+res.json({ ok:true, record: rec, image_key, url: public_url });
   } catch(e){
     console.error('[qh-upsert]', e);
     res.status(500).json({ ok:false, error:'internal_error' });
@@ -307,26 +337,37 @@ router.post('/qh-upsert', async (req,res) => {
 
 // POST /api/identity/avatar { avatarDataUrl }
 router.post('/avatar', async (req,res) => {
-  try{
+  try {
     const memberId = req.cookies?.ff_member || 'anon';
-    const dataUrl = String(req.body?.avatarDataUrl || '');
-    if (!dataUrl.startsWith('data:')) return res.status(422).json({ ok:false, error:'invalid_data_url' });
+    const dataUrl  = String(req.body?.avatarDataUrl || '');
+    if (!dataUrl.startsWith('data:')) {
+      return res.status(422).json({ ok:false, error:'invalid_data_url' });
+    }
 
-    const out = await sharp(Buffer.from(dataUrl.split(',')[1], 'base64'))
-      .resize(256,256,{fit:'cover'})
-      .jpeg({ quality:78 })
-      .toBuffer();
+    const ct   = detectContentType(dataUrl);
+    const raw  = Buffer.from(dataUrl.split(',')[1], 'base64');
 
-    const url = await putAvatarFromDataUrl({ bytes: out, memberId, contentType: 'image/jpeg' });
+    let bytes = raw;
+    if (Sharp) {
+      try {
+        bytes = await Sharp(raw).resize(256,256,{ fit:'cover' }).jpeg({ quality:78 }).toBuffer();
+      } catch (e) {
+        console.warn('[avatar] sharp resize failed; storing raw:', e.message);
+        bytes = raw;
+      }
+    }
+
+    const put = await putAvatarReturnBoth({ bytes, memberId, contentType: ct });
 
     await ensureTables();
-    await upsertQuickhitter({ member_id: memberId, avatar_url: url });
+    await upsertQuickhitter({ member_id: memberId, image_key: put.key, avatar_url: put.url });
 
-    res.json({ ok:true, url });
-  } catch(e){
+    res.json({ ok:true, image_key: put.key, url: put.url });
+  } catch (e) {
     console.error('[avatar]', e);
     res.status(500).json({ ok:false, error:'internal_error' });
   }
 });
+
 
 module.exports = router;
