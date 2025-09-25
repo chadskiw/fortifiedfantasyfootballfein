@@ -24,10 +24,25 @@ const router = express.Router();
 router.use(express.json({ limit: '5mb' }));
 router.use(express.urlencoded({ extended: false }));
 // replace: const sharp = require('sharp');
+// safe sharp import
+// safe sharp import (works even if sharp isn't installed)
 let Sharp = null;
 try { Sharp = require('sharp'); } catch (e) {
-  console.warn('[identity] sharp not available; will store raw images:', e.message);
+  console.warn('[identity] sharp not available; storing raw bytes:', e.message);
 }
+
+// RS helper (works with old/new rs.js)
+const rs = require('../../lib/rs');
+const putAvatarReturnBoth = rs.putAvatarReturnBoth || (async ({ bytes, memberId='anon', contentType='image/jpeg' }) => {
+  const url = await rs.putAvatarFromDataUrl({ bytes, memberId, contentType }); // old helper returns URL/path
+  const key = (() => {
+    const s = String(url);
+    if (!/^https?:\/\//i.test(s)) return s.replace(/^\/+/, '');
+    try { const u = new URL(s); return u.pathname.replace(/^\/+/, ''); } catch { return s; }
+  })();
+  return { key, url };
+});
+
 
 /* ---------------------- validation + utils ---------------------- */
 
@@ -35,6 +50,10 @@ const HANDLE_RE = /^[a-zA-Z0-9_.](?:[a-zA-Z0-9_. ]{1,22})[a-zA-Z0-9_.]$/; // all
 const EMAIL_RE  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const PHONE_RE  = /^\+?[0-9\-\s().]{7,}$/;
 const HEX_RE    = /^#?[0-9a-f]{6}$/i;
+function detectContentType(dataUrl) {
+  const m = /^data:([^;]+);base64,/.exec(String(dataUrl || ''));
+  return m ? m[1] : 'image/jpeg';
+}
 
 const normHandle = h => {
   const raw = String(h || '').trim().replace(/\s{2,}/g, ' ');
@@ -269,73 +288,73 @@ router.post('/qh-upsert', async (req,res) => {
   try{
     const b = req.body || {};
     const memberId = req.cookies?.ff_member || null;
+
+    // normalize inputs
     const handle = b.handle ? normHandle(b.handle) : null;
     const email  = b.email  ? normEmail(b.email)   : null;
     const phone  = b.phone  ? normPhone(b.phone)   : null;
     const hex    = b.hex    ? normHex(b.hex)       : null;
 
-    if (!handle && !email && !phone) {
+    if (!handle && !email && !phone && !hex && !b.avatarDataUrl) {
       return res.status(422).json({ ok:false, error:'nothing_to_upsert' });
     }
 
-    // avatar upload if provided
-// avatar upload if provided
-// avatar upload if provided — sharp is optional
-let image_key = null, public_url = null;
-if (b.avatarDataUrl && String(b.avatarDataUrl).startsWith('data:')) {
-  const ct = detectContentType(b.avatarDataUrl);
-  const raw = Buffer.from(String(b.avatarDataUrl).split(',')[1], 'base64');
+    // optional avatar upload (sharp optional)
+    let image_key = null, public_url = null;
+    if (b.avatarDataUrl && String(b.avatarDataUrl).startsWith('data:')) {
+      const ct  = detectContentType(b.avatarDataUrl);
+      const raw = Buffer.from(String(b.avatarDataUrl).split(',')[1], 'base64');
 
-  let bytes = raw; // default to raw
-  if (Sharp) {
-    try {
-      bytes = await Sharp(raw).resize(256, 256, { fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
-    } catch (e) {
-      console.warn('[qh-upsert] sharp resize failed; storing raw:', e.message);
-      bytes = raw;
+      let bytes = raw;
+      if (Sharp) {
+        try {
+          bytes = await Sharp(raw).resize(256,256,{ fit:'cover' }).jpeg({ quality:78 }).toBuffer();
+        } catch (e) {
+          console.warn('[qh-upsert] sharp resize failed; storing raw:', e.message);
+          bytes = raw;
+        }
+      }
+
+      const put = await putAvatarReturnBoth({ bytes, memberId: memberId || 'anon', contentType: ct });
+      image_key = put.key; public_url = put.url;
     }
-  }
 
-  const put = await putAvatarReturnBoth({ bytes, memberId: memberId || 'anon', contentType: ct });
-  image_key = put.key; public_url = put.url;
-}
+    await ensureTables();
 
-
-
+    // your existing helper should enforce collisions; if not, add checks above
     const rec = await upsertQuickhitter({
-  member_id: memberId,
-  handle, email, phone, hex,
-  image_key,
-  avatar_url: public_url || null // optional legacy column if you kept it
-});
+      member_id: memberId,
+      handle, email, phone, hex,
+      image_key,
+      avatar_url: public_url || null // keep legacy column in sync if you still have it
+    });
+
     // mirror into ff_member when possible
     if (memberId){
       await pool.query(`
         UPDATE ff_member
-           SET username = COALESCE($1, username),
-               email    = COALESCE($2, email),
+           SET username   = COALESCE($1, username),
+               email      = COALESCE($2, email),
                phone_e164 = COALESCE($3, phone_e164),
-               color_hex= COALESCE($4, color_hex),
+               color_hex  = COALESCE($4, color_hex),
                last_seen_at = NOW()
-         WHERE member_id = $5
+         WHERE member_id  = $5
       `, [handle, email, phone, hex, memberId]);
     }
 
-    // mark flow step
-    res.cookie(FLOW_COOKIE, sign('signup:qh'), { httpOnly:true, sameSite:'Lax', secure:process.env.NODE_ENV==='production', path:'/' });
+    // ⬇️ THIS is the line you asked about — send both key & url back to the UI
+    return res.json({ ok:true, record:rec, image_key, url: public_url });
 
-
-
-// respond with both for UI convenience
-res.json({ ok:true, record: rec, image_key, url: public_url });
   } catch(e){
-    console.error('[qh-upsert]', e);
-    res.status(500).json({ ok:false, error:'internal_error' });
+    console.error('[qh-upsert] error:', e);
+    return res.status(500).json({ ok:false, error:'internal_error' });
   }
 });
 
+
 // POST /api/identity/avatar { avatarDataUrl }
 router.post('/avatar', async (req,res) => {
+  const debug = String(req.query.debug || '') === '1';
   try {
     const memberId = req.cookies?.ff_member || 'anon';
     const dataUrl  = String(req.body?.avatarDataUrl || '');
@@ -343,8 +362,8 @@ router.post('/avatar', async (req,res) => {
       return res.status(422).json({ ok:false, error:'invalid_data_url' });
     }
 
-    const ct   = detectContentType(dataUrl);
-    const raw  = Buffer.from(dataUrl.split(',')[1], 'base64');
+    const ct  = detectContentType(dataUrl);
+    const raw = Buffer.from(dataUrl.split(',')[1], 'base64');
 
     let bytes = raw;
     if (Sharp) {
@@ -361,12 +380,16 @@ router.post('/avatar', async (req,res) => {
     await ensureTables();
     await upsertQuickhitter({ member_id: memberId, image_key: put.key, avatar_url: put.url });
 
-    res.json({ ok:true, image_key: put.key, url: put.url });
+    // consistent response shape for the UI
+    return res.json({ ok:true, image_key: put.key, url: put.url });
+
   } catch (e) {
-    console.error('[avatar]', e);
-    res.status(500).json({ ok:false, error:'internal_error' });
+    console.error('[avatar] error:', e);
+    if (debug) return res.status(500).json({ ok:false, error:'internal_error', detail:String(e?.message||e) });
+    return res.status(500).json({ ok:false, error:'internal_error' });
   }
 });
+
 
 
 module.exports = router;
