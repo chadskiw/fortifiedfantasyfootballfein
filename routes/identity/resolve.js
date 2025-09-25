@@ -1,6 +1,6 @@
 // src/routes/identity/resolve.js
 const express = require('express');
-const pool = require('../../db/pool');
+const pool = require('../../src/db/pool');
 const router = express.Router();
 
 /* ---------- helpers ---------- */
