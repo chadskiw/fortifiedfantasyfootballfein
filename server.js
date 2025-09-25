@@ -64,6 +64,35 @@ try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
 
 // optional debug
 try { app.use('/api/debug',      require('./routes/debug/db')); } catch (_) {}
+// ---- Compatibility adapters (keep the FE happy without code changes)
+
+// 1) FE calls /api/verify/start → send a one-time code
+//    Forward (307 preserves method+body) to your existing identity route.
+app.post('/api/verify/start', (req, res) => {
+  res.redirect(307, '/api/identity/request-code');
+});
+
+// (optional) If your FE ever calls /api/verify/confirm, map it to your verifier.
+// If your verifier is at /api/identity/verify-code, keep that; if you only have
+// /api/identity/send-code, change the target accordingly.
+app.post('/api/verify/confirm', (req, res) => {
+  res.redirect(307, '/api/identity/verify-code'); // or '/api/identity/send-code' if that's your confirm path
+});
+
+// 2) FE may post /api/quickhitter/upsert or /api/identity/upsert,
+//    but your router exposes /api/quickhitter/qh-upsert.
+//    Add light 307 shims for both.
+app.post('/api/quickhitter/upsert', (req, res) => {
+  res.redirect(307, '/api/quickhitter/qh-upsert');
+});
+app.post('/api/identity/upsert', (req, res) => {
+  res.redirect(307, '/api/quickhitter/qh-upsert');
+});
+
+// 3) Some FE builds hit /api/identity/whoami; normalize to your whoami.
+app.get('/api/identity/whoami', (req, res) => {
+  res.redirect(307, '/api/whoami');
+});
 
 // Static
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
@@ -73,6 +102,11 @@ app.use('/api', (req, res, next) => {
   if (res.headersSent) return next();
   res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
 });
+
+
+
+
+
 
 // Errors
 app.use((err, _req, res, _next) => {
