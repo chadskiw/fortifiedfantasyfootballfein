@@ -55,12 +55,12 @@ const espnRouter = require('./src/routes/espn');
 const espnLog = require('./src/routes/espn/login');
 
 // Modern routes
-app.use('/api/identity', require('./src/routes/identity/quickhitter'));
-app.use('/api/session',  require('./src/routes/session')); // if you added it earlier
+app.use('/api/identity', require('./src/routes/quickhitter'));
+app.use('/api/session',  require('./routes/session')); // if you added it earlier
 
 // Legacy/compat aliases
 app.use('/api/platforms/espn', require('./src/routes/platforms/espn')); // fixes /api/platforms/espn/*
-app.use('/api/quickhitter',    require('./src/routes/identity/quickhitter')); // exposes /check
+app.use('/api/quickhitter',    require('./src/routes/quickhitter')); // exposes /check
 app.use('/api/members',        require('./src/routes/members')); // fixes /api/members/lookup
 
 
