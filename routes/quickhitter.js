@@ -2,9 +2,13 @@
 const express = require('express');
 
 // You exported pool & query from server.js; import accordingly:
-const pool = require('../src/db/pool'); // direct, no circular dep
 const router = express.Router();
 router.use(express.json());
+let db = require('../src/db/pool');          // adjust path
+let pool = db.pool || db;                    // supports both { pool } and default
+if (!pool || typeof pool.query !== 'function') {
+  throw new Error('[pg] pool.query not available—check require path/export');
+}
 
 // ---------------- helpers ----------------
 const HEX_RE = /^[#]?[0-9a-fA-F]{6}$/;
