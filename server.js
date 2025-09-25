@@ -60,7 +60,8 @@ app.use('/api/session',  require('./routes/session')); // if you added it earlie
 
 // Legacy/compat aliases
 app.use('/api/platforms/espn', require('./src/routes/platforms/espn')); // fixes /api/platforms/espn/*
-app.use('/api/quickhitter',    require('./src/routes/quickhitter')); // exposes /check
+// server.js
+app.use('/api/quickhitter', require('./src/routes/quickhitter'));
 app.use('/api/members',        require('./src/routes/members')); // fixes /api/members/lookup
 
 
