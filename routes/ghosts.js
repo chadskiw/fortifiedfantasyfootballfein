@@ -1,5 +1,5 @@
 const express = require('express');
-const pool = require('../db/pool');
+const pool = require('../src/db/pool');
 const { normalizeSwid } = require('../lib/espn');
 
 const router = express.Router();
