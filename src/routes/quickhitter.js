@@ -7,13 +7,14 @@
 //
 // Also sets an httpOnly, signed flow cookie "ff_flow" to mark progress.
 // Avatar upload supports RS/S3 via env; falls back to local tmp if not configured.
+//Added sharp npm i sharp @aws-sdk/client-s3
 
 const express = require('express');
 const crypto  = require('crypto');
 const sharp   = require('sharp');
 
 // Works with default or named export
-let pool = require('../../db/pool');
+let pool = require('../db/pool');
 if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool;
 if (!pool || typeof pool.query !== 'function') throw new Error('[qh] pool missing');
 
