@@ -19,7 +19,6 @@ if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool
 if (!pool || typeof pool.query !== 'function') throw new Error('[qh] pool missing');
 
 // replace the old rs import with:
-const { putAvatarReturnBoth } = require('../../lib/rs');
 
 const router = express.Router();
 router.use(express.json({ limit: '5mb' }));
