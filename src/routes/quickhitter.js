@@ -2,8 +2,12 @@
 const express = require('express');
 const router  = express.Router();
 
-const pool = require('../db/pool'); // <-- your pool.js at repo root
-if (!pool?.query) throw new Error('[quickhitter] pg pool missing');
+// ✅ robust import: works whether pool.js exports default or { pool }
+const db = require('../db/pool');              // NOTE: path is ../db/pool (NOT ../src/db/pool)
+const pool = db.pool || db;
+if (!pool || typeof pool.query !== 'function') {
+  throw new Error('[quickhitter] pg pool missing (check require path/export)');
+}
 
 router.use(express.json({ limit: '1mb' }));
 
