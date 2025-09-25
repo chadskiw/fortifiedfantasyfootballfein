@@ -43,18 +43,18 @@ app.get('/status', (req, res) => {
 });
 
 // Routers (canonical locations under src/routes/*)
-app.use('/api/session',          require('./src/routes/session'));               // whoami source of truth
+app.use('/api/session',          require('./routes/session'));               // whoami source of truth
 app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
 
-app.use('/api/identity',         require('./src/routes/identity/request-code')); // /request-code, /send-code
+app.use('/api/identity',         require('./routes/identity/request-code')); // /request-code, /send-code
 const qh = require('./src/routes/quickhitter');                                  // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
-app.use('/api/members',          require('./src/routes/members'));
+app.use('/api/members',          require('./routes/members'));
 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
-app.use('/api/platforms/espn',   require('./src/routes/platforms/espn'));        // legacy alias surface
+app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
 // optional: if login is its own file and not included above
 try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
 
