@@ -302,10 +302,10 @@ router.post('/request-code', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
-
+/*
 router.post('/send-code', (req, res, next) => {
   req.url = '/request-code';
   next();
 });
-
+*/
 module.exports = router;

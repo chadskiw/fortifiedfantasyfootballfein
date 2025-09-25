@@ -275,7 +275,7 @@ module.exports = function createRequestCodeRouter(pool) {
   });
 
   // Alias to support /send-code
-  router.post('/send-code', (req, res, next) => { req.url = '/request-code'; next(); });
+  //router.post('/send-code', (req, res, next) => { req.url = '/request-code'; next(); });
 
   // GET /api/identity/confirm?token=...
   router.get('/confirm', async (req, res) => {
