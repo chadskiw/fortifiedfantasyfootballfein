@@ -12,7 +12,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 
-const { putAvatarReturnBoth } = require('../../lib/rs');
+//const { putAvatarReturnBoth } = require('../../lib/rs');
 // Works with default or named export
 let pool = require('../db/pool');
 if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool;
