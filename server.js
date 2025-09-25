@@ -1,5 +1,4 @@
-// server.js — FF Platform Service (identity + whoami + espn)
-// ---------------------------------------------------------
+// server.js — FF Platform Service
 require('dotenv').config();
 
 const express      = require('express');
@@ -11,9 +10,9 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
-// logging + parsers
+// Parsers & logs
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '1mb', strict: false }));
+app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -28,68 +27,41 @@ const allow = {
 app.options('*', (req, res) => res.set(allow).sendStatus(204));
 app.use((req, res, next) => { res.set(allow); next(); });
 
-// health
+// Health & Status
 app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-// ---- APIs ----
-
-// Identity (request/send code)
-app.use('/api/identity', require('./src/routes/identity/request-code'));
-
-// WhoAmI (root + alias)
-//   GET /check
-//   GET /lookup?identifier=...
-const whoami = require('./routes/whoami');
-app.use('/', whoami);
-app.use('/api/whoami', whoami);
-
-// ESPN (root + /api/espn):
-//   GET /status           (also /api/espn/status)
-//   GET /login            (also /api/espn/login)
-//   GET /leagues?season=2025 (also /api/espn/leagues?season=2025)
-// server.js
-const espnRouter = require('./src/routes/espn');
-const espnLog = require('./src/routes/espn/login');
-
-// Modern routes
-app.use('/api/identity', require('./src/routes/quickhitter'));
-app.use('/api/session',  require('./routes/session')); // if you added it earlier
-
-// Legacy/compat aliases
-app.use('/api/platforms/espn', require('./src/routes/platforms/espn')); // fixes /api/platforms/espn/*
-// server.js
-app.use('/api/quickhitter', require('./src/routes/quickhitter.js'));
-app.use('/api/members',        require('./src/routes/members')); // fixes /api/members/lookup
-
-
-// (optional) make sure body parsers exist once globally:
-// app.use(express.json({ limit: '5mb' }));
-// app.use(express.urlencoded({ extended:false }));
-
-// PRIMARY mount (all ESPN endpoints live here)
-app.use('/api/debug', require('./src/routes/debug/db'));
-app.use('/api/espn/login', espnLog);
-// Root service status (fixes your /status 404 without polluting /login)
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
   const swid = c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || null;
   const s2   = c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null;
-
   res.set('Cache-Control', 'no-store');
-  res.json({
-    ok: true,
-    name: 'ff-platform-service',
-    ts: new Date().toISOString(),
-    espn: { hasCookies: !!(swid && s2) }
-  });
+  res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 
+// Routers (canonical locations under src/routes/*)
+app.use('/api/session',          require('./src/routes/session'));               // whoami source of truth
+app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
 
-// static
+app.use('/api/identity',         require('./src/routes/identity/request-code')); // /request-code, /send-code
+const qh = require('./src/routes/quickhitter');                                  // /check, /exists, /lookup, /avatar, /qh-upsert
+app.use('/api/quickhitter', qh);
+app.use('/api/identity',   qh); // alias for legacy FE calls
+
+app.use('/api/members',          require('./src/routes/members'));
+
+app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
+app.use('/api/platforms/espn',   require('./src/routes/platforms/espn'));        // legacy alias surface
+// optional: if login is its own file and not included above
+try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
+
+// optional debug
+try { app.use('/api/debug',      require('./routes/debug/db')); } catch (_) {}
+
+// Static
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
 
 // JSON 404 for /api
@@ -98,13 +70,13 @@ app.use('/api', (req, res, next) => {
   res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
 });
 
-// errors
+// Errors
 app.use((err, _req, res, _next) => {
   console.error('[unhandled]', err);
   if (res.headersSent) return;
   res.status(err.status || 500).json({ ok:false, error:'server_error' });
 });
 
-// start
+// Boot
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`FF Platform Service listening on :${port}`));
