@@ -47,7 +47,8 @@ app.use('/api/session',          require('./routes/session'));               // 
 app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
 
 app.use('/api/identity',         require('./routes/identity/request-code')); // /request-code, /send-code
-const qh = require('./src/routes/quickhitter');                                  // /check, /exists, /lookup, /avatar, /qh-upsert
+const qh = require('./routes/quickhitter');  
+                                // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
