@@ -49,7 +49,13 @@ app.use('/api/whoami', require('./routes/whoami'));
 app.use('/api/ghosts', require('./routes/ghosts'));
 app.use('/api/identity', require('./routes/identity/resolve'));  // adds /api/identity/resolve
 
-app.use('/api/identity',         require('./routes/identity/request-code')); // /request-code, /send-code
+
+app.use('/api/identity', require('./routes/identity/request-code'));
+app.use('/api/identity', require('./routes/identity/verify-code'));
+app.post('/api/verify/start', require('./routes/identity/request-code')); // legacy alias
+
+
+
 const qh = require('./routes/quickhitter');  
                                 // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
