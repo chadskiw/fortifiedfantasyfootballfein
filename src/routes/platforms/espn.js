@@ -4,7 +4,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const espnRouter = require('../espn'); // resolves to src/routes/espn/index.js
+const espnRouter = require('../../../routes/espn'); // resolves to src/routes/espn/index.js
 
 // Mount the modern routes under this legacy base:
 // -> /api/platforms/espn/status, /leagues, /discover, /link, /login
