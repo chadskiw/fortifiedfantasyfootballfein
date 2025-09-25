@@ -2,7 +2,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 
-const db = require('../db/pool');
+const db = require('../src/db/pool');
 const pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') throw new Error('[session] pg pool missing');
 

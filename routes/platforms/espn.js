@@ -1,10 +1,10 @@
 // src/routes/platforms/espn.js
 const express = require('express');
-const db = require('../db/pool');
+const db = require('../../src/db/pool');
 const pool = db.pool || db;
 if (!pool?.query) throw new Error('[platforms/espn] pg pool missing');
 
-const sessionRouter = require('./session'); // for createSession + cookie
+const sessionRouter = require('../session'); // for createSession + cookie
 const router = express.Router();
 router.use(express.json({ limit:'1mb' }));
 

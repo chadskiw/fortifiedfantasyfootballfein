@@ -15,7 +15,7 @@ const express = require('express');
 const router  = express.Router();
 
 // ---- pool import that works with either default or named export ----
-let pool = require('../../db/pool');
+let pool = require('../../src/db/pool');
 if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool;
 if (!pool || typeof pool.query !== 'function') {
   throw new Error('[espn] pg pool missing/invalid import');
