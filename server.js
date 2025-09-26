@@ -19,11 +19,35 @@ function requireIfExists(p) {
 }
 function mountRouter(mountPath, mod, ...factoryArgs) {
   if (!mod) return;
-  // If module exports a function, assume it's a factory → call it.
-  // Else assume it's an express.Router instance.
-  const router = (typeof mod === 'function') ? mod(...factoryArgs) : mod;
-  if (router) app.use(mountPath, router);
+
+  // If it's an Express Router instance, it's a function with .use and .handle.
+  const isExpressRouterFn =
+    typeof mod === 'function' && mod && typeof mod.use === 'function' && typeof mod.handle === 'function';
+
+  let router;
+
+  if (isExpressRouterFn) {
+    // Already a router instance → don't call it.
+    router = mod;
+  } else if (typeof mod === 'function') {
+    // Factory → call it with provided deps (e.g., pool)
+    router = mod(...factoryArgs);
+  } else {
+    // Could already be a router object (rare), accept if it looks like one.
+    router = mod;
+  }
+
+  const looksLikeRouter =
+    typeof router === 'function' && router && typeof router.use === 'function' && typeof router.handle === 'function';
+
+  if (!looksLikeRouter) {
+    console.warn('[mountRouter] Skipping', mountPath, '— module is not an Express router:', typeof router, router && Object.keys(router));
+    return;
+  }
+
+  app.use(mountPath, router);
 }
+
 function redirect307(from, to) {
   app.all(from, (req, res) => res.redirect(307, to));
 }
