@@ -32,7 +32,7 @@ app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ts: new Date().toISOString() });
 });
-const pool = require('../src/db/pool');
+const pool = require('./src/db/pool');
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
