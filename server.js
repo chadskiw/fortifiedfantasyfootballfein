@@ -42,7 +42,7 @@ app.get('/status', (req, res) => {
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
-
+app.use('/api/platforms/espn', createEspnIngestRouter(pool));
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
 //app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
@@ -82,7 +82,7 @@ app.use('/api/identity',   qh); // alias for legacy FE calls
 app.use('/api/members',          require('./routes/members'));
 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
-app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
+//app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
 // optional: if login is its own file and not included above
 try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
 
