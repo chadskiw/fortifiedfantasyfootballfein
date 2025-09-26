@@ -1,7 +1,7 @@
 // routes/session-bootstrap.js
 const express = require('express');
 const crypto = require('crypto');
-const pool = require('../src/db/pool');
+const pool = require('../../src/db/pool');
 
 const router = express.Router();
 const norm = s => String(s||'').trim().toUpperCase();
