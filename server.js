@@ -58,8 +58,7 @@ app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 // after you init app, cookies, etc.
-const createImagesRouter = require('./src/routes/images');
-app.use('/api/images', createImagesRouter());
+
 
 // --- CORS (single, global) ---------------------------------------------------
 const CORS_ALLOW = {
@@ -77,7 +76,8 @@ app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ts: new Date().toISOString() });
 });
-
+const createImagesRouter = require('./src/routes/images');
+app.use('/api/images', createImagesRouter());
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
