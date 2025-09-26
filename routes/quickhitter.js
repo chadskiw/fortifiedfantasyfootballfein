@@ -303,16 +303,24 @@ router.post('/upsert', async (req, res) => {
     const m = rowToMember(rows[0]);
 
     // refresh cookie so client flows can “see” the member
-    res.cookie('ff_member', m.member_id, {
-      httpOnly : true,
-      secure   : true,
-      sameSite : 'Lax',
-      path     : '/',
-      maxAge   : 365*24*3600*1000
-    });
+ // routes/quickhitter.js
+ res.cookie('ff_member', m.member_id, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
 
-    res.json({ ok: true, member: m });
-  } catch (e) {
+ // create session if missing
+ const sid = (req.cookies?.ff_sid) || require('crypto').randomUUID().replace(/-/g,'');
+ if (!req.cookies?.ff_sid) {
+   await pool.query(
+     `INSERT INTO ff_session (session_id, member_id, created_at, last_seen_at, ip_hash, user_agent)
+      VALUES ($1,$2, now(), now(),
+        encode(digest($3,'sha256'),'hex'), $4)
+      ON CONFLICT (session_id) DO UPDATE SET last_seen_at=now()`,
+     [ sid, m.member_id, String(req.ip||''), String(req.headers['user-agent']||'').slice(0,300) ]
+   );
+   res.cookie('ff_sid', sid, { httpOnly:true, secure:true, sameSite:'Lax', path:'/', maxAge: 30*24*3600*1000 });
+ }
+
+ res.json({ ok:true, member_id: m.member_id, handle: m.handle, color_hex: m.color_hex, image_key: m.image_key });
+}catch (e) {
     console.error('[qh.upsert]', e);
     res.status(500).json({ ok: false, error: 'server_error' });
   }

@@ -1,41 +1,39 @@
-// routes/images.js
-const express = require('express');
-const crypto  = require('crypto');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-
-const router = express.Router();
-
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_KEY,
-    secretAccessKey: process.env.R2_SECRET,
-  },
-});
-
-router.post('/presign', async (req, res) => {
+async function uploadAvatar(file) {
   try {
-    const { content_type } = req.body || {};
-    const key = `avatars/${Date.now()}-${crypto.randomUUID()}`;
-    const cmd = new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: key,
-      ContentType: content_type || 'application/octet-stream',
+    // 1) presign
+    const p = await jfetch('/api/images/presign', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content_type: file.type })
     });
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 });
-    res.json({
-      ok: true,
-      type: 'put',
-      url,
-      key,
-      public_url: `https://img.fortifiedfantasy.com/${key}`,
-    });
-  } catch (e) {
-    console.error('[images.presign]', e);
-    res.status(500).json({ ok: false, error: 'presign_failed' });
-  }
-});
+    if (!p?.ok) throw new Error('presign_failed');
 
-module.exports = router;
+    // 2) PUT to R2
+    const put = await fetch(p.url, {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type },
+      body: file
+    });
+    if (!put.ok) throw new Error(`upload_failed_${put.status}`);
+
+    // 3) now persist the key in quickhitter
+    await jfetch('/api/quickhitter/upsert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ image_key: p.key })
+    });
+
+    // 4) update ff.pre.signup so UI shows the avatar and Next
+    writePre({ ...readPre(), image_key: p.key });
+    paintMiniAvatar();
+  } catch (e) {
+    console.warn('[avatar upload] Error:', e.message || e);
+  }
+}
+
+// trigger
+document.querySelector('#hiddenFile')?.addEventListener('change', (ev) => {
+  const f = ev.target.files?.[0];
+  if (f) uploadAvatar(f);
+});
