@@ -199,46 +199,52 @@ router.get('/handle/:handle', async (req, res) => {
 // GET /api/quickhitter/lookup?handle=|email=|phone= → { ok, member }
 // Picks best match (verified first, then newest).
 // ===================================================================
+// routes/quickhitter.js  (lookup handler)
 router.get('/lookup', async (req, res) => {
-  try {
-    const handle = req.query.handle ? normHandle(req.query.handle) : null;
-    const email  = req.query.email  ? norm(req.query.email).toLowerCase() : null;
-    const phone  = req.query.phone  ? e164(req.query.phone) : null;
-
-    let rows = [];
-    let kind = 'handle';
-
+  try{
+    const { handle, email, phone } = req.query;
     if (handle) {
-      kind = 'handle';
-      ({ rows } = await pool.query(
-        `SELECT * FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1)`,
-        [handle]
-      ));
-    } else if (email && isEmail(email)) {
-      kind = 'email';
-      ({ rows } = await pool.query(
-        `SELECT * FROM ff_quickhitter WHERE LOWER(email)=LOWER($1)`,
-        [email]
-      ));
-    } else if (phone) {
-      kind = 'phone';
-      ({ rows } = await pool.query(
-        `SELECT * FROM ff_quickhitter WHERE phone=$1`,
-        [phone]
-      ));
-    } else {
-      return res.status(400).json({ ok: false, error: 'bad_request' });
+      const { rows } = await pool.query(`
+        SELECT q.member_id, q.handle, q.color_hex, q.image_key,
+               q.email, q.phone,
+               (fm.member_id IS NOT NULL) AS is_member
+          FROM ff_quickhitter q
+          LEFT JOIN ff_member fm ON fm.member_id = q.member_id
+         WHERE LOWER(q.handle)=LOWER($1)
+         ORDER BY q.updated_at DESC
+         LIMIT 32
+      `,[String(handle)]);
+      return res.json({ ok:true, candidates: rows });
     }
-
-    if (!rows.length) return res.json({ ok: true, member: null });
-
-    const [best] = orderByVerificationThenRecency(rows, kind);
-    return res.json({ ok: true, member: rowToMember(best) });
-  } catch (e) {
+    if (email) {
+      const { rows } = await pool.query(`
+        SELECT q.member_id, q.handle, q.color_hex, q.image_key, q.email, q.phone,
+               (fm.member_id IS NOT NULL) AS is_member
+          FROM ff_quickhitter q
+          LEFT JOIN ff_member fm ON fm.member_id = q.member_id
+         WHERE LOWER(q.email)=LOWER($1)
+         LIMIT 1
+      `,[String(email).toLowerCase()]);
+      return res.json({ ok:true, candidates: rows });
+    }
+    if (phone) {
+      const { rows } = await pool.query(`
+        SELECT q.member_id, q.handle, q.color_hex, q.image_key, q.email, q.phone,
+               (fm.member_id IS NOT NULL) AS is_member
+          FROM ff_quickhitter q
+          LEFT JOIN ff_member fm ON fm.member_id = q.member_id
+         WHERE q.phone=$1
+         LIMIT 1
+      `,[String(phone)]);
+      return res.json({ ok:true, candidates: rows });
+    }
+    res.status(400).json({ ok:false, error:'bad_request' });
+  }catch(e){
     console.error('[qh.lookup]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // ===================================================================
 // POST /api/quickhitter/upsert
