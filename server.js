@@ -41,6 +41,7 @@ app.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
+app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
@@ -48,6 +49,7 @@ app.use('/api/session',          require('./routes/session'));               // 
 app.use('/api/whoami', require('./routes/whoami'));
 app.use('/api/ghosts', require('./routes/ghosts'));
 app.use('/api/identity', require('./routes/identity/resolve'));  // adds /api/identity/resolve
+app.use('/api/session', require('./routes/session/loginFromPre'));
 
 
 app.use('/api/identity', require('./routes/identity/request-code'));
