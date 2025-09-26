@@ -32,8 +32,3 @@ async function uploadAvatar(file) {
   }
 }
 
-// trigger
-document.querySelector('#hiddenFile')?.addEventListener('change', (ev) => {
-  const f = ev.target.files?.[0];
-  if (f) uploadAvatar(f);
-});
