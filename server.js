@@ -32,7 +32,7 @@ app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ts: new Date().toISOString() });
 });
-
+const pool = require('../src/db/pool');
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
@@ -43,7 +43,7 @@ app.get('/status', (req, res) => {
 });
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
-app.use('/api/platforms/espn', require('./routes/espn-ingest'));
+app.use('/api/platforms/espn', require('./routes/espn-ingest', pool));
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
