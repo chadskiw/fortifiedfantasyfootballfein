@@ -88,6 +88,17 @@ function clearAuthCookies(res) {
 }
 
 /* ---------- routes ---------- */
+// GET /api/session/bootstrap  → soft status (never 401)
+router.get('/bootstrap', async (req, res) => {
+  try {
+    const sess = await getSession(req.cookies?.ff_sid || null);
+    res.set('Cache-Control','no-store');
+    res.json({ ok: true, authenticated: !!sess, member_id: sess?.member_id || null });
+  } catch (e) {
+    res.set('Cache-Control','no-store');
+    res.json({ ok: true, authenticated: false });
+  }
+});
 
 // Soft, no-error boot probe used by FE
 // GET /api/session/cred → 200 always

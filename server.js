@@ -15,6 +15,8 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+app.use('/api/session', require('./routes/session')); // mount early
+app.use('/api/identity', require('./routes/identity-status'));
 
 // CORS
 const allow = {
@@ -82,7 +84,7 @@ app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
 app.use('/api/members',          require('./routes/members'));
-
+app.use('/api/platforms/espn', require('./routes/espn')); 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
 //app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
 // optional: if login is its own file and not included above
@@ -118,6 +120,29 @@ app.post('/api/identity/upsert', (req, res) => {
 // 3) Some FE builds hit /api/identity/whoami; normalize to your whoami.
 app.get('/api/identity/whoami', (req, res) => {
   res.redirect(307, '/api/whoami');
+});
+// GET /api/session/bootstrap  → always 200 with a simple status
+router.get('/bootstrap', async (req, res) => {
+  try {
+    const sess = await getSession(req.cookies?.ff_sid || null);
+    res.set('Cache-Control','no-store');
+    res.json({ ok: true, authenticated: !!sess, member_id: sess?.member_id || null });
+  } catch (e) {
+    res.status(200).json({ ok: true, authenticated: false }); // never 401 here
+  }
+});
+// in your main server file, after mounting /api/session
+app.get('/api/whoami', async (req, res) => {
+  try {
+    const r = await fetch(new URL('/routes/session/whoami', `${req.protocol}://${req.get('host')}`), {
+      headers: { cookie: req.headers.cookie || '' }
+    });
+    if (r.status === 401) return res.json({ ok:true, authenticated:false });
+    const j = await r.json();
+    res.json({ ok:true, authenticated:true, member: j.member });
+  } catch {
+    res.json({ ok:true, authenticated:false });
+  }
 });
 
 // Static

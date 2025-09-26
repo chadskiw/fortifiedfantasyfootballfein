@@ -99,6 +99,16 @@ async function readCreds(req) {
   }
   return { swid, s2 };
 }
+router.get('/authcheck', (req, res) => {
+  const c = req.cookies || {};
+  const hasESPN = !!(
+    (c.SWID && (c.espn_s2 || c.ESPN_S2)) ||
+    (c.ff_espn_swid && c.ff_espn_s2) ||
+    c.has_espn === '1' || c.ff_has_espn === '1' || c.fein_has_espn === '1'
+  );
+  res.set('Cache-Control','no-store');
+  res.json({ ok: true, hasESPN });
+});
 
 router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
