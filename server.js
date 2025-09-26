@@ -57,6 +57,9 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// after you init app, cookies, etc.
+const createImagesRouter = require('./src/routes/images');
+app.use('/api/images', createImagesRouter());
 
 // --- CORS (single, global) ---------------------------------------------------
 const CORS_ALLOW = {

@@ -1,113 +1,140 @@
-// src/routes/images.js
+// /src/routes/images.js
+// Presign PUT URLs for Cloudflare R2 (S3-compatible) + optional server-upload fallback.
+
 const express = require('express');
-const crypto  = require('crypto');
-const aws4    = require('aws4'); // npm i aws4
-const pool    = require('../db/pool');
+const crypto = require('crypto');
+const multer = require('multer');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
-const router = express.Router();
+const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB cap
 
-const {
-  R2_ACCOUNT_ID,
-  R2_ACCESS_KEY_ID,
-  R2_SECRET_ACCESS_KEY,
-  R2_BUCKET,
-  R2_PUBLIC_BASE = 'https://img.fortifiedfantasy.com'
-} = process.env;
+// ---- env ----
+// R2 is S3-compatible (no region enforcement). Use 'auto' or 'us-east-1'.
+const R2_ACCOUNT_ID       = process.env.R2_ACCOUNT_ID || ''; // required by public base if you use R2 endpoint style
+const R2_ACCESS_KEY_ID    = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY= process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET           = process.env.R2_BUCKET || 'ff-images';
+const R2_REGION           = process.env.R2_REGION || 'auto';
+// public CDN/base for viewing files (e.g. https://img.fortifiedfantasy.com or R2 custom domain)
+const PUBLIC_BASE         = (process.env.R2_PUBLIC_BASE || 'https://img.fortifiedfantasy.com').replace(/\/+$/,'');
 
-if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
-  console.warn('[images] Missing R2 env; presign will fail.');
+// If you use R2 "S3 API" endpoint with account id:
+const R2_ENDPOINT = process.env.R2_ENDPOINT
+  || (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
+
+if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET || !PUBLIC_BASE) {
+  console.warn('[images] Missing R2 env vars. Presign/upload will fail without them.');
 }
 
-function makeKey(ext=''){
-  const id = crypto.randomBytes(16).toString('hex');
+const s3 = new S3Client({
+  region: R2_REGION,
+  endpoint: R2_ENDPOINT,       // R2: MUST provide endpoint (or set via env)
+  credentials: {
+    accessKeyId: R2_ACCESS_KEY_ID || 'missing',
+    secretAccessKey: R2_SECRET_ACCESS_KEY || 'missing',
+  },
+  forcePathStyle: true,         // R2 requires path-style
+});
+
+function safeContentType(s) {
+  const v = String(s || '').toLowerCase();
+  if (!v || /octet-stream/.test(v)) return 'image/webp'; // default
+  if (!/^image\//.test(v)) return 'image/webp';
+  return v;
+}
+
+function genKey({ kind='avatars', member_id=null, ext='webp' }) {
   const ts = Date.now();
-  const safeExt = (ext||'').replace(/[^a-z0-9.]/ig,'').toLowerCase();
-  return `${id}-${ts}${safeExt && !safeExt.startsWith('.') ? '.'+safeExt : safeExt}`;
+  const rand = crypto.randomBytes(6).toString('hex');
+  const owner = member_id ? String(member_id) : 'anon';
+  return `${kind}/${owner}/${ts}-${rand}.${ext}`.replace(/\/{2,}/g,'/');
 }
 
-function guessExtFromType(ct=''){
-  const m = String(ct).toLowerCase().match(/image\/(png|jpeg|jpg|webp|gif|avif)/);
-  if (!m) return '';
-  const map = { jpeg:'.jpg', jpg:'.jpg', png:'.png', webp:'.webp', gif:'.gif', avif:'.avif' };
-  return map[m[1]] || '';
-}
+module.exports = function createImagesRouter(){
+  const router = express.Router();
 
-// POST /api/images/presign { content_type }
-router.post('/presign', async (req, res) => {
-  try {
-    const contentType = String(req.body?.content_type || 'application/octet-stream');
-    const key = makeKey(guessExtFromType(contentType));
-
-    // R2 S3 endpoint
-    const host = `${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
-    const path = `/${R2_BUCKET}/${key}`;
-    const url  = `https://${host}${path}`;
-
-    // Sign a PUT for ~5 minutes
-    const now = new Date();
-    const expires = 300; // seconds
-
-    const opts = {
-      host,
-      path,
-      method: 'PUT',
-      headers: { 'content-type': contentType },
-      service: 's3',
-      region: 'auto',
-    };
-
-    aws4.sign(opts, { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY });
-
-    // Build signed URL: include X-Amz-* query params
-    const qs = new URLSearchParams({
-      'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-      'X-Amz-Credential': opts.headers['Authorization'].match(/Credential=([^,]+)/)[1],
-      'X-Amz-Date': opts.headers['x-amz-date'],
-      'X-Amz-Expires': String(expires),
-      'X-Amz-SignedHeaders': 'host;content-type',
-      'X-Amz-Signature': opts.headers['Authorization'].match(/Signature=([0-9a-f]+)/)[1]
+  // Preflight to be safe
+  router.options('*', (_req, res) => {
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-espn-swid,x-espn-s2',
+      'Access-Control-Max-Age': '600',
     });
+    res.sendStatus(204);
+  });
 
-    // NOTE: aws4 default signing wants unsigned payload unless you include X-Amz-Content-Sha256
-    // We keep it simple: client must send the same Content-Type we used here.
+  // JSON body
+  router.use(express.json({ limit: '1mb' }));
 
-    const upload_url = `${url}?${qs.toString()}`;
-    const public_url = `${R2_PUBLIC_BASE}/${key}`;
+  // POST /api/images/presign { content_type?, kind?, ext? }
+  // -> { ok, url, key, public_url, headers }
+  router.post('/presign', async (req, res) => {
+    try {
+      const member_id = req.cookies?.ff_member || null;
+      const contentType = safeContentType(req.body?.content_type || req.body?.contentType);
+      const kind = (req.body?.kind || 'avatars').toString();
+      let ext = (req.body?.ext || '').replace(/^\.+/,'').toLowerCase();
+      if (!ext) {
+        ext = contentType === 'image/png' ? 'png'
+            : contentType === 'image/jpeg' ? 'jpg'
+            : 'webp';
+      }
 
-    res.json({ ok:true, key, upload_url, public_url, content_type: contentType });
-  } catch (e) {
-    console.error('[images.presign]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
+      const key = genKey({ kind, member_id, ext });
+      const putCmd = new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        ContentType: contentType,
+        // You can also add CacheControl if desired:
+        // CacheControl: 'public, max-age=31536000, immutable',
+      });
 
-// POST /api/images/commit { key, public_url, width?, height?, kind? }
-router.post('/commit', async (req, res) => {
-  try {
-    const key = String(req.body?.key || '').trim();
-    const url = String(req.body?.public_url || '').trim();
-    if (!key || !url) return res.status(400).json({ ok:false, error:'missing_key_or_url' });
+      // 5 minutes URL
+      const url = await getSignedUrl(s3, putCmd, { expiresIn: 300 });
 
-    const width  = Number(req.body?.width)  || null;
-    const height = Number(req.body?.height) || null;
-    const kind   = String(req.body?.kind || 'avatar');
+      const public_url = `${PUBLIC_BASE}/${key}`;
+      res.set('Cache-Control', 'no-store');
+      return res.json({
+        ok: true,
+        url,
+        key,
+        public_url,
+        headers: { 'content-type': contentType }
+      });
+    } catch (e) {
+      console.error('[images.presign] error:', e);
+      return res.status(500).json({ ok:false, error:'presign_failed' });
+    }
+  });
 
-    const r = await pool.query(
-      `INSERT INTO ff_image (image_key, public_url, kind, width, height, created_at)
-       VALUES ($1,$2,$3,$4,$5, now())
-       ON CONFLICT (image_key) DO UPDATE
-         SET public_url = EXCLUDED.public_url,
-             width = COALESCE(EXCLUDED.width, ff_image.width),
-             height = COALESCE(EXCLUDED.height, ff_image.height)
-       RETURNING image_id`,
-      [key, url, kind, width, height]
-    );
+  // POST /api/images/upload  (server-side upload fallback)
+  // multipart/form-data; field: file; query/body: kind?
+  router.post('/upload', upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
+      const member_id = req.cookies?.ff_member || null;
+      const kind = (req.body?.kind || req.query?.kind || 'avatars').toString();
+      const ext = (req.file.mimetype === 'image/png' ? 'png'
+                : req.file.mimetype === 'image/jpeg' ? 'jpg'
+                : 'webp');
 
-    res.json({ ok:true, image_id: r.rows[0].image_id, key, public_url: url });
-  } catch (e) {
-    console.error('[images.commit]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
+      const key = genKey({ kind, member_id, ext });
+      await s3.send(new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype || 'application/octet-stream',
+      }));
+      const public_url = `${PUBLIC_BASE}/${key}`;
+      res.set('Cache-Control', 'no-store');
+      return res.json({ ok:true, key, public_url });
+    } catch (e) {
+      console.error('[images.upload] error:', e);
+      return res.status(500).json({ ok:false, error:'upload_failed' });
+    }
+  });
 
-module.exports = router;
+  return router;
+};
