@@ -7,7 +7,7 @@ if (pool && pool.pool && typeof pool.pool.query === 'function') pool = pool.pool
 if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool missing');
 
 // 👉 use your job helper
-const { ingestOneFan } = require('../../jobs/espn/ingest-fans');
+const { ingestOneFan } = require('../../src/routes/espn-ingest');
 
 // Small helpers
 function normalizeSwid(raw) {
