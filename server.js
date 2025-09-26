@@ -73,7 +73,9 @@ app.use('/api/identity', require('./src/routes/identity-signup-email')); // expo
 app.use('/api/profile',  require('./src/routes/profile'));                // exposes POST /update
 
 
-                           // /check, /exists, /lookup, /avatar, /qh-upsert
+app.set('trust proxy', 1); // so req.ip works behind CF/Render
+app.use('/api/session', require('./routes/session'));
+                        // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 

@@ -1,164 +1,221 @@
-// src/routes/session.js
+// routes/session.js
 const express = require('express');
 const crypto  = require('crypto');
 
-const db = require('../src/db/pool');
+const db   = require('../src/db/pool');
 const pool = db.pool || db;
-if (!pool || typeof pool.query !== 'function') throw new Error('[session] pg pool missing');
+if (!pool || typeof pool.query !== 'function') {
+  throw new Error('[session] pg pool missing');
+}
 
 const router = express.Router();
 router.use(express.json({ limit: '1mb' }));
 
-/* ---------------- schema ---------------- */
-async function ensureTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ff_session (
-      sid        TEXT PRIMARY KEY,
-      member_id  TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      expires_at TIMESTAMPTZ NOT NULL,
-      ip_hash    TEXT,
-      user_agent TEXT
-    );
-    CREATE INDEX IF NOT EXISTS ff_session_member_idx ON ff_session(member_id);
-
-    -- Ensure ff_member has descriptor + verification columns
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                     WHERE table_name='ff_member' AND column_name='adj1') THEN
-        ALTER TABLE ff_member
-          ADD COLUMN IF NOT EXISTS adj1 TEXT,
-          ADD COLUMN IF NOT EXISTS adj2 TEXT,
-          ADD COLUMN IF NOT EXISTS noun TEXT,
-          ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ,
-          ADD COLUMN IF NOT EXISTS phone_verified_at TIMESTAMPTZ;
-      END IF;
-    END$$;
-  `);
+/* ---------- helpers ---------- */
+function secureCookies() { return process.env.NODE_ENV === 'production'; }
+function cookieOpts(maxAgeMs) {
+  return { httpOnly:true, sameSite:'Lax', secure:secureCookies(), path:'/', maxAge:maxAgeMs };
 }
-
-function sid() { return crypto.randomBytes(32).toString('base64url'); }
 function ipHash(req) {
   const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
   return crypto.createHash('sha256').update(ip).digest('hex');
 }
-function cookieOpts(maxAgeMs) {
-  const secure = process.env.NODE_ENV === 'production';
-  return { httpOnly:true, sameSite:'Lax', secure, path:'/', maxAge:maxAgeMs };
+function newSid() { return crypto.randomUUID().replace(/-/g,''); }
+
+async function ensureTables() {
+  // Make ff_session compatible with code that uses (session_id, created_at, last_seen_at, ...)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ff_session (
+      session_id  TEXT PRIMARY KEY,
+      member_id   TEXT NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ip_hash     TEXT,
+      user_agent  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ff_session_member_idx ON ff_session(member_id);
+  `);
 }
 
-async function createSession(memberId, req, ttlDays=30) {
+async function createSession(memberId, req, ttlDays = 30) {
   await ensureTables();
-  const id = sid();
-  const exp = new Date(Date.now() + ttlDays*24*60*60*1000);
+  const sid = newSid();
   await pool.query(
-    `INSERT INTO ff_session (sid, member_id, expires_at, ip_hash, user_agent)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [id, memberId, exp.toISOString(), ipHash(req), String(req.headers['user-agent']||'').slice(0,400)]
+    `INSERT INTO ff_session (session_id, member_id, created_at, last_seen_at, ip_hash, user_agent)
+     VALUES ($1,$2, NOW(), NOW(), $3, $4)
+     ON CONFLICT (session_id) DO NOTHING`,
+    [sid, memberId, ipHash(req), String(req.headers['user-agent']||'').slice(0,400)]
   );
-  return { sid:id, expires_at:exp.toISOString() };
+  return sid;
 }
-async function destroySession(id) { if (id) await pool.query(`DELETE FROM ff_session WHERE sid=$1`, [id]); }
-async function getSession(id) {
-  if (!id) return null;
+
+async function destroySession(sessionId) {
+  if (!sessionId) return;
+  await pool.query(`DELETE FROM ff_session WHERE session_id=$1`, [sessionId]);
+}
+
+async function loadSession(sessionId) {
+  if (!sessionId) return null;
   const { rows } = await pool.query(`
-    SELECT s.sid, s.member_id, s.created_at, s.expires_at,
-           m.username, m.email, m.phone_e164, m.color_hex,
-           m.adj1, m.adj2, m.noun, m.email_verified_at, m.phone_verified_at
+    SELECT s.session_id, s.member_id, s.created_at, s.last_seen_at,
+           m.handle, m.email, m.phone_e164, m.color_hex,
+           m.adj1, m.adj2, m.noun,
+           (m.email_verified_at IS NOT NULL) AS email_is_verified,
+           (m.phone_verified_at IS NOT NULL) AS phone_is_verified
       FROM ff_session s
  LEFT JOIN ff_member m ON m.member_id = s.member_id
-     WHERE s.sid=$1 AND s.expires_at > NOW()
+     WHERE s.session_id=$1
      LIMIT 1
-  `,[id]);
-  return rows[0]||null;
+  `,[sessionId]);
+  return rows[0] || null;
 }
 
-/* ---------------- routes ---------------- */
+async function touchSession(sessionId) {
+  if (!sessionId) return;
+  await pool.query(`UPDATE ff_session SET last_seen_at=NOW() WHERE session_id=$1`, [sessionId]);
+}
 
-// GET /api/session/whoami
-router.get('/whoami', async (req,res) => {
+function setAuthCookies(res, memberId, sid) {
+  // Long-lived member id cookie (other routes look for this)
+  res.cookie('ff_member', memberId, cookieOpts(365*24*60*60*1000));
+  // Session cookie
+  res.cookie('ff_sid', sid, cookieOpts(30*24*60*60*1000));
+}
+
+function clearAuthCookies(res) {
+  res.cookie('ff_sid','',    cookieOpts(0));
+  res.cookie('ff_member','', cookieOpts(0));
+}
+
+/* ---------- routes ---------- */
+
+// Soft, no-error boot probe used by FE
+// GET /api/session/cred → 200 always
+router.get('/cred', async (req, res) => {
   try {
-    const sess = await getSession(req.cookies?.ff_sid || null);
+    const sid = req.cookies?.ff_sid || '';
+    const sess = await loadSession(sid);
+    if (sess) await touchSession(sid);
+
     res.set('Cache-Control','no-store');
-    if (!sess) return res.status(401).json({ ok:false, error:'not_authenticated' });
+
+    // Optional: espn link flag
+    let espn_linked = false;
+    if (sess?.member_id) {
+      const r = await pool.query(
+        `SELECT 1 FROM ff_member_platform WHERE member_id=$1 AND platform='espn' LIMIT 1`,
+        [sess.member_id]
+      );
+      espn_linked = r.rowCount > 0;
+    }
+
     return res.json({
-      ok:true,
-      member:{
+      ok: true,
+      logged_in: !!sess,
+      member_id: sess?.member_id || null,
+      member: sess ? {
         member_id: sess.member_id,
-        username:  sess.username || null,
+        handle:    sess.handle || null,
         email:     sess.email || null,
         phone:     sess.phone_e164 || null,
         color_hex: sess.color_hex || null,
-        adj1: sess.adj1||null, adj2: sess.adj2||null, noun: sess.noun||null
-      },
-      session:{ created_at:sess.created_at, expires_at:sess.expires_at }
+        adj1: sess.adj1||null, adj2: sess.adj2||null, noun: sess.noun||null,
+        email_is_verified: !!sess.email_is_verified,
+        phone_is_verified: !!sess.phone_is_verified
+      } : null,
+      espn_linked
     });
-  } catch(e){ console.error('[whoami]', e); res.status(500).json({ ok:false, error:'internal_error' }); }
+  } catch (e) {
+    console.error('[session.cred]', e);
+    res.status(200).json({ ok:true, logged_in:false });
+  }
 });
 
-// POST /api/session/logout
-router.post('/logout', async (req,res) => {
-  try { await destroySession(req.cookies?.ff_sid||null); }
-  catch(e){ console.warn('[logout]', e.message); }
-  finally {
-    res.cookie('ff_sid','', cookieOpts(0));
+// Strict variant; still returns 200 to keep console tidy
+router.get('/whoami', async (req,res) => {
+  try {
+    const sid  = req.cookies?.ff_sid || '';
+    const sess = await loadSession(sid);
+    if (sess) await touchSession(sid);
     res.set('Cache-Control','no-store');
-    res.json({ ok:true, logged_out:true });
+    return res.json({ ok:true, logged_in:!!sess, member_id: sess?.member_id || null });
+  } catch(e) {
+    console.error('[whoami]', e);
+    res.status(200).json({ ok:true, logged_in:false });
   }
+});
+
+// POST /api/session/logout  (alias for /clear)
+router.post('/logout', async (req,res) => {
+  try { await destroySession(req.cookies?.ff_sid||null); } catch {}
+  clearAuthCookies(res);
+  res.set('Cache-Control','no-store');
+  res.json({ ok:true, logged_out:true });
+});
+router.post('/clear', async (req,res) => {
+  try { await destroySession(req.cookies?.ff_sid||null); } catch {}
+  clearAuthCookies(res);
+  res.json({ ok:true });
 });
 
 // POST /api/session/login-by-descriptors { member_id, adj1, adj2, noun }
 router.post('/login-by-descriptors', async (req,res) => {
   try {
-    await ensureTables();
-    const { member_id, adj1, adj2, noun } = req.body||{};
+    const { member_id, adj1, adj2, noun } = req.body || {};
     if (!member_id || !noun) return res.status(422).json({ ok:false, error:'missing_fields' });
+
     const { rows } = await pool.query(`
-      SELECT member_id FROM ff_member
+      SELECT 1 FROM ff_member
        WHERE member_id=$1
          AND LOWER(noun)=LOWER($2)
-         AND ( (LOWER(adj1)=LOWER($3)) OR (LOWER(adj2)=LOWER($3)) )
+         AND ( LOWER(adj1)=LOWER($3) OR LOWER(adj2)=LOWER($3) )
        LIMIT 1
-    `,[member_id, noun, adj1||adj2||'']);
-    if (!rows[0]) return res.status(403).json({ ok:false, error:'descriptor_mismatch' });
+    `,[member_id, noun, (adj1||adj2||'')]);
 
-    const s = await createSession(member_id, req, 30);
-    res.cookie('ff_sid', s.sid, cookieOpts(30*24*60*60*1000));
+    if (!rows[0]) return res.json({ ok:false, error:'descriptor_mismatch' });
+
+    const sid = await createSession(member_id, req, 30);
+    setAuthCookies(res, member_id, sid);
     return res.json({ ok:true, member_id });
-  } catch(e){ console.error('[login-by-descriptors]', e); res.status(500).json({ ok:false, error:'internal_error' }); }
+  } catch(e){
+    console.error('[login-by-descriptors]', e);
+    res.status(500).json({ ok:false, error:'internal_error' });
+  }
 });
 
 // POST /api/session/validate-cookies { kind:'email'|'phone', value }
 router.post('/validate-cookies', async (req,res) => {
   try {
-    await ensureTables();
-    const { kind, value } = req.body||{};
+    const { kind, value } = req.body || {};
     if (!kind || !value) return res.status(422).json({ ok:false, error:'missing_fields' });
 
-    // If a valid session already exists for a member that owns this contact, accept silently.
-    const sess = await getSession(req.cookies?.ff_sid||null);
+    const sid0 = req.cookies?.ff_sid || '';
+    const sess = await loadSession(sid0);
     if (sess) {
-      const owns = (kind==='email' && sess.email && sess.email.toLowerCase()===String(value).toLowerCase())
-                || (kind==='phone' && sess.phone_e164 && sess.phone_e164===String(value));
+      const owns =
+        (kind==='email' && sess.email && sess.email.toLowerCase()===String(value).toLowerCase()) ||
+        (kind==='phone' && sess.phone_e164 && sess.phone_e164===String(value));
       if (owns) return res.json({ ok:true, member_id:sess.member_id });
     }
 
-    // Otherwise, only auto-OK if the contact is verified AND we find a single member with it.
     const col = (kind==='email') ? 'email' : 'phone_e164';
     const ver = (kind==='email') ? 'email_verified_at IS NOT NULL' : 'phone_verified_at IS NOT NULL';
-    const { rows } = await pool.query(`
-      SELECT member_id FROM ff_member
-       WHERE ${col} = $1 AND ${ver}
-       LIMIT 2
-    `,[value]);
+    const { rows } = await pool.query(
+      `SELECT member_id FROM ff_member WHERE ${col}=$1 AND ${ver} LIMIT 2`,
+      [String(value)]
+    );
+
     if (rows.length === 1) {
-      const s = await createSession(rows[0].member_id, req, 30);
-      res.cookie('ff_sid', s.sid, cookieOpts(30*24*60*60*1000));
-      return res.json({ ok:true, member_id: rows[0].member_id });
+      const member_id = rows[0].member_id;
+      const sid = await createSession(member_id, req, 30);
+      setAuthCookies(res, member_id, sid);
+      return res.json({ ok:true, member_id });
     }
-    return res.json({ ok:false }); // fall back to other verification methods
-  } catch(e){ console.error('[validate-cookies]', e); res.status(500).json({ ok:false, error:'internal_error' }); }
+    return res.json({ ok:false });
+  } catch(e){
+    console.error('[validate-cookies]', e);
+    res.status(500).json({ ok:false, error:'internal_error' });
+  }
 });
 
 module.exports = router;
