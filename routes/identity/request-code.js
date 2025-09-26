@@ -1,80 +1,71 @@
 // routes/identity/request-code.js
 const express = require('express');
 const router = express.Router();
-const { pool } = require('../../src/db/pool'); // adjust path
-const { setLoginCode } = require('../../lib/otp');
-const { sendVerifyCode } = require('../../lib/notifier');
+const notificationapi = require('../../lib/notifier'); // path to the file above
+const crypto = require('crypto');
+const pool = require('../../src/db/pool'); // adjust path
 
-const isEmail = v => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v||'').trim());
-const normPhone = v => {
-  let t = (v||'').replace(/[^\d+]/g, '');
-  if (t && !t.startsWith('+') && t.length === 10) t = '+1' + t;
-  return t;
-};
+function genCode() {
+  // 6-digit numeric
+  return ('' + Math.floor(100000 + Math.random() * 900000));
+}
 
 router.post('/request-code', async (req, res) => {
   try {
-    const raw = String(req.body?.identifier || '').trim();
-    if (!raw) return res.status(400).json({ ok:false, error:'missing_identifier' });
+    const { identifier } = req.body || {};
+    if (!identifier) return res.status(400).json({ ok:false, error:'missing_identifier' });
 
-    const identifier = isEmail(raw) ? raw.toLowerCase() : normPhone(raw);
-    const channel = isEmail(raw) ? 'email' : 'sms';
+    // normalize identifier
+    const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(identifier);
+    const isPhone = /^\+?[0-9][0-9\s\-().]{5,}$/.test(identifier);
+    const phoneE164 = isPhone
+      ? (identifier.replace(/[^\d+]/g,'').replace(/^(\d{10})$/, '+1$1'))
+      : null;
 
-    // 1) locate or create a member_id (prefer ff_member; fallback to quickhitter)
-    let memberId = null;
+    if (!isEmail && !phoneE164) {
+      return res.status(400).json({ ok:false, error:'bad_identifier' });
+    }
 
-    // ff_member by email/phone
-    if (isEmail(identifier)) {
-      const r = await pool.query(`SELECT member_id FROM ff_member WHERE LOWER(email)=LOWER($1) LIMIT 1`, [identifier]);
-      memberId = r.rows[0]?.member_id || null;
+    // create code + expiry and persist it to your table (ff_member or a login_codes table)
+    const code = genCode();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+    // upsert a row for this identifier (simplified; adapt to your schema)
+    await pool.query(`
+      INSERT INTO ff_member (member_id, email, phone_e164, login_code, login_code_expires)
+      VALUES (
+        COALESCE((SELECT member_id FROM ff_member WHERE ${isEmail ? 'LOWER(email)=LOWER($1)' : 'phone_e164=$2'} LIMIT 1),
+                 encode(digest($3,'sha256'),'hex')::text),  -- synthetic member_id seed if new
+        $1, $2, $4, $5
+      )
+      ON CONFLICT (member_id) DO UPDATE
+        SET login_code=$4, login_code_expires=$5,
+            email = COALESCE(ff_member.email, $1),
+            phone_e164 = COALESCE(ff_member.phone_e164, $2)
+    `, [isEmail ? identifier.toLowerCase() : null, phoneE164, (identifier || '') + Date.now(), code, expiresAt]);
+
+    // send via NotificationAPI (template IDs must exist in your dashboard)
+    // Example uses a single template "login_code" that can branch by channel.
+    if (notificationapi && notificationapi.send) {
+      await notificationapi.send({
+        type: 'login_code', // <-- your template id
+        to: {
+          id: (isEmail ? `email:${identifier.toLowerCase()}` : `phone:${phoneE164}`),
+          email: isEmail ? identifier.toLowerCase() : undefined,
+          number: phoneE164 || undefined
+        },
+        parameters: {
+          code,
+          expiresInMins: 10
+        }
+      });
     } else {
-      const r = await pool.query(`SELECT member_id FROM ff_member WHERE phone_e164=$1 LIMIT 1`, [identifier]);
-      memberId = r.rows[0]?.member_id || null;
+      console.warn('[request-code] notificationapi not initialized; skipping send');
     }
 
-    // fallback: ff_quickhitter
-    if (!memberId) {
-      const r = isEmail(identifier)
-        ? await pool.query(`SELECT member_id FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) LIMIT 1`, [identifier])
-        : await pool.query(`SELECT member_id FROM ff_quickhitter WHERE phone=$1 LIMIT 1`, [identifier]);
-
-      memberId = r.rows[0]?.member_id || null;
-    }
-
-    // create bare member if still missing
-    if (!memberId) {
-      const newId = crypto.randomUUID().slice(0,8).toUpperCase();
-      if (isEmail(identifier)) {
-        await pool.query(`INSERT INTO ff_member (member_id, email, first_seen_at, last_seen_at)
-                          VALUES ($1,$2,NOW(),NOW())`, [newId, identifier]);
-      } else {
-        await pool.query(`INSERT INTO ff_member (member_id, phone_e164, first_seen_at, last_seen_at)
-                          VALUES ($1,$2,NOW(),NOW())`, [newId, identifier]);
-      }
-      memberId = newId;
-    }
-
-    // Refresh ff_member cookie for the browser
-    res.cookie('ff_member', memberId, { httpOnly:true, sameSite:'Lax', secure:true, maxAge: 365*24*3600*1000 });
-
-    // 2) create OTP (10 min) and return immediately
-    const { code, expiresAt } = await setLoginCode(memberId, 10);
-
-    // 3) KICK OFF the send (don’t await -> prevents 524s)
-    sendVerifyCode({ to: identifier, code, channel, ttlMinutes:10 })
-      .catch(err => console.error('[notify.sendVerifyCode]', err));
-
-    // 4) respond fast
-    return res.json({
-      ok: true,
-      member_id: memberId,
-      via: channel,
-      ttlSeconds: 600,
-      // Optional: for debug only (never in prod) include code
-      // code
-    });
+    res.json({ ok:true, sent:true });
   } catch (e) {
-    console.error('[identity.request-code]', e);
+    console.error('[request-code] error', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
