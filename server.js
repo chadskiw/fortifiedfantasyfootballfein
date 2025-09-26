@@ -60,8 +60,9 @@ app.post('/api/verify/start', require('./routes/identity/request-code')); // leg
 
 const qh = require('./routes/quickhitter');  
 // map legacy FE calls to the new images endpoints
-app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/api/images/presign'));
-app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/api/images/commit'));
+app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/src/api/images/presign'));
+app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/src/api/images/commit'));
+app.use('/api/identity', require('./routes/identity/avatar'));
 
 // mount the real router at /api/images
 //app.use('/api/images', require('./src/routes/images'));
