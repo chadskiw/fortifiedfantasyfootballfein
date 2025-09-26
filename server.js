@@ -59,7 +59,7 @@ app.post('/api/verify/start', require('./routes/identity/request-code')); // leg
 
 
 const qh = require('./routes/quickhitter');  
-                                // /check, /exists, /lookup, /avatar, /qh-upsert
+   app.use('/api/identity/avatar',          require('./src/routes/images'));                             // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
