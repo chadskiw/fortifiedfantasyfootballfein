@@ -68,6 +68,10 @@ app.use('/api/identity', require('./routes/identity/avatar'));
 //app.use('/api/images', require('./src/routes/images'));
 // server.js
 app.use('/api/images', require('./routes/images'));
+// server.js (or app.js)
+app.use('/api/identity', require('./src/routes/identity-signup-email')); // exposes POST /signup
+app.use('/api/profile',  require('./src/routes/profile'));                // exposes POST /update
+
 
                            // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
