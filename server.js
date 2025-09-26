@@ -64,7 +64,10 @@ app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/api/im
 app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/api/images/commit'));
 
 // mount the real router at /api/images
-app.use('/api/images', require('./src/routes/images'));
+//app.use('/api/images', require('./src/routes/images'));
+// server.js
+app.use('/api/images', require('./routes/images'));
+
                            // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
