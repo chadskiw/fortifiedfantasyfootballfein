@@ -1,34 +1,48 @@
-async function uploadAvatar(file) {
+// routes/images.js
+const express = require('express');
+const crypto = require('crypto');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+const router = express.Router();
+
+const s3 = new S3Client({
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_KEY,
+    secretAccessKey: process.env.R2_SECRET,
+  },
+});
+
+router.post('/presign', async (req, res) => {
   try {
-    // 1) presign
-    const p = await jfetch('/api/images/presign', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content_type: file.type })
-    });
-    if (!p?.ok) throw new Error('presign_failed');
+    const ct = String(req.body?.content_type || '').trim();
+    if (!ct) return res.status(400).json({ ok:false, error:'missing_content_type' });
 
-    // 2) PUT to R2
-    const put = await fetch(p.url, {
-      method: 'PUT',
-      headers: { 'Content-Type': file.type },
-      body: file
-    });
-    if (!put.ok) throw new Error(`upload_failed_${put.status}`);
+    const ext = (ct.split('/')[1] || 'bin').toLowerCase();
+    const key = `avatars/${Date.now()}-${crypto.randomUUID()}.${ext}`;
 
-    // 3) now persist the key in quickhitter
-    await jfetch('/api/quickhitter/upsert', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ image_key: p.key })
-    });
+    const url = await getSignedUrl(
+      s3,
+      new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: key,
+        ContentType: ct,          // no x-amz-acl on R2
+      }),
+      { expiresIn: 60 }
+    );
 
-    // 4) update ff.pre.signup so UI shows the avatar and Next
-    writePre({ ...readPre(), image_key: p.key });
-    paintMiniAvatar();
+    res.json({
+      ok: true,
+      key,
+      upload_url: url,
+      public_url: `https://img.fortifiedfantasy.com/${key}`,
+    });
   } catch (e) {
-    console.warn('[avatar upload] Error:', e.message || e);
+    console.error('[images.presign]', e);
+    res.status(500).json({ ok:false, error:'presign_failed' });
   }
-}
+});
 
+module.exports = router;
