@@ -42,7 +42,9 @@ app.get('/status', (req, res) => {
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
-app.use('/api/platforms/espn', createEspnIngestRouter(pool));
+// in your main server file (e.g., index.js/app.js)
+app.use('/api/platforms/espn', require('./routes/espn-ingest'));
+
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
 //app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
