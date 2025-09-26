@@ -12,8 +12,10 @@ function genCode() {
 
 router.post('/request-code', async (req, res) => {
   try {
-    const { identifier } = req.body || {};
-    if (!identifier) return res.status(400).json({ ok:false, error:'missing_identifier' });
+// /api/identity/request-code
+const { identifier, email, phone } = req.body || {};
+const id = identifier || email || phone;
+if (!id) return res.status(400).json({ ok:false, error:'missing_identifier' });
 
     // normalize identifier
     const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(identifier);

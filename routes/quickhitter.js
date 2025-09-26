@@ -1,7 +1,6 @@
 // routes/quickhitter.js
 const express = require('express');
 const crypto  = require('crypto');
-
 const router = express.Router();
 router.use(express.json());
 
