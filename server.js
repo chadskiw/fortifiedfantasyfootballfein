@@ -45,7 +45,7 @@ app.get('/status', (req, res) => {
 });
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
-app.use('/api/platforms/espn', require('./routes/espn-ingest', pool));
+app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
