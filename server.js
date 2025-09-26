@@ -59,7 +59,13 @@ app.post('/api/verify/start', require('./routes/identity/request-code')); // leg
 
 
 const qh = require('./routes/quickhitter');  
-   app.use('/api/identity/avatar',          require('./src/routes/images'));                             // /check, /exists, /lookup, /avatar, /qh-upsert
+// map legacy FE calls to the new images endpoints
+app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/api/images/presign'));
+app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/api/images/commit'));
+
+// mount the real router at /api/images
+app.use('/api/images', require('./src/routes/images'));
+                           // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
