@@ -1,4 +1,4 @@
-CHECK THIS OUT
+// CHECK THIS OUT
 // TRUE_LOCATION: public/fein/fein-auth.js
 // IN_USE: FALSE
 // fein-auth.js

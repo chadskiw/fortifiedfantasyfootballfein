@@ -42,6 +42,27 @@ function pubUrlFromKey(key){
   if (!key) return null;
   return RS_PUBLIC ? `${RS_PUBLIC}/${String(key).replace(/^\/+/,'')}` : null;
 }
+function isComplete(m) {
+  const hasBasics = !!(m?.member_id && m?.color_hex && m?.handle);
+  const verified  = !!(m?.email_is_verified || m?.phone_is_verified);
+  const snap      = !!m?.quick_snap;
+  return hasBasics && (verified || snap);
+}
+
+router.get('/check', async (req, res) => {
+  try {
+    const memberId = norm(req.cookies?.ff_member || '');
+    if (!memberId) return res.json({ ok: true, complete: false });
+
+    const { rows } = await pool.query(`SELECT * FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`, [memberId]);
+    const m = rowToMember(rows[0]);
+    const needs_handle = !!(m?.quick_snap && !m?.handle);
+    return res.json({ ok: true, member: m, complete: isComplete(m), needs_handle });
+  } catch (e) {
+    console.error('[qh.check]', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 /* ---------- existence check ---------- */
 /* GET /api/quickhitter/exists?handle=foo | ?email=bar | ?phone=+1555... */
