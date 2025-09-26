@@ -122,7 +122,7 @@ app.get('/api/identity/whoami', (req, res) => {
   res.redirect(307, '/api/whoami');
 });
 // GET /api/session/bootstrap  → always 200 with a simple status
-router.get('/bootstrap', async (req, res) => {
+app.get('/bootstrap', async (req, res) => {
   try {
     const sess = await getSession(req.cookies?.ff_sid || null);
     res.set('Cache-Control','no-store');
