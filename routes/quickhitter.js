@@ -226,7 +226,7 @@ router.get('/exists', async (req, res) => {
         FROM (
           SELECT 1 FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1)
           UNION ALL
-          SELECT 1 FROM ff_member      WHERE LOWER(handle)=LOWER($1)
+          SELECT 1 FROM ff_quickhitter  /*member*/      WHERE LOWER(handle)=LOWER($1)
         ) t
         `,
         [handle]
@@ -408,7 +408,7 @@ if (email || phone) {
     const { rows } = await pool.query(
       `
       SELECT member_id, handle, avatar_url, color_hex
-      FROM ff_member
+      FROM ff_quickhitter  /*member*/
       WHERE LOWER(email)=LOWER($1)
       LIMIT 1
       `,
@@ -423,7 +423,7 @@ if (email || phone) {
     const { rows } = await pool.query(
       `
       SELECT member_id, handle, avatar_url, color_hex
-      FROM ff_member
+      FROM ff_quickhitter  /*member*/
       WHERE phone_e164=$1
       LIMIT 1
       `,
