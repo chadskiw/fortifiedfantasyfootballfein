@@ -1,11 +1,14 @@
 // routes/espn-ingest.js
-// Mounts under: /api/platforms/espn  (from your server.js)
-// Exposes: POST /api/platforms/espn/ingest/espn/fan
+// Mounts under: /api/platforms/espn  (from server.js)
+// Exposes:
+//   POST /api/platforms/espn/ingest/espn/fan
+//   GET  /api/platforms/espn/ingest/status
 
 const express = require('express');
 const crypto  = require('crypto');
-const { fetch } = require('undici');           // fast fetch for Node
-const pool    = require('../src/db/pool');     // uses your existing pool
+// Use native fetch (Node 18+) with a lazy node-fetch fallback
+const fetch   = global.fetch || ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
+const pool    = require('../src/db/pool');
 
 const router = express.Router();
 
@@ -218,7 +221,6 @@ router.post('/ingest/espn/fan', async (req, res) => {
     const h = req.headers || {};
     const c = req.cookies || {};
 
-    // Accept from headers, cookies, or body
     const swid = (h['x-espn-swid'] || h['swid'] || c.SWID || c.swid || req.body?.swid || '').trim();
     const s2   = (h['x-espn-s2']   || h['espn_s2'] || h['s2'] || c.ESPN_S2 || c.espn_s2 || req.body?.s2 || '').trim();
 
@@ -226,18 +228,18 @@ router.post('/ingest/espn/fan', async (req, res) => {
       return res.status(400).json({ ok:false, error:'missing_or_invalid_swid_or_s2' });
     }
 
-    // Determine the memberId (session/user). Adjust if your session stores it elsewhere.
+    // Member id (from session or explicit)
     const memberId =
       (req.user && req.user.id) ||
       req.body?.member_id ||
       req.query?.member_id ||
-      h['x-fein-key'] || '';       // your code already allows x-fein-key
+      h['x-fein-key'] || '';
 
     if (!memberId || !isUUID(memberId)) {
       return res.status(400).json({ ok:false, error:'missing_member_id' });
     }
 
-    // Prefer pre-fetched fan payload from link.js (saves one ESPN call)
+    // Use pre-fetched fan payload if present; otherwise fetch from ESPN
     let fan = req.body?.fan;
     if (!fan) {
       const url = `https://fan.api.espn.com/apis/v2/fans/${encodeURIComponent(swid)}`;
@@ -260,7 +262,7 @@ router.post('/ingest/espn/fan', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // 1) Credentials upsert (MERGE → fallback)
+      // 1) Credentials upsert
       let cred;
       try {
         const r = await client.query(
@@ -276,14 +278,14 @@ router.post('/ingest/espn/fan', async (req, res) => {
         cred = r.rows[0];
       }
 
-      // 2) Keep ff_sport_code_map updated
+      // 2) Ensure code map entries
       for (const [sport] of Object.entries(rowsBySport)) {
         const gameId = Number(Object.keys(GAME_ID_TO_SPORT).find(k => GAME_ID_TO_SPORT[k] === sport) || 0);
         const pretty = { ffl:'Fantasy Football', flb:'Fantasy Baseball', fba:'Fantasy Basketball', fhl:'Fantasy Hockey', fwnba:'Fantasy WNBA' }[sport] || `Fantasy ${sport.toUpperCase()}`;
         await upsertSportCodeMap(client, sport, gameId, pretty);
       }
 
-      // 3) Ensure per-sport tables + UPSERT
+      // 3) Ensure per-sport tables + upsert rows
       const results = {};
       for (const [sport, rows] of Object.entries(rowsBySport)) {
         const table = await ensureSportTable(client, sport);
@@ -319,8 +321,7 @@ router.post('/ingest/espn/fan', async (req, res) => {
   }
 });
 
-// Optional: quick status
+// health/status for quick smoke test
 router.get('/ingest/status', (_req, res) => res.json({ ok:true, routes:['POST /ingest/espn/fan'] }));
-
 
 module.exports = router;
