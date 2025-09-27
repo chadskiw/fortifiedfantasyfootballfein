@@ -407,10 +407,11 @@ if (email || phone) {
   if (email) {
     const { rows } = await pool.query(
       `
-      SELECT member_id, handle, avatar_url, color_hex
-      FROM ff_quickhitter  /*member*/
-      WHERE LOWER(email)=LOWER($1)
-      LIMIT 1
+SELECT member_id, handle, image_key, color_hex
+FROM ff_quickhitter
+WHERE LOWER(email)=LOWER($1)
+LIMIT 1
+
       `,
       [String(email).toLowerCase()]
     );
@@ -422,10 +423,12 @@ if (email || phone) {
   if (!conflict && phone) {
     const { rows } = await pool.query(
       `
-      SELECT member_id, handle, avatar_url, color_hex
-      FROM ff_quickhitter  /*member*/
-      WHERE phone_e164=$1
-      LIMIT 1
+SELECT member_id, handle, image_key, color_hex
+FROM ff_quickhitter
+WHERE phone=$1
+LIMIT 1
+
+
       `,
       [String(phone)]
     );
@@ -442,7 +445,14 @@ if (email || phone) {
         ok: false,
         error: 'contact_belongs_to_other',
         conflict,                 // 'email' | 'phone'
-        owner: owner || null      // { member_id, handle, avatar_url, color_hex } when available
+        owner: owner ? {
+  member_id: owner.member_id,
+  handle: owner.handle,
+  color_hex: owner.color_hex,
+  image_key: owner.image_key,
+  image_url: owner.image_key ? toCdnUrl(owner.image_key) : 'https://fortifiedfantasy.com/logo.png'
+} : null
+     // { member_id, handle, avatar_url, color_hex } when available
       });
   }
 }
