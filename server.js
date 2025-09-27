@@ -54,7 +54,7 @@ app.get('/status', (req, res) => {
 });
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
-app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
+//app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
@@ -93,7 +93,7 @@ app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
 app.use('/api/members',          require('./routes/members'));
-app.use('/api/platforms/espn', requir('./routes/espn-ingest'));
+app.use('/api/platforms/espn', require('./routes/espn-ingest'));
 
 app.use('/api/platforms/espn', require('./routes/espn')); 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
