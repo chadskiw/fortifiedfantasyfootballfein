@@ -126,7 +126,7 @@ mountRouter('/api/ghosts',   requireIfExists('./routes/ghosts'));
 
 // ESPN platform (unified entry; support both new & legacy)
 // Ingest (factory or router)
-mountRouter('/api/platforms/espn', requireIfExists('./routes/espn-ingest'), pool);
+mountRouter('/api/platforms/espn', requireIfExists('./routes/espn-ingest'));
 // Canonical ESPN API
 mountRouter('/api/platforms/espn', requireIfExists('./routes/espn'));
 mountRouter('/api/espn',            requireIfExists('./routes/espn')); // legacy alias
