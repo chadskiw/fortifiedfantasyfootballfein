@@ -14,6 +14,7 @@ const router = express.Router();
 
 // ESPN gameId → sport code (must match ff_sport_code_map + table names)
 const GAME_ID_TO_SPORT = { 1: 'ffl', 2: 'flb', 3: 'fba', 4: 'fhl', 5: 'fwnba' };
+const SPORT_TO_NUM = Object.fromEntries(Object.entries(GAME_ID_TO_SPORT).map(([n, s]) => [s, Number(n)]));
 
 const isoFromMs = (ms) => (ms ? new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z') : null);
 const md5       = (s)  => crypto.createHash('md5').update(s || '').digest('hex');
@@ -114,12 +115,13 @@ async function upsertSportCodeMap(client, sport, gameId, label) {
 
 async function ensureSportTable(client, sport) {
   const table = `ff_sport_${sport}`;
-  const ident = table.replace(/"/g, '""'); // safe identifier
+  const ident = table.replace(/"/g, '""');
+  const litSport = sport.replace(/'/g, "''");
+  const num = SPORT_TO_NUM[sport] ?? null;
 
-  // 1) Create table if missing (clone ff_sport)
   await client.query(`CREATE TABLE IF NOT EXISTS "${ident}" (LIKE ff_sport INCLUDING ALL)`);
 
-  // 2) Columns (all idempotent)
+  // Make sure all runtime columns exist
   await client.query(`
     ALTER TABLE "${ident}"
       ADD COLUMN IF NOT EXISTS platform               text,
@@ -151,7 +153,15 @@ async function ensureSportTable(client, sport) {
       ADD COLUMN IF NOT EXISTS last_synced_at         timestamptz
   `);
 
-  // 3) Indexes (idempotent)
+  // Ensure char_code/num_code defaults so NOT NULL is satisfied by default
+  await client.query(`ALTER TABLE "${ident}" ALTER COLUMN char_code SET DEFAULT '${litSport}'`);
+  await client.query(`UPDATE "${ident}" SET char_code='${litSport}' WHERE char_code IS NULL`);
+
+  if (num != null) {
+    await client.query(`ALTER TABLE "${ident}" ALTER COLUMN num_code SET DEFAULT ${num}`);
+    await client.query(`UPDATE "${ident}" SET num_code=${num} WHERE num_code IS NULL`);
+  }
+
   await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${ident}_unique ON "${ident}" (season, platform, league_id, team_id)`);
   await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_idx_platform_league ON "${ident}" (platform, league_id)`);
   await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_gin_source_payload ON "${ident}" USING GIN (source_payload jsonb_path_ops)`);
@@ -160,9 +170,11 @@ async function ensureSportTable(client, sport) {
 }
 
 
+
 function buildUpsertSQL(table) {
   return `
     INSERT INTO "${table}" (
+      char_code, num_code,
       platform, season, league_id, team_id,
       league_name, league_size, team_name, handle, team_logo_url,
       in_season, is_live, current_scoring_period,
@@ -172,12 +184,13 @@ function buildUpsertSQL(table) {
       updated_at, last_synced_at
     )
     VALUES (
-      $1,$2,$3,$4,
-      $5,$6,$7,$8,$9,
-      $10,$11,$12,
-      $13,$14,$15,$16,$17,
-      $18,$19,$20,
-      $21,$22,$23,$24,
+      $1,$2,
+      $3,$4,$5,$6,
+      $7,$8,$9,$10,$11,
+      $12,$13,$14,
+      $15,$16,$17,$18,$19,
+      $20,$21,$22,
+      $23,$24,$25,$26,
       now(), now()
     )
     ON CONFLICT (season, platform, league_id, team_id)
@@ -206,6 +219,7 @@ function buildUpsertSQL(table) {
       last_synced_at         = now()
   `;
 }
+
 
 // ---------- routes ----------
 
@@ -300,14 +314,20 @@ if (memberId) {
 
         let processed = 0;
         for (const r of rows) {
-          await client.query(sql, [
-            r.platform, r.season, r.league_id, r.team_id,
-            r.league_name, r.league_size, r.team_name, r.handle, r.team_logo_url,
-            r.in_season, r.is_live, r.current_scoring_period,
-            r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
-            r.scoring_json, r.draft_json, r.source_payload,
-            r.source_hash, r.source_etag, r.visibility, r.status
-          ]);
+const sportNum = SPORT_TO_NUM[sport] ?? null;
+
+await client.query(sql, [
+  // $1..$2
+  sport, sportNum,
+  // $3..$26
+  r.platform, r.season, r.league_id, r.team_id,
+  r.league_name, r.league_size, r.team_name, r.handle, r.team_logo_url,
+  r.in_season, r.is_live, r.current_scoring_period,
+  r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
+  r.scoring_json, r.draft_json, r.source_payload,
+  r.source_hash, r.source_etag, r.visibility, r.status,
+]);
+
           processed++;
         }
         results[sport] = { table, rows: rows.length, processed };
