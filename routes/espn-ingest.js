@@ -114,58 +114,51 @@ async function upsertSportCodeMap(client, sport, gameId, label) {
 
 async function ensureSportTable(client, sport) {
   const table = `ff_sport_${sport}`;
-  await client.query(`CREATE TABLE IF NOT EXISTS "${table}" (LIKE ff_sport INCLUDING ALL)`);
-  await client.query(`
-    DO $$
-    BEGIN
-      EXECUTE format($fmt$
-        ALTER TABLE %I
-          ADD COLUMN IF NOT EXISTS platform               text,
-          ADD COLUMN IF NOT EXISTS season                 int,
-          ADD COLUMN IF NOT EXISTS league_id              bigint,
-          ADD COLUMN IF NOT EXISTS team_id                int,
-          ADD COLUMN IF NOT EXISTS league_name            text,
-          ADD COLUMN IF NOT EXISTS league_size            int,
-          ADD COLUMN IF NOT EXISTS team_name              text,
-          ADD COLUMN IF NOT EXISTS handle                 text,
-          ADD COLUMN IF NOT EXISTS team_logo_url          text,
-          ADD COLUMN IF NOT EXISTS in_season              boolean,
-          ADD COLUMN IF NOT EXISTS is_live                boolean,
-          ADD COLUMN IF NOT EXISTS current_scoring_period int,
-          ADD COLUMN IF NOT EXISTS entry_url              text,
-          ADD COLUMN IF NOT EXISTS league_url             text,
-          ADD COLUMN IF NOT EXISTS fantasycast_url        text,
-          ADD COLUMN IF NOT EXISTS scoreboard_url         text,
-          ADD COLUMN IF NOT EXISTS signup_url             text,
-          ADD COLUMN IF NOT EXISTS scoring_json           jsonb DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS draft_json             jsonb,
-          ADD COLUMN IF NOT EXISTS source_payload         jsonb DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS reaction_counts        jsonb DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS source_hash            text,
-          ADD COLUMN IF NOT EXISTS source_etag            text,
-          ADD COLUMN IF NOT EXISTS visibility             text,
-          ADD COLUMN IF NOT EXISTS status                 text,
-          ADD COLUMN IF NOT EXISTS updated_at             timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS last_synced_at         timestamptz
-      $fmt$, %L);
-    END$$;
-  `, [table]);
+  const ident = table.replace(/"/g, '""'); // safe identifier
 
+  // 1) Create table if missing (clone ff_sport)
+  await client.query(`CREATE TABLE IF NOT EXISTS "${ident}" (LIKE ff_sport INCLUDING ALL)`);
+
+  // 2) Columns (all idempotent)
   await client.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ${'$'}$${table}_unique${'$'}$) THEN
-        EXECUTE 'CREATE UNIQUE INDEX ${table}_unique ON "${table}" (season, platform, league_id, team_id)';
-      END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ${'$'}$${table}_idx_platform_league${'$'}$) THEN
-        EXECUTE 'CREATE INDEX ${table}_idx_platform_league ON "${table}" (platform, league_id)';
-      END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ${'$'}$${table}_gin_source_payload${'$'}$) THEN
-        EXECUTE 'CREATE INDEX ${table}_gin_source_payload ON "${table}" USING GIN (source_payload jsonb_path_ops)';
-      END IF;
-    END$$;`);
+    ALTER TABLE "${ident}"
+      ADD COLUMN IF NOT EXISTS platform               text,
+      ADD COLUMN IF NOT EXISTS season                 int,
+      ADD COLUMN IF NOT EXISTS league_id              bigint,
+      ADD COLUMN IF NOT EXISTS team_id                int,
+      ADD COLUMN IF NOT EXISTS league_name            text,
+      ADD COLUMN IF NOT EXISTS league_size            int,
+      ADD COLUMN IF NOT EXISTS team_name              text,
+      ADD COLUMN IF NOT EXISTS handle                 text,
+      ADD COLUMN IF NOT EXISTS team_logo_url          text,
+      ADD COLUMN IF NOT EXISTS in_season              boolean,
+      ADD COLUMN IF NOT EXISTS is_live                boolean,
+      ADD COLUMN IF NOT EXISTS current_scoring_period int,
+      ADD COLUMN IF NOT EXISTS entry_url              text,
+      ADD COLUMN IF NOT EXISTS league_url             text,
+      ADD COLUMN IF NOT EXISTS fantasycast_url        text,
+      ADD COLUMN IF NOT EXISTS scoreboard_url         text,
+      ADD COLUMN IF NOT EXISTS signup_url             text,
+      ADD COLUMN IF NOT EXISTS scoring_json           jsonb DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS draft_json             jsonb,
+      ADD COLUMN IF NOT EXISTS source_payload         jsonb DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS reaction_counts        jsonb DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS source_hash            text,
+      ADD COLUMN IF NOT EXISTS source_etag            text,
+      ADD COLUMN IF NOT EXISTS visibility             text,
+      ADD COLUMN IF NOT EXISTS status                 text,
+      ADD COLUMN IF NOT EXISTS updated_at             timestamptz DEFAULT now(),
+      ADD COLUMN IF NOT EXISTS last_synced_at         timestamptz
+  `);
+
+  // 3) Indexes (idempotent)
+  await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${ident}_unique ON "${ident}" (season, platform, league_id, team_id)`);
+  await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_idx_platform_league ON "${ident}" (platform, league_id)`);
+  await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_gin_source_payload ON "${ident}" USING GIN (source_payload jsonb_path_ops)`);
+
   return table;
 }
+
 
 function buildUpsertSQL(table) {
   return `
