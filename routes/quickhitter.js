@@ -111,6 +111,50 @@ async function pickColorForHandleAvoidingCollisions(handle, desiredHex) {
   }
   return null; // none left
 }
+// ----- session + contact owner helpers -----
+function getSessionMemberId(req) {
+  // your session cookie is 'ff_member'
+  return (req?.cookies?.ff_member && String(req.cookies.ff_member).trim()) || null;
+}
+
+async function ownerOfContact({ email, phone }) {
+  // Return the member_id that currently owns this email/phone, if any
+  if (!email && !phone) return null;
+
+  if (email) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE LOWER(email)=LOWER($1)
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE LOWER(email)=LOWER($1)
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(email).toLowerCase()]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
+  if (phone) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE phone_e164=$1
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE phone=$1
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(phone)]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
+  return null;
+}
 
 // ---------- helpers: uniqueness checks for email/phone ----------
 async function emailTakenByOtherMember(email, memberId) {
@@ -333,12 +377,15 @@ router.post('/upsert', async (req, res) => {
   try {
     const body = req.body || {};
 
-    // resolve member_id: session → cookie → new
-    let member_id = (await getSessionMemberId(req))
-                 || norm(body.member_id || req.cookies?.ff_member || '');
-    if (!member_id) {
-      member_id = crypto.randomBytes(8).toString('base64').replace(/[^A-Z0-9]/gi,'').slice(0,8).toUpperCase();
-    }
+// resolve member_id: session → cookie → provided → new
+let member_id = getSessionMemberId(req)
+             || (req.body && String(req.body.member_id || '').trim())
+             || (req.cookies && String(req.cookies.ff_member || '').trim());
+
+if (!member_id) {
+  member_id = crypto.randomBytes(8).toString('base64')
+    .replace(/[^A-Z0-9]/gi,'').slice(0,8).toUpperCase();
+}
 
     const handle = body.handle ? normHandle(body.handle) : null;
     let color    = body.color_hex ? normHex(body.color_hex) : null;
