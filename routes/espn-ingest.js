@@ -321,5 +321,7 @@ router.post('/ingest/espn/fan', async (req, res) => {
 
 // Optional: quick status
 router.get('/ingest/status', (_req, res) => res.json({ ok:true, routes:['POST /ingest/espn/fan'] }));
+POST /api/platforms/espn/ingest/espn/fan
+GET  /api/platforms/espn/ingest/status
 
 module.exports = router;
