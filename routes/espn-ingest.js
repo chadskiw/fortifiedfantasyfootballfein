@@ -153,18 +153,30 @@ async function ensureSportTable(client, sport) {
       ADD COLUMN IF NOT EXISTS last_synced_at         timestamptz
   `);
 
-  // Ensure char_code/num_code defaults so NOT NULL is satisfied by default
-  await client.query(`ALTER TABLE "${ident}" ALTER COLUMN char_code SET DEFAULT '${litSport}'`);
-  await client.query(`UPDATE "${ident}" SET char_code='${litSport}' WHERE char_code IS NULL`);
+// --- REPLACE THE OLD BLOCK WITH THIS ---
 
-  if (num != null) {
-    await client.query(`ALTER TABLE "${ident}" ALTER COLUMN num_code SET DEFAULT ${num}`);
-    await client.query(`UPDATE "${ident}" SET num_code=${num} WHERE num_code IS NULL`);
-  }
+// Defaults for NOT NULL columns (safe since table name is already quoted)
+await client.query(`ALTER TABLE "${ident}" ALTER COLUMN char_code SET DEFAULT '${litSport}'`);
+if (num != null) {
+  await client.query(`ALTER TABLE "${ident}" ALTER COLUMN num_code SET DEFAULT ${num}`);
+}
 
-  await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${ident}_unique ON "${ident}" (season, platform, league_id, team_id)`);
-  await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_idx_platform_league ON "${ident}" (platform, league_id)`);
-  await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_gin_source_payload ON "${ident}" USING GIN (source_payload jsonb_path_ops)`);
+// Backfill any existing NULLs just in case
+await client.query(`UPDATE "${ident}" SET char_code='${litSport}' WHERE char_code IS NULL`);
+if (num != null) {
+  await client.query(`UPDATE "${ident}" SET num_code=${num} WHERE num_code IS NULL`);
+}
+
+// Fix primary key: drop inherited PK, add the correct one
+await client.query(`ALTER TABLE "${ident}" DROP CONSTRAINT IF EXISTS "${ident}_pkey"`);
+await client.query(`
+  ALTER TABLE "${ident}"
+    ADD CONSTRAINT "${ident}_pkey" PRIMARY KEY (season, platform, league_id, team_id)
+`);
+
+// Supporting indexes (idempotent)
+await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_idx_platform_league ON "${ident}" (platform, league_id)`);
+await client.query(`CREATE INDEX IF NOT EXISTS ${ident}_gin_source_payload ON "${ident}" USING GIN (source_payload jsonb_path_ops)`);
 
   return table;
 }
