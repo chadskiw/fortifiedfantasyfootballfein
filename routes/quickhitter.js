@@ -398,14 +398,55 @@ if (!member_id) {
     }
 
     // If contact exists, only error if it belongs to someone ELSE.
-    if (email || phone) {
-      const owner = await ownerOfContact({ email, phone });
-      if (owner && owner !== member_id) {
-        // OPTIONAL: you could "attach" to owner here if you want, but
-        // per your note, we keep the boundary and signal a clear conflict:
-        return res.status(409).json({ ok:false, error:'contact_belongs_to_other', owner_member_id: owner });
-      }
+// If contact exists, only error if it belongs to someone ELSE.
+if (email || phone) {
+  // figure out which side conflicts (email or phone)
+  let conflict = null;
+  let owner = null;
+
+  if (email) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id, handle, avatar_url, color_hex
+      FROM ff_member
+      WHERE LOWER(email)=LOWER($1)
+      LIMIT 1
+      `,
+      [String(email).toLowerCase()]
+    );
+    if (rows[0]?.member_id && rows[0].member_id !== member_id) {
+      conflict = 'email';
+      owner = rows[0];
     }
+  }
+  if (!conflict && phone) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id, handle, avatar_url, color_hex
+      FROM ff_member
+      WHERE phone_e164=$1
+      LIMIT 1
+      `,
+      [String(phone)]
+    );
+    if (rows[0]?.member_id && rows[0].member_id !== member_id) {
+      conflict = 'phone';
+      owner = rows[0];
+    }
+  }
+
+  if (conflict) {
+    return res
+      .status(409)
+      .json({
+        ok: false,
+        error: 'contact_belongs_to_other',
+        conflict,                 // 'email' | 'phone'
+        owner: owner || null      // { member_id, handle, avatar_url, color_hex } when available
+      });
+  }
+}
+
 
     // (optional) repick color only against ff_member, not staging
     if (handle && color) {
