@@ -64,7 +64,7 @@ app.use('/api/ghosts', require('./routes/ghosts'));
 app.use('/api/identity', require('./routes/identity/resolve'));  // adds /api/identity/resolve
 app.use('/api/session', require('./routes/session/loginFromPre'));
 
-
+app.use('/api/platforms/espn/cred', require('./routes/espn-cred'));
 app.use('/api/identity', require('./routes/identity/request-code'));
 app.use('/api/identity', require('./routes/identity/verify-code'));
 app.post('/api/verify/start', require('./routes/identity/request-code')); // legacy alias
