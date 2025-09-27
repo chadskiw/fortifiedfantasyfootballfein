@@ -1,67 +1,49 @@
 // src/api/members.js
 const express = require('express');
+const router = express.Router();
+router.use(express.json());
 
-function normalizePhone(s=''){
-  return String(s).replace(/[^0-9]/g,''); // digits-only compare
+let db = require('../src/db/pool');
+let pool = db.pool || db;
+
+function cookieMemberId(req){
+  return (req.cookies && String(req.cookies.ff_member || '').trim()) || null;
 }
 
-module.exports = function createMembersRouter(pool){
-  const router = express.Router();
+// POST /api/members/upsert
+router.post('/upsert', async (req, res) => {
+  try{
+    const member_id = cookieMemberId(req) || (req.body && req.body.member_id);
+    if (!member_id) return res.status(401).json({ ok:false, error:'not_authenticated' });
 
-  // accepts either querystring (GET) or JSON body (POST)
-  async function lookup(req, res){
-    try{
-      const q = req.method === 'GET' ? req.query : (req.body || {});
-      const member_id = (q.member_id || q.id || '').trim();
-      const handle    = (q.handle || '').trim();
-      const email     = (q.email || q.primary_email || '').trim().toLowerCase();
-      const phoneNorm = normalizePhone(q.phone || q.primary_phone || '');
+    // IMPORTANT GUARD: only allow upsert if a verified contact exists in quickhitter OR member
+    const ver = await pool.query(`
+      SELECT
+        COALESCE( (email_verified_at IS NOT NULL), false ) AS ev,
+        COALESCE( (phone_verified_at IS NOT NULL), false ) AS pv
+      FROM ff_member
+      WHERE member_id = $1 AND deleted_at IS NULL
+      UNION ALL
+      SELECT
+        COALESCE(email_is_verified, false) AS ev,
+        COALESCE(phone_is_verified, false) AS pv
+      FROM ff_quickhitter
+      WHERE member_id = $1
+      LIMIT 1
+    `,[member_id]);
 
-      const where = [];
-      const params = [];
-      let p = 1;
-
-      if (member_id){
-        where.push(`member_id = $${p++}`);
-        params.push(member_id);
-      }
-      if (handle){
-        where.push(`LOWER(handle) = LOWER($${p++})`);
-        params.push(handle);
-      }
-      if (email){
-        where.push(`LOWER(primary_email) = LOWER($${p++})`);
-        params.push(email);
-      }
-      if (phoneNorm){
-        // compare digits-only
-        where.push(`regexp_replace(COALESCE(primary_phone,''), '[^0-9]', '', 'g') = $${p++}`);
-        params.push(phoneNorm);
-      }
-
-      if (!where.length){
-        return res.status(400).json({ ok:false, error:'missing_lookup_key' });
-      }
-
-      const { rows } = await pool.query(
-        `SELECT member_id, handle, primary_email, primary_phone, created_at, updated_at
-           FROM ff_member
-          WHERE ${where.join(' OR ')}
-          ORDER BY updated_at DESC
-          LIMIT 1`
-      , params);
-
-      if (!rows[0]) return res.json({ ok:true, found:false, hit:null });
-
-      return res.json({ ok:true, found:true, hit:rows[0] });
-    } catch (e){
-      console.error('[members.lookup]', e);
-      return res.status(500).json({ ok:false, error:'server_error' });
+    const ev = !!ver.rows.find(r => r.ev);
+    const pv = !!ver.rows.find(r => r.pv);
+    if (!ev && !pv){
+      return res.status(412).json({ ok:false, error:'unverified_contact', message:'Verify email or phone before creating a member profile.' });
     }
+
+    // … your existing safe upsert for ff_member here …
+    return res.json({ ok:true });
+  }catch(e){
+    console.error('[members.upsert] error:', e);
+    res.status(500).json({ ok:false, error:'server_error' });
   }
+});
 
-  router.get('/lookup', lookup);
-  router.post('/lookup', express.json({ limit:'256kb' }), lookup);
-
-  return router;
-};
+module.exports = router;
