@@ -229,15 +229,12 @@ router.post('/ingest/espn/fan', async (req, res) => {
     }
 
     // Member id (from session or explicit)
-    const memberId =
-      (req.user && req.user.id) ||
-      req.body?.member_id ||
-      req.query?.member_id ||
-      h['x-fein-key'] || '';
-
-    if (!memberId || !isUUID(memberId)) {
-      return res.status(400).json({ ok:false, error:'missing_member_id' });
-    }
+const memberIdRaw =
+  (req.user && req.user.id) ||
+  req.body?.member_id ||
+  req.query?.member_id ||
+  h['x-fein-key'] || '';
+const memberId = isUUID(memberIdRaw) ? memberIdRaw : null;
 
     // Use pre-fetched fan payload if present; otherwise fetch from ESPN
     let fan = req.body?.fan;
@@ -263,20 +260,37 @@ router.post('/ingest/espn/fan', async (req, res) => {
       await client.query('BEGIN');
 
       // 1) Credentials upsert
-      let cred;
-      try {
-        const r = await client.query(
-          'SELECT * FROM ff_espn_cred_merge($1::text,$2::text,$3::uuid)',
-          [swid, s2, memberId]
-        );
-        cred = r.rows[0];
-      } catch {
-        const r = await client.query(
-          'SELECT * FROM ff_espn_cred_upsert($1::text,$2::text,$3::uuid)',
-          [swid, s2, memberId]
-        );
-        cred = r.rows[0];
-      }
+let cred;
+
+if (memberId) {
+  // Normal path when we have a UUID
+  try {
+    const r = await client.query(
+      'SELECT * FROM ff_espn_cred_merge($1::text,$2::text,$3::uuid)',
+      [swid, s2, memberId]
+    );
+    cred = r.rows[0];
+  } catch {
+    const r = await client.query(
+      'SELECT * FROM ff_espn_cred_upsert($1::text,$2::text,$3::uuid)',
+      [swid, s2, memberId]
+    );
+    cred = r.rows[0];
+  }
+} else {
+  // No UUID available: upsert by SWID only
+  const r = await client.query(
+    `INSERT INTO ff_espn_cred (swid, espn_s2, first_seen, last_seen)
+     VALUES ($1, $2, now(), now())
+     ON CONFLICT (swid) DO UPDATE
+       SET espn_s2 = EXCLUDED.espn_s2,
+           last_seen = now()
+     RETURNING *`,
+    [swid, s2]
+  );
+  cred = r.rows[0];
+}
+
 
       // 2) Ensure code map entries
       for (const [sport] of Object.entries(rowsBySport)) {
