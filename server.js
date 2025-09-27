@@ -77,7 +77,7 @@ app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/src/ap
 app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/src/api/images/commit'));
 app.use('/api/identity', require('./routes/identity/avatar'));
 // server.js
-app.use('/api/platforms/espn', require('./routes/full-poll'));
+app.use('/api/platforms/espn', require('./routes/full-pool'));
 
 // mount the real router at /api/images
 //app.use('/api/images', require('./src/routes/images'));
