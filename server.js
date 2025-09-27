@@ -93,7 +93,9 @@ app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
 app.use('/api/members',          require('./routes/members'));
-app.use('/api/platforms/espn/ingest/espn/fan', require('./routes/espn-ingest'));
+// server.js
+app.use('/api/platforms/espn', require('./routes/espn-ingest'));
+
 
 app.use('/api/platforms/espn', require('./routes/espn')); 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
