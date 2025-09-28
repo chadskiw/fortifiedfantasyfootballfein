@@ -18,7 +18,6 @@ const { toCdnUrl, stripCdn } = require('../lib/cdn');
 const HEX_RE      = /^[#]?[0-9a-fA-F]{6}$/;
 const HANDLE_OK   = /^[A-Za-z0-9_.]+(?: [A-Za-z0-9_.]+)?$/; // allow one internal space
 const EMAIL_RE    = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const E164_RE     = /^\+[1-9]\d{7,14}$/; // ITU E.164
 
 const PALETTE = [
   '#77E0FF','#61D095','#FFD166','#FF6B6B','#A78BFA',
@@ -42,16 +41,12 @@ const isHandleShape = s => {
   const v = normHandle(s);
   return v.length >= 3 && v.length <= 24 && HANDLE_OK.test(v);
 };
-const toE164 = v => {
-  const digits = String(v || '').replace(/\D+/g,'');
-  if (!digits) return null;
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  if (digits.length >= 7 && digits.length <= 15) return `+${digits}`;
-  return null;
+const e164 = v => {
+  let t = (v || '').replace(/[^\d+]/g, '');
+  if (t && !t.startsWith('+') && t.length === 10) t = '+1' + t;
+  return t || null;
 };
-const isEmail  = v => EMAIL_RE.test(norm(v));
-const isE164   = v => E164_RE.test(String(v||'').trim());
+const isEmail = v => EMAIL_RE.test(norm(v));
 
 function rowToMember(row) {
   if (!row) return null;
@@ -75,42 +70,8 @@ function rowToMember(row) {
 }
 
 function isComplete(m) {
-  // consider "complete" once we have member_id + handle + color + any contact
+  // consider "complete" once we have member_id + handle + color + any contact + (avatar optional)
   return !!(m && m.member_id && m.handle && m.color_hex && (m.email || m.phone));
-}
-
-// ----- session + contact owner helpers -----
-function getSessionMemberId(req) {
-  // your session cookie is 'ff_member'
-  return (req?.cookies?.ff_member && String(req.cookies.ff_member).trim()) || null;
-}
-
-// Return { member_id, source } or null, checking both tables
-async function ownerOfEmail(email) {
-  if (!email) return null;
-  const { rows } = await pool.query(
-    `
-    SELECT member_id,'member' AS source FROM ff_member WHERE LOWER(email)=LOWER($1) AND member_id IS NOT NULL
-    UNION ALL
-    SELECT member_id,'quickhitter' AS source FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) AND member_id IS NOT NULL
-    LIMIT 1
-    `,
-    [email.toLowerCase()]
-  );
-  return rows[0] || null;
-}
-async function ownerOfPhone(phone) {
-  if (!phone) return null;
-  const { rows } = await pool.query(
-    `
-    SELECT member_id,'member' AS source FROM ff_member WHERE phone_e164=$1 AND member_id IS NOT NULL
-    UNION ALL
-    SELECT member_id,'quickhitter' AS source FROM ff_quickhitter WHERE phone=$1 AND member_id IS NOT NULL
-    LIMIT 1
-    `,
-    [phone]
-  );
-  return rows[0] || null;
 }
 
 // ---------- helpers: used colors across both tables ----------
@@ -136,16 +97,100 @@ async function usedColorsForHandle(handle) {
   }
   return set;
 }
+
 async function pickColorForHandleAvoidingCollisions(handle, desiredHex) {
   const used = await usedColorsForHandle(handle);
+  // can we keep the desired?
   if (desiredHex) {
     const want = normHex(desiredHex);
     if (want && !used.has(want)) return want;
   }
+  // else pick first free from palette
   for (const hex of PALETTE) {
     if (!used.has(hex)) return hex;
   }
+  return null; // none left
+}
+// ----- session + contact owner helpers -----
+function getSessionMemberId(req) {
+  // your session cookie is 'ff_member'
+  return (req?.cookies?.ff_member && String(req.cookies.ff_member).trim()) || null;
+}
+
+async function ownerOfContact({ email, phone }) {
+  // Return the member_id that currently owns this email/phone, if any
+  if (!email && !phone) return null;
+
+  if (email) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE LOWER(email)=LOWER($1)
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE LOWER(email)=LOWER($1)
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(email).toLowerCase()]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
+  if (phone) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE phone_e164=$1
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE phone=$1
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(phone)]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
   return null;
+}
+
+// ---------- helpers: uniqueness checks for email/phone ----------
+async function emailTakenByOtherMember(email, memberId) {
+  if (!email) return false;
+  const { rows } = await pool.query(
+    `
+    SELECT member_id FROM (
+      SELECT member_id FROM ff_member      WHERE LOWER(email)=LOWER($1)
+      UNION ALL
+      SELECT member_id FROM ff_quickhitter WHERE LOWER(email)=LOWER($1)
+    ) t
+    WHERE member_id IS NOT NULL
+    LIMIT 1
+    `,
+    [email]
+  );
+  const owner = rows[0]?.member_id || null;
+  return owner && owner !== memberId;
+}
+
+async function phoneTakenByOtherMember(phone, memberId) {
+  if (!phone) return false;
+  const { rows } = await pool.query(
+    `
+    SELECT member_id FROM (
+      SELECT member_id FROM ff_member      WHERE phone_e164=$1
+      UNION ALL
+      SELECT member_id FROM ff_quickhitter WHERE phone=$1
+    ) t
+    WHERE member_id IS NOT NULL
+    LIMIT 1
+    `,
+    [phone]
+  );
+  const owner = rows[0]?.member_id || null;
+  return owner && owner !== memberId;
 }
 
 // ===================================================================
@@ -172,7 +217,7 @@ router.get('/exists', async (req, res) => {
   try {
     const handle = req.query.handle ? normHandle(req.query.handle) : null;
     const email  = req.query.email  ? norm(req.query.email).toLowerCase() : null;
-    const phone  = req.query.phone  ? toE164(req.query.phone) : null;
+    const phone  = req.query.phone  ? e164(req.query.phone) : null;
 
     if (handle) {
       const { rows } = await pool.query(
@@ -181,7 +226,7 @@ router.get('/exists', async (req, res) => {
         FROM (
           SELECT 1 FROM ff_quickhitter WHERE LOWER(handle)=LOWER($1)
           UNION ALL
-          SELECT 1 FROM ff_member      WHERE LOWER(handle)=LOWER($1)
+          SELECT 1 FROM ff_quickhitter  /*member*/      WHERE LOWER(handle)=LOWER($1)
         ) t
         `,
         [handle]
@@ -225,6 +270,7 @@ router.get('/exists', async (req, res) => {
 
 // ===================================================================
 // GET /api/quickhitter/colors?handle=Foo → { ok, used:[#...], palette:[#...] }
+// (union of quickhitter + member to avoid collisions later)
 // ===================================================================
 router.get('/colors', async (req, res) => {
   try {
@@ -303,7 +349,6 @@ router.get('/lookup', async (req, res) => {
       return res.json({ ok:true, candidates: rows });
     }
     if (phone) {
-      const e = toE164(phone);
       const { rows } = await pool.query(`
         SELECT q.member_id, q.handle, q.color_hex, q.image_key, q.email, q.phone,
                (fm.member_id IS NOT NULL) AS is_member
@@ -311,7 +356,7 @@ router.get('/lookup', async (req, res) => {
           LEFT JOIN ff_member fm ON fm.member_id = q.member_id
          WHERE q.phone=$1
          LIMIT 1
-      `,[String(e)]);
+      `,[String(phone)]);
       return res.json({ ok:true, candidates: rows });
     }
     res.status(400).json({ ok:false, error:'bad_request' });
@@ -325,121 +370,158 @@ router.get('/lookup', async (req, res) => {
 // POST /api/quickhitter/upsert
 // body: { member_id?, handle?, color_hex?, image_key? | image_url?, email?, phone?, email_is_verified?, phone_is_verified? }
 // - Conflicts on (member_id) only.
-// - Preflight rejects if email/phone belong to another member across BOTH tables (409).
-// - Validates formats and returns 422 for bad email/phone.
+// - Repicks color on (handle,color) collision across BOTH tables.
+// - Preflight rejects if email/phone belong to another member (409).
 // ===================================================================
+const E164_RE = /^\+[1-9]\d{7,14}$/;
+
+function toE164(raw){
+  if (!raw) return null;
+  const d = String(raw).replace(/\D+/g,'');
+  if (!d) return null;
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  if (d.length >= 7 && d.length <= 15) return `+${d}`;
+  return null;
+}
+
 router.post('/upsert', async (req, res) => {
   try{
+    const b = req.body || {};
+    const email = b.email ? String(b.email).trim() : null;
+    const phone = b.phone ? toE164(b.phone) : null;
+
+    if (phone && !E164_RE.test(phone)){
+      return res.status(422).json({ ok:false, error:'invalid_phone', message:'Phone must be E.164 like +15551231234.' });
+    }
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){
+      return res.status(422).json({ ok:false, error:'invalid_email', message:'Email looks invalid.' });
+    }
     const body = req.body || {};
 
-    // resolve member_id: session → body → cookie → generate
-    let member_id = getSessionMemberId(req)
-                 || (body && String(body.member_id || '').trim())
-                 || (req.cookies && String(req.cookies.ff_member || '').trim());
+// resolve member_id: session → cookie → provided → new
+let member_id = getSessionMemberId(req)
+             || (req.body && String(req.body.member_id || '').trim())
+             || (req.cookies && String(req.cookies.ff_member || '').trim());
 
-    if (!member_id) {
-      member_id = crypto.randomBytes(8).toString('base64')
-        .replace(/[^A-Z0-9]/gi,'').slice(0,8).toUpperCase();
-    }
+if (!member_id) {
+  member_id = crypto.randomBytes(8).toString('base64')
+    .replace(/[^A-Z0-9]/gi,'').slice(0,8).toUpperCase();
+}
 
-    const handleIn = body.handle ? normHandle(body.handle) : null;
-    if (handleIn && !isHandleShape(handleIn)) {
+    const handle = body.handle ? normHandle(body.handle) : null;
+    let color    = body.color_hex ? normHex(body.color_hex) : null;
+
+    const image_key = stripCdn(body.image_key || body.image_url || '');
+
+    if (handle && !isHandleShape(handle)) {
       return res.status(400).json({ ok:false, error:'bad_handle' });
     }
 
-    const colorIn  = body.color_hex ? normHex(body.color_hex) : null;
-    const image_key = stripCdn(body.image_key || body.image_url || '') || null;
+    // If contact exists, only error if it belongs to someone ELSE.
+// If contact exists, only error if it belongs to someone ELSE.
+if (email || phone) {
+  // figure out which side conflicts (email or phone)
+  let conflict = null;
+  let owner = null;
 
-    // normalize + validate contacts
-    const email = body.email ? String(body.email).trim().toLowerCase() : null;
-    const phone = body.phone ? toE164(body.phone) : null;
+  if (email) {
+    const { rows } = await pool.query(
+      `
+SELECT member_id, handle, image_key, color_hex
+FROM ff_quickhitter
+WHERE LOWER(email)=LOWER($1)
+LIMIT 1
 
-    if (email && !isEmail(email)) {
-      return res.status(422).json({ ok:false, error:'invalid_email', message:'Email looks invalid.' });
+      `,
+      [String(email).toLowerCase()]
+    );
+    if (rows[0]?.member_id && rows[0].member_id !== member_id) {
+      conflict = 'email';
+      owner = rows[0];
     }
-    if (phone && !isE164(phone)) {
-      return res.status(422).json({ ok:false, error:'invalid_phone', message:'Phone must be E.164 like +15551231234.' });
-    }
+  }
+  if (!conflict && phone) {
+    const { rows } = await pool.query(
+      `
+SELECT member_id, handle, image_key, color_hex
+FROM ff_quickhitter
+WHERE phone=$1
+LIMIT 1
 
-    // ownership conflict across BOTH tables
-    if (email) {
-      const own = await ownerOfEmail(email);
-      if (own && own.member_id !== member_id) {
-        // include a small owner block (image_url falls back to /logo.png)
-        const { rows } = await pool.query(
-          `SELECT member_id, handle, color_hex, image_key FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
-          [own.member_id]
-        );
-        const owner = rows[0] || null;
-        return res.status(409).json({
-          ok:false, error:'contact_belongs_to_other', conflict:'email',
-          owner: owner ? {
-            member_id: owner.member_id,
-            handle: owner.handle,
-            color_hex: owner.color_hex,
-            image_key: owner.image_key,
-            image_url: owner.image_key ? toCdnUrl(owner.image_key) : '/logo.png'
-          } : null
-        });
-      }
-    }
-    if (phone) {
-      const own = await ownerOfPhone(phone);
-      if (own && own.member_id !== member_id) {
-        const { rows } = await pool.query(
-          `SELECT member_id, handle, color_hex, image_key FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
-          [own.member_id]
-        );
-        const owner = rows[0] || null;
-        return res.status(409).json({
-          ok:false, error:'contact_belongs_to_other', conflict:'phone',
-          owner: owner ? {
-            member_id: owner.member_id,
-            handle: owner.handle,
-            color_hex: owner.color_hex,
-            image_key: owner.image_key,
-            image_url: owner.image_key ? toCdnUrl(owner.image_key) : '/logo.png'
-          } : null
-        });
-      }
-    }
 
-    // avoid color collision (prefer requested if free)
-    let color = colorIn;
-    if (handleIn && colorIn) {
-      const wanted = colorIn.replace(/^#/, '').toUpperCase();
+      `,
+      [String(phone)]
+    );
+    if (rows[0]?.member_id && rows[0].member_id !== member_id) {
+      conflict = 'phone';
+      owner = rows[0];
+    }
+  }
+
+  if (conflict) {
+    return res
+      .status(409)
+      .json({
+        ok: false,
+        error: 'contact_belongs_to_other',
+        conflict,                 // 'email' | 'phone'
+        owner: owner ? {
+  member_id: owner.member_id,
+  handle: owner.handle,
+  color_hex: owner.color_hex,
+  image_key: owner.image_key,
+  image_url: owner.image_key ? toCdnUrl(owner.image_key) : 'https://fortifiedfantasy.com/logo.png'
+} : null
+     // { member_id, handle, avatar_url, color_hex } when available
+      });
+  }
+}
+
+
+    // (optional) repick color only against ff_member, not staging
+    if (handle && color) {
+      const wanted = color.replace(/^#/, '').toUpperCase();
       const r = await pool.query(
         `SELECT 1 FROM ff_member WHERE LOWER(handle)=LOWER($1) AND UPPER(color_hex)=UPPER($2) LIMIT 1`,
-        [handleIn, wanted]
+        [handle, wanted]
       );
       if (r.rows[0]) {
-        let picked = await pickColorForHandleAvoidingCollisions(handleIn, null);
-        color = picked || colorIn;
+        const palette = ['#77E0FF','#61D095','#FFD166','#FF6B6B','#A78BFA','#F472B6','#34D399','#F59E0B','#22D3EE','#E879F9'];
+        let picked = null;
+        for (const hex of palette) {
+          const r2 = await pool.query(
+            `SELECT 1 FROM ff_member WHERE LOWER(handle)=LOWER($1) AND UPPER(color_hex)=UPPER($2) LIMIT 1`,
+            [handle, hex.replace(/^#/, '').toUpperCase()]
+          );
+          if (!r2.rows[0]) { picked = hex; break; }
+        }
+        color = picked || color; // fallback to original if none free
       }
     }
 
-    // upsert into ff_quickhitter
+    // proceed with your INSERT ... ON CONFLICT (member_id) DO UPDATE (unchanged)
     const sql = `
       INSERT INTO ff_quickhitter (
         member_id, handle, color_hex, image_key, email, phone,
         email_is_verified, phone_is_verified
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       ON CONFLICT (member_id) DO UPDATE SET
-        handle             = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
-        color_hex          = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
-        image_key          = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
-        email              = COALESCE(EXCLUDED.email, ff_quickhitter.email),
-        phone              = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-        email_is_verified  = ff_quickhitter.email_is_verified  OR EXCLUDED.email_is_verified,
-        phone_is_verified  = ff_quickhitter.phone_is_verified  OR EXCLUDED.phone_is_verified,
-        updated_at         = NOW()
+        handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
+        color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
+        image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
+        email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
+        phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
+        email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
+        phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
+        updated_at = NOW()
       RETURNING *;
     `;
     const params = [
       member_id,
-      handleIn,
+      handle,
       color ? color.replace(/^#/,'') : null,
-      image_key,
+      image_key || null,
       email,
       phone,
       !!body.email_is_verified,
@@ -448,23 +530,19 @@ router.post('/upsert', async (req, res) => {
     const { rows } = await pool.query(sql, params);
     const m = rowToMember(rows[0]);
 
-    // refresh cookie
-    res.cookie('ff_member', m.member_id, {
-      httpOnly: true, secure: true, sameSite: 'Lax',
-      maxAge: 365*24*3600*1000
-    });
+    // refresh cookies/session as you already do...
+    res.cookie('ff_member', m.member_id, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
+    if (!req.cookies?.ff_sid) {
+      // (optional) create session if missing, reusing your session util
+      // await createSession(m.member_id, req, 30);
+    }
 
-    return res.json({
-      ok:true,
-      member_id: m.member_id,
-      handle: m.handle,
-      color_hex: m.color_hex,
-      image_key: m.image_key
-    });
+    return res.json({ ok:true, member_id: m.member_id, handle: m.handle, color_hex: m.color_hex, image_key: m.image_key });
   } catch (e) {
     console.error('[qh.upsert]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 module.exports = router;
