@@ -6,7 +6,7 @@ const router = express.Router();
 router.use(express.json());
 
 const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const E164_RX  = /^\+[1-9]\d{7,14}$/; // ITU E.164
+const E164_RX  = /^\+[1-9]\d{7,14}$/;
 
 router.post('/verify-code', async (req, res) => {
   try {
@@ -17,7 +17,6 @@ router.post('/verify-code', async (req, res) => {
       return res.status(400).json({ ok:false, error:'bad_request' });
     }
 
-    // Normalize + infer kind/channel
     let identifier_kind, identifier_value, channel;
     if (EMAIL_RX.test(rawId.toLowerCase())) {
       identifier_kind  = 'email';
@@ -35,7 +34,7 @@ router.post('/verify-code', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // Grab the latest, active code row for this identifier+channel and lock it
+      // lock the latest active code for this identifier/channel
       const { rows } = await client.query(
         `
         SELECT id, member_id, code, expires_at, attempts
@@ -52,34 +51,27 @@ router.post('/verify-code', async (req, res) => {
       );
 
       const row = rows[0];
-
       if (!row) {
         await client.query('ROLLBACK');
         return res.status(400).json({ ok:false, error:'code_not_found' });
       }
 
-      // Expired?
       if (new Date(row.expires_at).getTime() <= Date.now()) {
-        // Optionally mark as consumed on expiry to free the slot
         await client.query('UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1', [row.id]);
         await client.query('COMMIT');
         return res.status(400).json({ ok:false, error:'code_expired' });
       }
 
-      // Mismatch → bump attempts and fail
       if (row.code !== code) {
         await client.query('UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id = $1', [row.id]);
         await client.query('COMMIT');
         return res.status(400).json({ ok:false, error:'invalid_code' });
       }
 
-      // Good code → consume it
+      // good code → consume it
       await client.query('UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1', [row.id]);
 
-      // Resolve which member to mark verified:
-      // 1) req.user.id (if your auth middleware populates it)
-      // 2) the code row's member_id (if present)
-      // 3) lookup by contact on ff_member
+      // figure out which member to verify
       const candidateMember =
         (req.user && String(req.user.id)) ||
         (req.body?.member_id ? String(req.body.member_id) : null) ||
@@ -88,7 +80,6 @@ router.post('/verify-code', async (req, res) => {
 
       let finalMemberId = null;
 
-      // If candidate supplied, verify it exists
       if (candidateMember) {
         const chk = await client.query(
           `SELECT member_id FROM ff_member WHERE member_id = $1 LIMIT 1`,
@@ -97,7 +88,6 @@ router.post('/verify-code', async (req, res) => {
         finalMemberId = chk.rows[0]?.member_id || null;
       }
 
-      // Fallback: find by the contact itself
       if (!finalMemberId) {
         const byContact = await client.query(
           identifier_kind === 'email'
@@ -108,7 +98,6 @@ router.post('/verify-code', async (req, res) => {
         finalMemberId = byContact.rows[0]?.member_id || null;
       }
 
-      // Mark verified (and backfill field if missing)
       if (finalMemberId) {
         if (identifier_kind === 'email') {
           await client.query(
@@ -134,12 +123,7 @@ router.post('/verify-code', async (req, res) => {
       }
 
       await client.query('COMMIT');
-      return res.json({
-        ok: true,
-        verified: identifier_kind,
-        channel,
-        member_id: finalMemberId || null
-      });
+      return res.json({ ok:true, verified: identifier_kind, channel, member_id: finalMemberId || null });
     } catch (e) {
       await client.query('ROLLBACK');
       console.error('[identity/verify-code] tx error:', e);
