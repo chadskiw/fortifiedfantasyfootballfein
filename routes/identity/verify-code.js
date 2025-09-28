@@ -6,24 +6,27 @@ const router = express.Router();
 router.use(express.json());
 
 const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const E164_RX  = /^\+[1-9]\d{7,14}$/;
+const E164_RX  = /^\+[1-9]\d{7,14}$/; // ITU E.164
 
 router.post('/verify-code', async (req, res) => {
   try {
-    const identifier = String(req.body?.identifier || '').trim();
-    const code       = String(req.body?.code || '').trim();
+    const rawId = String(req.body?.identifier || '').trim();
+    const code  = String(req.body?.code || '').trim();
 
-    if (!identifier || !/^\d{6}$/.test(code))
+    if (!rawId || !/^\d{6}$/.test(code)) {
       return res.status(400).json({ ok:false, error:'bad_request' });
+    }
 
-    // normalize
-    let kind, value;
-    if (EMAIL_RX.test(identifier.toLowerCase())) {
-      kind = 'email';
-      value = identifier.toLowerCase();
-    } else if (E164_RX.test(identifier)) {
-      kind = 'phone';
-      value = identifier;
+    // Normalize + infer kind/channel
+    let identifier_kind, identifier_value, channel;
+    if (EMAIL_RX.test(rawId.toLowerCase())) {
+      identifier_kind  = 'email';
+      identifier_value = rawId.toLowerCase();
+      channel          = 'email';
+    } else if (E164_RX.test(rawId)) {
+      identifier_kind  = 'phone';
+      identifier_value = rawId;
+      channel          = 'sms';
     } else {
       return res.status(422).json({ ok:false, error:'invalid_identifier' });
     }
@@ -32,69 +35,82 @@ router.post('/verify-code', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // lock the matching unconsumed, unexpired code
+      // Grab the latest, active code row for this identifier+channel and lock it
       const { rows } = await client.query(
         `
-        SELECT id, member_id
-        FROM ff_identity_code
-        WHERE identifier_kind = $1
-          AND identifier_value = $2
-          AND code = $3
-          AND consumed_at IS NULL
-          AND expires_at > NOW()
-        ORDER BY id DESC
-        FOR UPDATE
+        SELECT id, member_id, code, expires_at, attempts
+          FROM ff_identity_code
+         WHERE identifier_kind  = $1
+           AND identifier_value = $2
+           AND channel          = $3
+           AND consumed_at IS NULL
+         ORDER BY created_at DESC
+         LIMIT 1
+         FOR UPDATE
         `,
-        [kind, value, code]
+        [identifier_kind, identifier_value, channel]
       );
-
-      if (!rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ ok:false, error:'invalid_or_expired' });
-      }
 
       const row = rows[0];
 
-      // consume the code
-      await client.query(
-        `UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1`,
-        [row.id]
-      );
+      if (!row) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok:false, error:'code_not_found' });
+      }
 
-      // attach to member + mark verified:
-      // strategy:
-      // - if req.user exists, prefer that member
-      // - else if code row has member_id, use it
-      // - else try to find existing member by that contact; otherwise do nothing (just verification record)
-      const sessionMember =
-        (req.user && req.user.id) ||
-        req.body?.member_id ||
-        req.query?.member_id ||
-        row.member_id ||
+      // Expired?
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        // Optionally mark as consumed on expiry to free the slot
+        await client.query('UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1', [row.id]);
+        await client.query('COMMIT');
+        return res.status(400).json({ ok:false, error:'code_expired' });
+      }
+
+      // Mismatch → bump attempts and fail
+      if (row.code !== code) {
+        await client.query('UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+        await client.query('COMMIT');
+        return res.status(400).json({ ok:false, error:'invalid_code' });
+      }
+
+      // Good code → consume it
+      await client.query('UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1', [row.id]);
+
+      // Resolve which member to mark verified:
+      // 1) req.user.id (if your auth middleware populates it)
+      // 2) the code row's member_id (if present)
+      // 3) lookup by contact on ff_member
+      const candidateMember =
+        (req.user && String(req.user.id)) ||
+        (req.body?.member_id ? String(req.body.member_id) : null) ||
+        (row.member_id ? String(row.member_id) : null) ||
         null;
 
-      let finalMember = null;
+      let finalMemberId = null;
 
-      if (sessionMember) {
-        finalMember = (await client.query(
-          'SELECT member_id FROM ff_member WHERE member_id = $1',
-          [sessionMember]
-        )).rows[0]?.member_id || null;
-      }
-
-      if (!finalMember) {
-        // try to locate by the contact itself
-        const byContact = await client.query(
-          kind === 'email'
-            ? 'SELECT member_id FROM ff_member WHERE LOWER(email) = LOWER($1) LIMIT 1'
-            : 'SELECT member_id FROM ff_member WHERE phone = $1 LIMIT 1',
-          [value]
+      // If candidate supplied, verify it exists
+      if (candidateMember) {
+        const chk = await client.query(
+          `SELECT member_id FROM ff_member WHERE member_id = $1 LIMIT 1`,
+          [candidateMember]
         );
-        finalMember = byContact.rows[0]?.member_id || null;
+        finalMemberId = chk.rows[0]?.member_id || null;
       }
 
-      if (finalMember) {
-        if (kind === 'email') {
+      // Fallback: find by the contact itself
+      if (!finalMemberId) {
+        const byContact = await client.query(
+          identifier_kind === 'email'
+            ? `SELECT member_id FROM ff_member WHERE LOWER(email) = LOWER($1) LIMIT 1`
+            : `SELECT member_id FROM ff_member WHERE phone = $1 LIMIT 1`,
+          [identifier_value]
+        );
+        finalMemberId = byContact.rows[0]?.member_id || null;
+      }
+
+      // Mark verified (and backfill field if missing)
+      if (finalMemberId) {
+        if (identifier_kind === 'email') {
           await client.query(
             `
             UPDATE ff_member
@@ -102,7 +118,7 @@ router.post('/verify-code', async (req, res) => {
                    email_verified_at = NOW()
              WHERE member_id = $1
             `,
-            [finalMember, value]
+            [finalMemberId, identifier_value]
           );
         } else {
           await client.query(
@@ -112,13 +128,18 @@ router.post('/verify-code', async (req, res) => {
                    phone_verified_at = NOW()
              WHERE member_id = $1
             `,
-            [finalMember, value]
+            [finalMemberId, identifier_value]
           );
         }
       }
 
       await client.query('COMMIT');
-      return res.json({ ok:true, verified: kind, member_id: finalMember || null });
+      return res.json({
+        ok: true,
+        verified: identifier_kind,
+        channel,
+        member_id: finalMemberId || null
+      });
     } catch (e) {
       await client.query('ROLLBACK');
       console.error('[identity/verify-code] tx error:', e);

@@ -29,66 +29,79 @@ function genCode() {
 
 router.post('/request-code', async (req, res) => {
   try {
-    const raw = String(req.body?.identifier || '').trim();
-    if (!raw) return res.status(400).json({ ok:false, error:'missing_identifier' });
+// inside POST /api/identity/request-code
+const raw = String(req.body?.identifier || '').trim();
+if (!raw) return res.status(400).json({ ok:false, error:'missing_identifier' });
 
-    let kind, value;
-    if (isEmail(raw)) {
-      kind = 'email';
-      value = raw.toLowerCase();
-    } else {
-      const e164 = toE164(raw);
-      if (!e164 || !E164_RX.test(e164)) {
-        return res.status(422).json({ ok:false, error:'invalid_identifier' });
-      }
-      kind = 'phone';
-      value = e164;
-    }
+const isPhone = /^\+[1-9]\d{7,14}$/.test(raw); // E.164
+const identifier_kind  = isPhone ? 'phone' : 'email';
+const identifier_value = raw.toLowerCase(); // normalize emails
+const channel          = isPhone ? 'sms' : 'email';
 
-    // who is making the request (optional)
-    const memberId =
-      (req.user && req.user.id) ||
-      req.body?.member_id ||
-      req.query?.member_id ||
-      null;
+// Optional member (text FK). If you have a session user, provide it; otherwise null.
+const member_id = (req.user && String(req.user.id)) || null;
 
-    const code = genCode();
-    const ttlMinutes = 10;
+// 6-digit random
+const code = String(Math.floor(100000 + Math.random() * 900000)).padStart(6, '0');
+// 10-minute expiry
+const expires = new Date(Date.now() + 10 * 60 * 1000);
 
-    // store → ff_identity_code
-    // schema expectation:
-    // (id bigserial, identifier_kind text, identifier_value text, member_id uuid null,
-    //  code text, expires_at timestamptz, consumed_at timestamptz null, created_at timestamptz default now())
-    await pool.query(
-  `UPDATE ff_identity_code
-     SET consumed_at = NOW()
-   WHERE identifier_kind = $1 AND identifier_value = $2 AND consumed_at IS NULL`,
-  [kind, value]
-);
+const client = await pool.connect();
+try {
+  await client.query('BEGIN');
 
-    await pool.query(
-      `
-      INSERT INTO ff_identity_code
-        (identifier_kind, identifier_value, member_id, code, expires_at)
-      VALUES ($1, $2, $3, $4, NOW() + ($5 || ' minutes')::interval)
-      `,
-      [kind, value, memberId, code, String(ttlMinutes)]
-    );
+  // house-keeping: purge old expired rows for this identifier/channel
+  await client.query(
+    `DELETE FROM ff_identity_code
+      WHERE identifier_kind=$1 AND identifier_value=$2 AND channel=$3
+        AND (expires_at < now() OR consumed_at IS NOT NULL)`,
+    [identifier_kind, identifier_value, channel]
+  );
 
-    // optional: clean up old/expired
-    pool.query(`DELETE FROM ff_identity_code WHERE expires_at < NOW() - interval '1 day'`).catch(()=>{});
+  // ensure only one active: consume any lingering unconsumed one
+  await client.query(
+    `UPDATE ff_identity_code
+       SET consumed_at = now()
+     WHERE identifier_kind=$1 AND identifier_value=$2 AND channel=$3
+       AND consumed_at IS NULL`,
+    [identifier_kind, identifier_value, channel]
+  );
 
-    // deliver via your NotificationAPI wrapper
-    const templateId = kind === 'email' ? 'emailDefault' : 'smsDefault';
-    const payload = { code }; // used in your template
-    await notify.send({
-      kind,            // 'email' | 'phone'
-      to: value,       // email or E.164 phone
-      templateId,      // maps inside notify.js
-      payload,
-    });
+  // insert the fresh code
+  await client.query(
+    `INSERT INTO ff_identity_code
+       (member_id, identifier_kind, identifier_value, channel, code, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [member_id, identifier_kind, identifier_value, channel, code, expires.toISOString()]
+  );
 
-    return res.json({ ok:true, kind, to:value, ttlMinutes });
+  await client.query('COMMIT');
+} catch (e) {
+  await client.query('ROLLBACK');
+  console.error('[identity/request-code] db error:', e);
+  return res.status(500).json({ ok:false, error:'db_error' });
+} finally {
+  client.release();
+}
+
+// === send via NotificationAPI (your existing notify.js) ===
+// Map to template and delivery options by channel.
+try {
+  await notify.sendOne({
+    channel,               // 'email' or 'sms'
+    to: identifier_value,  // email address or E.164 phone
+    templateId: channel === 'sms' ? (process.env.NOTIF_SMS_TEMPLATE || 'smsDefault')
+                                  : (process.env.NOTIF_EMAIL_TEMPLATE || 'emailDefault'),
+    data: { code },        // so your template can render the 6-digit code
+  });
+} catch (err) {
+  // You can still return 200 even if delivery vendor warns;
+  // the code is stored and can be re-sent.
+  console.warn('NotificationAPI warning.', err?.messages || err?.message || err);
+}
+
+return res.json({ ok:true, channel, sent:true, expires_at: expires.toISOString() });
+
   } catch (err) {
     console.error('[identity/request-code] error:', err);
     if (String(err.message || '').includes('NotificationAPI creds missing')) {
