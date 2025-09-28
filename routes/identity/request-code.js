@@ -2,7 +2,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../../src/db/pool');
-const notify  = require('../../notify'); // your existing notifier wrapper
+const notify  = require('../../services/notify'); // your existing notifier wrapper
 
 const router = express.Router();
 router.use(express.json());
