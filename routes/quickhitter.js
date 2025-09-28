@@ -373,8 +373,30 @@ router.get('/lookup', async (req, res) => {
 // - Repicks color on (handle,color) collision across BOTH tables.
 // - Preflight rejects if email/phone belong to another member (409).
 // ===================================================================
+const E164_RE = /^\+[1-9]\d{7,14}$/;
+
+function toE164(raw){
+  if (!raw) return null;
+  const d = String(raw).replace(/\D+/g,'');
+  if (!d) return null;
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  if (d.length >= 7 && d.length <= 15) return `+${d}`;
+  return null;
+}
+
 router.post('/upsert', async (req, res) => {
-  try {
+  try{
+    const b = req.body || {};
+    const email = b.email ? String(b.email).trim() : null;
+    const phone = b.phone ? toE164(b.phone) : null;
+
+    if (phone && !E164_RE.test(phone)){
+      return res.status(422).json({ ok:false, error:'invalid_phone', message:'Phone must be E.164 like +15551231234.' });
+    }
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){
+      return res.status(422).json({ ok:false, error:'invalid_email', message:'Email looks invalid.' });
+    }
     const body = req.body || {};
 
 // resolve member_id: session → cookie → provided → new
@@ -389,8 +411,7 @@ if (!member_id) {
 
     const handle = body.handle ? normHandle(body.handle) : null;
     let color    = body.color_hex ? normHex(body.color_hex) : null;
-    const email  = body.email && isEmail(body.email) ? body.email.toLowerCase() : null;
-    const phone  = body.phone ? e164(body.phone) : null;
+
     const image_key = stripCdn(body.image_key || body.image_url || '');
 
     if (handle && !isHandleShape(handle)) {
