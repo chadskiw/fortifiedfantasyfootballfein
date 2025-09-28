@@ -5,22 +5,45 @@ const router  = express.Router();
 const NotificationAPI = require('notificationapi-node-server-sdk').default;
 
 // --- ENV ---------------------------------------------------------------------
-const {
-  NOTIF_API_CLIENT_ID,
-  NOTIF_API_CLIENT_SECRET,
-  NOTIF_SMS_TEMPLATE_ID   = 'smsDefault',    // <- rename if your SMS template id differs
-  NOTIF_EMAIL_TEMPLATE_ID = 'emailDefault',  // <- rename if your Email template id differs
-} = process.env;
+// --- ENV ---------------------------------------------------------------------
+// Accept multiple possible env names (Render/Local mismatch safe)
+function pickEnv(...keys) {
+  for (const k of keys) if (process.env[k]) return process.env[k];
+  return undefined;
+}
+
+const NOTIF_ID = pickEnv(
+  'NOTIF_API_CLIENT_ID',
+  'NOTIFICATIONAPI_CLIENT_ID',
+  'NOTIFICATION_API_CLIENT_ID',
+  'NOTIFICATIONAPI_CLIENTID'
+);
+const NOTIF_SECRET = pickEnv(
+  'NOTIF_API_CLIENT_SECRET',
+  'NOTIFICATIONAPI_CLIENT_SECRET',
+  'NOTIFICATION_API_CLIENT_SECRET',
+  'NOTIFICATIONAPI_CLIENTSECRET'
+);
+
+// Optional template ids
+const NOTIF_SMS_TEMPLATE_ID   = pickEnv('NOTIF_SMS_TEMPLATE_ID', 'NOTIFICATIONAPI_SMS_TEMPLATE_ID')   || 'smsDefault';
+const NOTIF_EMAIL_TEMPLATE_ID = pickEnv('NOTIF_EMAIL_TEMPLATE_ID', 'NOTIFICATIONAPI_EMAIL_TEMPLATE_ID') || 'emailDefault';
 
 let _inited = false;
 function ensureNotifInit() {
   if (_inited) return;
-  if (!NOTIF_API_CLIENT_ID || !NOTIF_API_CLIENT_SECRET) {
+  if (!NOTIF_ID || !NOTIF_SECRET) {
+    // one-line masked hint in logs
+    console.warn('[NotificationAPI] env check:',
+      { id: NOTIF_ID ? `${NOTIF_ID.slice(0,4)}…(${NOTIF_ID.length})` : null,
+        secret: NOTIF_SECRET ? `***…(${NOTIF_SECRET.length})` : null });
     throw new Error('NotificationAPI creds missing (NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET)');
   }
-  NotificationAPI.init(NOTIF_API_CLIENT_ID, NOTIF_API_CLIENT_SECRET);
+  const NotificationAPI = require('notificationapi-node-server-sdk').default;
+  NotificationAPI.init(NOTIF_ID, NOTIF_SECRET);
   _inited = true;
 }
+
 
 // Very light E.164 for US; adapt if you support more regions broadly
 function toE164(input, defaultCountry = '+1') {
