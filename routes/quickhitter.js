@@ -23,6 +23,21 @@ const PALETTE = [
   '#77E0FF','#61D095','#FFD166','#FF6B6B','#A78BFA',
   '#F472B6','#34D399','#F59E0B','#22D3EE','#E879F9'
 ];
+// put near the top with other helpers
+const MID_RE = /^[A-Z0-9]{8}$/;
+function makeMemberId() {
+  // generate 8 upper-alnum (fits your CHECK)
+  const id = crypto.randomBytes(8).toString('base64')
+    .replace(/[^A-Z0-9]/gi, '')
+    .slice(0, 8)
+    .toUpperCase();
+  // extremely rare case: slice yields < 8, pad
+  return (id || 'ABCDEFGH').padEnd(8, 'X');
+}
+function ensureMemberId(v) {
+  const clean = String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return MID_RE.test(clean) ? clean : makeMemberId();
+}
 
 const norm       = v => String(v || '').trim();
 const normHex    = v => {
@@ -400,9 +415,18 @@ router.post('/upsert', async (req, res) => {
     const body = req.body || {};
 
 // resolve member_id: session → cookie → provided → new
-let member_id = getSessionMemberId(req)
-             || (req.body && String(req.body.member_id || '').trim())
-             || (req.cookies && String(req.cookies.ff_member || '').trim());
+// --- inside router.post('/upsert', ...) BEFORE you use member_id ---
+let member_id = (
+  getSessionMemberId(req) ||
+  (req.body && req.body.member_id) ||
+  (req.cookies && req.cookies.ff_member)
+);
+member_id = ensureMemberId(member_id);
+
+// refresh cookie to the sanitized ID so the client stops sending the long hash
+res.cookie('ff_member', member_id, {
+  httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 365*24*3600*1000
+});
 
 if (!member_id) {
   member_id = crypto.randomBytes(8).toString('base64')
