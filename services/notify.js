@@ -1,4 +1,4 @@
-// services/notify.js — NotificationAPI wrapper (email/sms, channel-safe)
+// services/notify.js — minimal NotificationAPI wrapper (channel-safe)
 const notificationapi = require('notificationapi-node-server-sdk').default;
 
 const {
@@ -18,11 +18,10 @@ function ensureInit() {
   _inited = true;
 }
 
-// E.164 normalizer (default US)
 function toE164(input, defaultCountry = '+1') {
   if (!input) return '';
   let s = String(input).trim();
-  if (/^\+\d{7,15}$/.test(s)) return s;           // already E.164
+  if (/^\+\d{7,15}$/.test(s)) return s;
   s = s.replace(/\D+/g, '');
   if (!s) return '';
   if (s.length >= 11 && s[0] !== '0') return `+${s}`;
@@ -30,9 +29,7 @@ function toE164(input, defaultCountry = '+1') {
 }
 
 /**
- * sendOne({ channel:'sms'|'email', to:string, templateId?:string, data?:object })
- * - SMS: to = raw or E.164 → normalized to E.164
- * - EMAIL: to = email string
+ * sendOne({ channel:'sms'|'email', to:string, templateId?, data? })
  */
 async function sendOne({ channel, to, templateId, data }) {
   ensureInit();
@@ -57,12 +54,8 @@ async function sendOne({ channel, to, templateId, data }) {
     throw new Error('sendOne: unsupported channel');
   }
 
-  // Don’t include empty fields that cause vendor warnings
-  if (!payload.templateId) delete payload.templateId;
+  if (!payload.templateId) delete payload.templateId; // avoid vendor warnings
   return notificationapi.send(payload);
 }
 
-module.exports = {
-  sendOne,
-  _toE164: toE164, // helper for tests
-};
+module.exports = { sendOne, _toE164: toE164 };
