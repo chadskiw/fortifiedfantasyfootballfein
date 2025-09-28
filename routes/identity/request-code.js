@@ -2,7 +2,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../../src/db/pool');
-const notify  = require('../../services/notify'); // exports { sendOne }
+const notify  = require('../../services/notify'); // <- the shim above
 
 const router = express.Router();
 router.use(express.json());
@@ -10,7 +10,6 @@ router.use(express.json());
 const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RX  = /^\+[1-9]\d{7,14}$/;
 
-// Normalize any email/phone-ish input → { kind:'email'|'phone', value, channel:'email'|'sms' }
 function normalizeIdentifier(raw) {
   const s = String(raw || '').trim();
   if (!s) return null;
@@ -18,7 +17,7 @@ function normalizeIdentifier(raw) {
   if (E164_RX.test(s)) return { kind: 'phone', value: s, channel: 'sms' };
   if (EMAIL_RX.test(s.toLowerCase())) return { kind: 'email', value: s.toLowerCase(), channel: 'email' };
 
-  // Try to coerce a phone
+  // Try to coerce phone like "415-555-0123" → +14155550123
   const digits = s.replace(/\D+/g, '');
   if (digits.length >= 10 && digits.length <= 15) {
     const e164 = digits.length === 10 ? `+1${digits}` : `+${digits}`;
@@ -44,10 +43,8 @@ router.post('/request-code', async (req, res) => {
       (req.body && req.body.member_id) ||
       null;
 
-    // 10-minute window
     const ttlMs   = 10 * 60 * 1000;
-    const now     = Date.now();
-    const expires = new Date(now + ttlMs);
+    const expires = new Date(Date.now() + ttlMs);
 
     let codeToSend = null;
 
@@ -55,7 +52,7 @@ router.post('/request-code', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // 1) Look for an active, unconsumed code for this identifier/channel
+      // Find existing unconsumed, unexpired code
       const existing = await client.query(
         `
           SELECT id, code
@@ -72,19 +69,15 @@ router.post('/request-code', async (req, res) => {
       );
 
       if (existing.rows.length) {
-        // 2a) Reuse the same code; optionally "refresh" the expiry window
+        // Reuse the same code and bump expiry
         const row = existing.rows[0];
         codeToSend = row.code;
-
-        // Bump expiry so the user always has ~10 minutes from (re)request
         await client.query(
-          `UPDATE ff_identity_code
-              SET expires_at = $2
-            WHERE id = $1`,
+          `UPDATE ff_identity_code SET expires_at = $2 WHERE id = $1`,
           [row.id, expires]
         );
       } else {
-        // 2b) No active code → insert a new one
+        // Create a new code
         codeToSend = genCode();
         await client.query(
           `
@@ -105,27 +98,18 @@ router.post('/request-code', async (req, res) => {
       client.release();
     }
 
-    // 3) Notify (best-effort; warning logs only if it fails/misconfigured)
-    try {
-      await notify.sendOne({
-        channel,              // 'email' | 'sms'
-        to: identifier_value, // email or +E164
-        data: { code: codeToSend }
-      });
-    } catch (err) {
-      console.warn('NotificationAPI warning.', err?.messages || err?.message || err);
-    }
-
-    return res.json({
-      ok: true,
+    // Best-effort notification (will not throw)
+    await notify.sendOne({
       channel,
-      sent: true,
-      expires_at: expires.toISOString()
-      // (intentionally not returning the code)
+      to: identifier_value,
+      data: { code: codeToSend },
+      templateId: channel === 'sms' ? 'smsDefault' : 'emailDefault'
     });
+
+    res.json({ ok:true, channel, sent:true, expires_at: expires.toISOString() });
   } catch (err) {
     console.error('[identity/request-code] error:', err);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
