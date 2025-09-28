@@ -1,60 +1,119 @@
-// services/notify.js
-let notificationapi;
-function sdk() {
-  if (notificationapi) return notificationapi;
-  const mod = require('notificationapi-node-server-sdk');
-  notificationapi = mod?.default || mod;
-  const id  = process.env.NOTIFICATIONAPI_CLIENT_ID;
-  const sec = process.env.NOTIFICATIONAPI_CLIENT_SECRET;
-  notificationapi.init(id, sec);
-  return notificationapi;
+// notify.js — NotificationAPI wrapper (SMS-first, no channel warnings)
+
+const notificationapi = require('notificationapi-node-server-sdk').default;
+
+// ---- ENV ----
+// Set these in your environment (.env or hosting panel)
+const {
+  NOTIF_API_CLIENT_ID,
+  NOTIF_API_CLIENT_SECRET,
+  NOTIF_SMS_TEMPLATE_ID = 'smsDefault', // change if your template id is different
+} = process.env;
+
+// guard init once
+let _inited = false;
+function ensureInit() {
+  if (_inited) return;
+  if (!NOTIF_API_CLIENT_ID || !NOTIF_API_CLIENT_SECRET) {
+    throw new Error('NotificationAPI credentials missing (NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET)');
+  }
+  notificationapi.init(NOTIF_API_CLIENT_ID, NOTIF_API_CLIENT_SECRET);
+  _inited = true;
 }
 
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-function toE164(raw){
-  const d = String(raw||'').replace(/\D+/g,'');
-  if (!d) return null;
-  if (d.length === 10) return `+1${d}`;
-  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
-  if (d.length >= 7 && d.length <= 15) return `+${d}`;
-  return null;
+// basic E.164 normalizer (assumes US if no +country; adjust as needed)
+function toE164(input, defaultCountry = '+1') {
+  if (!input) return '';
+  let s = String(input).trim();
+  // already E.164
+  if (/^\+\d{7,15}$/.test(s)) return s;
+  // strip non-digits
+  s = s.replace(/\D+/g, '');
+  // if it already begins with country code length ~11 for US, heuristic
+  if (s.length >= 11 && s[0] !== '0') return '+' + s;
+  return defaultCountry + s;
 }
 
 /**
- * Sends a verification code via NotificationAPI.
- * Expects a Notification with this ID to have SMS (and/or Email) channel configured.
+ * Send account authorization code via SMS.
+ * - Requires an SMS template with a {{code}} parameter.
+ * - Defaults to templateId from NOTIF_SMS_TEMPLATE_ID (e.g., "smsDefault").
+ *
+ * @param {Object} params
+ * @param {string} params.number  Phone number (any format; we normalize)
+ * @param {string} params.code    Verification code (string)
+ * @param {string} [params.templateId] Optional template override
+ * @returns {Promise<Object>} NotificationAPI response
  */
-async function sendVerification({ identifier, code, expiresMin = 10 }) {
-  const api = sdk();
-  const type = process.env.NOTIFICATIONAPI_VERIFICATION_ID || 'verification_code';
+async function sendAuthCodeSMS({ number, code, templateId }) {
+  ensureInit();
 
-  const isEmail = EMAIL_RE.test(String(identifier||'').trim());
-  const phone   = toE164(identifier);
-
-  const to = isEmail
-    ? { id: `email:${identifier.toLowerCase()}`, email: identifier.toLowerCase() }
-    : (phone ? { id: `phone:${phone}`, number: phone } : null);
-
-  if (!to) return { ok:false, reason:'bad_identifier' };
-
-  try {
-    await api.send({
-      type,            // <-- Notification ID in your dashboard
-      to,              // <-- for SMS must be { number: '+16175551212' }
-      parameters: {    // <-- template vars (Handlebars)
-        code: String(code),
-        expires_min: String(expiresMin)
-      }
-    });
-    return { ok:true, channel: isEmail ? 'email' : 'sms' };
-  } catch (e) {
-    const msg = String(e?.message || e);
-    if (/No default SMS template/i.test(msg))  return { ok:false, reason:'sms_not_configured', detail: msg };
-    if (/user.*email.*not provided/i.test(msg)) return { ok:false, reason:'email_missing', detail: msg };
-    if (/EMAIL.*not provided/i.test(msg))      return { ok:false, reason:'email_missing', detail: msg };
-    if (/email.*not configured/i.test(msg))    return { ok:false, reason:'email_not_configured', detail: msg };
-    return { ok:false, reason:'send_failed', detail: msg };
+  const e164 = toE164(number);
+  if (!e164) {
+    throw new Error('sendAuthCodeSMS: missing/invalid phone number');
   }
+  if (!code) {
+    throw new Error('sendAuthCodeSMS: missing code');
+  }
+
+  const payload = {
+    type: 'account_authorization',
+    to: { number: e164 },             // SMS only → avoids EMAIL/PUSH warnings
+    parameters: { code: String(code) }
+  };
+
+  // Force template if provided or fallback to default id
+  const tid = (templateId || NOTIF_SMS_TEMPLATE_ID || '').trim();
+  if (tid) payload.templateId = tid;
+
+  return notificationapi.send(payload);
 }
 
-module.exports = { sendVerification, toE164, EMAIL_RE };
+/**
+ * Send account authorization via BOTH channels (if provided).
+ * - Pass email to send email; pass number to send SMS.
+ * - Avoids warnings by only including fields you actually have.
+ *
+ * @param {Object} params
+ * @param {string} [params.email]  Recipient email
+ * @param {string} [params.number] Phone number (any format)
+ * @param {string} params.code     Verification code
+ * @param {string} [params.smsTemplateId] Optional SMS template id
+ * @param {string} [params.emailTemplateId] Optional Email template id
+ */
+async function sendAuthCodeMulti({ email, number, code, smsTemplateId, emailTemplateId }) {
+  ensureInit();
+  if (!email && !number) throw new Error('sendAuthCodeMulti: provide email and/or number');
+  if (!code) throw new Error('sendAuthCodeMulti: missing code');
+
+  const to = {};
+  if (email) to.email = String(email).trim();
+  if (number) to.number = toE164(number);
+
+  const payload = {
+    type: 'account_authorization',
+    to,
+    parameters: { code: String(code) }
+  };
+
+  // Channel-specific template selection:
+  // NotificationAPI supports one templateId overall; if you need per-channel
+  // templates, create separate notification types or dispatch two sends.
+  // Here we prioritize SMS template when only SMS present; otherwise prefer email template.
+  if (to.number && !to.email && smsTemplateId) {
+    payload.templateId = smsTemplateId;
+  } else if (to.email && !to.number && emailTemplateId) {
+    payload.templateId = emailTemplateId;
+  } else if (to.number && !to.email && NOTIF_SMS_TEMPLATE_ID) {
+    payload.templateId = NOTIF_SMS_TEMPLATE_ID;
+  }
+
+  return notificationapi.send(payload);
+}
+
+module.exports = {
+  sendAuthCodeSMS,
+  sendAuthCodeMulti,
+  // expose helper for tests
+  _toE164: toE164,
+};
