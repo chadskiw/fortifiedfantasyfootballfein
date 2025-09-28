@@ -1,154 +1,99 @@
 // routes/identity/request-code.js
 const express = require('express');
-const router  = express.Router();
+const crypto  = require('crypto');
+const pool    = require('../../src/db/pool');
+const notify  = require('../../notify'); // your existing notifier wrapper
 
-const NotificationAPI = require('notificationapi-node-server-sdk').default;
+const router = express.Router();
+router.use(express.json());
 
-// --- ENV ---------------------------------------------------------------------
-// --- ENV ---------------------------------------------------------------------
-// Accept multiple possible env names (Render/Local mismatch safe)
-function pickEnv(...keys) {
-  for (const k of keys) if (process.env[k]) return process.env[k];
-  return undefined;
-}
+// helpers
+const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const E164_RX  = /^\+[1-9]\d{7,14}$/;
 
-const NOTIF_ID = pickEnv(
-  'NOTIF_API_CLIENT_ID',
-  'NOTIFICATIONAPI_CLIENT_ID',
-  'NOTIFICATION_API_CLIENT_ID',
-  'NOTIFICATIONAPI_CLIENTID'
-);
-const NOTIF_SECRET = pickEnv(
-  'NOTIF_API_CLIENT_SECRET',
-  'NOTIFICATIONAPI_CLIENT_SECRET',
-  'NOTIFICATION_API_CLIENT_SECRET',
-  'NOTIFICATIONAPI_CLIENTSECRET'
-);
+const isEmail = v => EMAIL_RX.test(String(v||'').trim().toLowerCase());
+const toE164  = raw => {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D+/g,'');
+  if (!digits) return null;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (digits.length >= 7 && digits.length <= 15) return `+${digits}`;
+  return null;
+};
 
-// Optional template ids
-const NOTIF_SMS_TEMPLATE_ID   = pickEnv('NOTIF_SMS_TEMPLATE_ID', 'NOTIFICATIONAPI_SMS_TEMPLATE_ID')   || 'smsDefault';
-const NOTIF_EMAIL_TEMPLATE_ID = pickEnv('NOTIF_EMAIL_TEMPLATE_ID', 'NOTIFICATIONAPI_EMAIL_TEMPLATE_ID') || 'emailDefault';
-
-let _inited = false;
-function ensureNotifInit() {
-  if (_inited) return;
-  if (!NOTIF_ID || !NOTIF_SECRET) {
-    // one-line masked hint in logs
-    console.warn('[NotificationAPI] env check:',
-      { id: NOTIF_ID ? `${NOTIF_ID.slice(0,4)}…(${NOTIF_ID.length})` : null,
-        secret: NOTIF_SECRET ? `***…(${NOTIF_SECRET.length})` : null });
-    throw new Error('NotificationAPI creds missing (NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET)');
-  }
-  const NotificationAPI = require('notificationapi-node-server-sdk').default;
-  NotificationAPI.init(NOTIF_ID, NOTIF_SECRET);
-  _inited = true;
-}
-
-
-// Very light E.164 for US; adapt if you support more regions broadly
-function toE164(input, defaultCountry = '+1') {
-  if (!input) return '';
-  let s = String(input).trim();
-  if (/^\+\d{7,15}$/.test(s)) return s;
-  s = s.replace(/\D+/g, '');
-  if (!s) return '';
-  // If already includes CC (11+ digits), just prefix +
-  if (s.length >= 11) return `+${s}`;
-  // Assume US
-  return `${defaultCountry}${s}`;
-}
-
-// Generate a 6-digit code (000000–999999)
 function genCode() {
-  return String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
+  // 6-digit, uniform distribution
+  return String(100000 + (crypto.randomInt ? crypto.randomInt(900000) : Math.floor(Math.random()*900000)));
 }
 
-// Optional: plug in your own storage (session/DB/redis) here:
-async function savePendingCode({ memberId, destination, code }) {
-  // no-op placeholder — your existing flow likely already persists;
-  // keep it hooked up to whatever you had.
-  return true;
-}
-
-// --- ROUTE -------------------------------------------------------------------
-/**
- * POST /api/identity/request-code
- * Body can include: { email?, phone?, identifier? }
- *  - If both email & phone are present → send to BOTH (separate sends).
- *  - If only one present → send only that channel.
- */
 router.post('/request-code', async (req, res) => {
   try {
-    ensureNotifInit();
+    const raw = String(req.body?.identifier || '').trim();
+    if (!raw) return res.status(400).json({ ok:false, error:'missing_identifier' });
 
-    // Accept either explicit fields or a single identifier
-    const emailRaw = (req.body?.email || '').trim();
-    const phoneRaw = (req.body?.phone || '').trim();
-    const ident    = (req.body?.identifier || '').trim();
-
-    let email = emailRaw;
-    let phone = phoneRaw;
-
-    // If identifier looks like email/phone, map it
-    if (!email && /\S+@\S+\.\S+/.test(ident)) email = ident;
-    if (!phone && /[0-9()+\-\s.]/.test(ident) && !/\S+@\S+\.\S+/.test(ident)) phone = ident;
-
-    // At least one channel must be provided
-    if (!email && !phone) {
-      return res.status(400).json({ ok:false, error:'missing_destination', hint:'Provide email and/or phone' });
-    }
-
-    const code  = genCode();
-    const tasks = [];
-
-    // persist the code using your mechanism (optional placeholder)
-    try { await savePendingCode({ memberId: req.user?.id, destination: email || phone, code }); } catch {}
-
-    // --- SEND: SMS (only include number to avoid EMAIL warnings)
-    if (phone) {
-      const number = toE164(phone);
-      if (!number) {
-        return res.status(400).json({ ok:false, error:'invalid_phone' });
+    let kind, value;
+    if (isEmail(raw)) {
+      kind = 'email';
+      value = raw.toLowerCase();
+    } else {
+      const e164 = toE164(raw);
+      if (!e164 || !E164_RX.test(e164)) {
+        return res.status(422).json({ ok:false, error:'invalid_identifier' });
       }
-      tasks.push(
-        NotificationAPI.send({
-          type: 'account_authorization',
-          to:   { number },
-          parameters: { code },
-          templateId: NOTIF_SMS_TEMPLATE_ID, // force SMS template
-        }).then(
-          (r) => ({ channel:'sms', ok:true,  id:r?.id || null }),
-          (e) => ({ channel:'sms', ok:false, err:String(e && e.message || e) })
-        )
-      );
+      kind = 'phone';
+      value = e164;
     }
 
-    // --- SEND: Email (only include email to avoid SMS warnings)
-    if (email) {
-      tasks.push(
-        NotificationAPI.send({
-          type: 'account_authorization',
-          to:   { email },
-          parameters: { code },
-          templateId: NOTIF_EMAIL_TEMPLATE_ID, // force Email template
-        }).then(
-          (r) => ({ channel:'email', ok:true,  id:r?.id || null }),
-          (e) => ({ channel:'email', ok:false, err:String(e && e.message || e) })
-        )
-      );
+    // who is making the request (optional)
+    const memberId =
+      (req.user && req.user.id) ||
+      req.body?.member_id ||
+      req.query?.member_id ||
+      null;
+
+    const code = genCode();
+    const ttlMinutes = 10;
+
+    // store → ff_identity_code
+    // schema expectation:
+    // (id bigserial, identifier_kind text, identifier_value text, member_id uuid null,
+    //  code text, expires_at timestamptz, consumed_at timestamptz null, created_at timestamptz default now())
+    await pool.query(
+  `UPDATE ff_identity_code
+     SET consumed_at = NOW()
+   WHERE identifier_kind = $1 AND identifier_value = $2 AND consumed_at IS NULL`,
+  [kind, value]
+);
+
+    await pool.query(
+      `
+      INSERT INTO ff_identity_code
+        (identifier_kind, identifier_value, member_id, code, expires_at)
+      VALUES ($1, $2, $3, $4, NOW() + ($5 || ' minutes')::interval)
+      `,
+      [kind, value, memberId, code, String(ttlMinutes)]
+    );
+
+    // optional: clean up old/expired
+    pool.query(`DELETE FROM ff_identity_code WHERE expires_at < NOW() - interval '1 day'`).catch(()=>{});
+
+    // deliver via your NotificationAPI wrapper
+    const templateId = kind === 'email' ? 'emailDefault' : 'smsDefault';
+    const payload = { code }; // used in your template
+    await notify.send({
+      kind,            // 'email' | 'phone'
+      to: value,       // email or E.164 phone
+      templateId,      // maps inside notify.js
+      payload,
+    });
+
+    return res.json({ ok:true, kind, to:value, ttlMinutes });
+  } catch (err) {
+    console.error('[identity/request-code] error:', err);
+    if (String(err.message || '').includes('NotificationAPI creds missing')) {
+      return res.status(500).json({ ok:false, error:'notify_not_configured' });
     }
-
-    const results = await Promise.all(tasks);
-
-    // If at least one channel succeeded, treat as ok; include per-channel status
-    const anyOk = results.some(r => r.ok);
-    if (!anyOk) {
-      return res.status(502).json({ ok:false, error:'deliveries_failed', results });
-    }
-
-    return res.json({ ok:true, results });
-  } catch (e) {
-    console.error('[identity/request-code] error:', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
