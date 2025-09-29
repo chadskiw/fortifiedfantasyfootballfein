@@ -105,7 +105,7 @@ async function usedColorsForHandle(handle) {
   );
   const set = new Set();
   for (const r of rows) {
-    const up = String(r.color_hex || '').replace('#','').toUpperCase();
+    const up = String(r.color_hex || '').toUpperCase();
     if (up) set.add('#' + up);
   }
   return set;
