@@ -4,7 +4,7 @@ const router  = express.Router();
 router.use(express.json());
 
 /* ---------- DB pool ---------- */
-let db = require('../src/db/pool'); // adjust if your pool path differs
+let db = require('../../src/db/pool'); // adjust if your pool path differs
 let pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') {
   throw new Error('[pg] pool.query not available — check require path/export');
