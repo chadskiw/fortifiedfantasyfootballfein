@@ -1,130 +1,104 @@
 // routes/identity/verify-code.js
+// Mount with: app.use('/api/identity', require('./routes/identity/verify-code'));
+
 const express = require('express');
 const pool    = require('../../src/db/pool');
 
 const router = express.Router();
-router.use(express.json());
+router.use(express.json({ limit: '1mb' }));
 
-const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const E164_RX  = /^\+[1-9]\d{7,14}$/;
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const E164_RE  = /^\+[1-9]\d{7,14}$/;
 
 router.post('/verify-code', async (req, res) => {
   try {
-    const identifier = String(req.body?.identifier || '').trim();
-    const code       = String(req.body?.code || '').trim();
-
-    if (!identifier || !/^\d{6}$/.test(code))
-      return res.status(400).json({ ok:false, error:'bad_request' });
-
-    // normalize
-    let kind, value;
-    if (EMAIL_RX.test(identifier.toLowerCase())) {
-      kind = 'email';
-      value = identifier.toLowerCase();
-    } else if (E164_RX.test(identifier)) {
-      kind = 'phone';
-      value = identifier;
-    } else {
+    const { identifier, code } = req.body || {};
+    const raw = String(identifier || '').trim();
+    const isEmail = EMAIL_RE.test(raw);
+    const isPhone = E164_RE.test(raw);
+    if (!(isEmail || isPhone)) {
       return res.status(422).json({ ok:false, error:'invalid_identifier' });
     }
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      // lock latest matching active code
-      const { rows } = await client.query(
-        `
-        SELECT id, member_id
-          FROM ff_identity_code
-         WHERE identifier_kind = $1
-           AND identifier_value = $2
-           AND code = $3
-           AND consumed_at IS NULL
-           AND expires_at > NOW()
-         ORDER BY id DESC
-         FOR UPDATE
-        `,
-        [kind, value, code]
-      );
-
-      if (!rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ ok:false, error:'invalid_or_expired' });
-      }
-
-      const row = rows[0];
-
-      // consume the code
-      await client.query(
-        `UPDATE ff_identity_code SET consumed_at = NOW() WHERE id = $1`,
-        [row.id]
-      );
-
-      // choose member to apply verification to
-      const sessionMember =
-        (req.user && req.user.id) ||
-        (req.body?.member_id) ||
-        (req.query?.member_id) ||
-        row.member_id ||
-        null;
-
-      let finalMember = null;
-
-      if (sessionMember) {
-        const r = await client.query(
-          'SELECT member_id FROM ff_member WHERE member_id = $1',
-          [String(sessionMember)]
-        );
-        finalMember = r.rows[0]?.member_id || null;
-      }
-
-      if (!finalMember) {
-        // try to locate by contact itself
-        const byContact = await client.query(
-          kind === 'email'
-            ? 'SELECT member_id FROM ff_member WHERE LOWER(email) = LOWER($1) LIMIT 1'
-            : 'SELECT member_id FROM ff_member WHERE phone_e164 = $1 LIMIT 1',
-          [value]
-        );
-        finalMember = byContact.rows[0]?.member_id || null;
-      }
-
-      if (finalMember) {
-        if (kind === 'email') {
-          await client.query(
-            `
-            UPDATE ff_member
-               SET email = COALESCE(email, $2),
-                   email_verified_at = NOW(),
-                   updated_at = NOW()
-             WHERE member_id = $1
-            `,
-            [finalMember, value]
-          );
-        } else {
-          await client.query(
-            `
-            UPDATE ff_member
-               SET phone_e164 = COALESCE(phone_e164, $2),
-                   phone_verified_at = NOW(),
-                   updated_at = NOW()
-             WHERE member_id = $1
-            `,
-            [finalMember, value]
-          );
-        }
-      }
-
-      await client.query('COMMIT');
-      return res.json({ ok:true, verified: kind, member_id: finalMember || null });
-    } catch (e) {
-      await client.query('ROLLBACK');
-      console.error('[identity/verify-code] tx error:', e);
-      return res.status(500).json({ ok:false, error:'server_error' });
-    } finally {
-      client.release();
+    if (!/^\d{6}$/.test(String(code || ''))) {
+      return res.status(422).json({ ok:false, error:'invalid_code' });
     }
+
+    const kind    = isEmail ? 'email' : 'phone';
+    const channel = isEmail ? 'email' : 'sms';
+    const cookieMemberId = (req.cookies?.ff_member || '').trim() || null;
+
+    // Find an active (not consumed, unexpired) row with this exact code+identifier
+    const q = await pool.query(
+      `
+      SELECT id, member_id, identifier_kind, identifier_value, channel, code, attempts,
+             expires_at, created_at, consumed_at
+        FROM ff_identity_code
+       WHERE identifier_kind=$1
+         AND identifier_value=$2
+         AND channel=$3
+         AND code=$4
+         AND consumed_at IS NULL
+         AND expires_at > now()
+       ORDER BY created_at DESC
+       LIMIT 1
+      `,
+      [kind, raw, channel, String(code)]
+    );
+
+    if (!q.rowCount) {
+      // increment attempts if there is a most recent matching identifier/code (optional)
+      await pool.query(
+        `UPDATE ff_identity_code
+            SET attempts = attempts + 1
+          WHERE identifier_kind=$1 AND identifier_value=$2 AND channel=$3
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [kind, raw, channel]
+      ).catch(()=>{});
+      return res.status(400).json({ ok:false, error:'invalid_or_expired' });
+    }
+
+    const row = q.rows[0];
+
+    // Mark consumed
+    await pool.query(
+      `UPDATE ff_identity_code SET consumed_at = now() WHERE id=$1`,
+      [row.id]
+    );
+
+    // Decide which member gets the verified contact:
+    //   Prefer the member_id stored on the code row; else fall back to current cookie.
+    const targetMember = row.member_id || cookieMemberId;
+    if (!targetMember) {
+      // Edge: no member to attach to (should be rare). We still succeed.
+      return res.json({ ok:true, verified:true, attached:false });
+    }
+
+    // Apply to ff_quickhitter
+    if (kind === 'email') {
+      await pool.query(
+        `
+        INSERT INTO ff_quickhitter (member_id, email, email_is_verified, updated_at, created_at)
+        VALUES ($1, $2, true, now(), now())
+        ON CONFLICT (member_id) DO UPDATE
+        SET email=$2, email_is_verified=true, updated_at=now()
+        `,
+        [targetMember, row.identifier_value]
+      );
+    } else {
+      await pool.query(
+        `
+        INSERT INTO ff_quickhitter (member_id, phone, phone_is_verified, updated_at, created_at)
+        VALUES ($1, $2, true, now(), now())
+        ON CONFLICT (member_id) DO UPDATE
+        SET phone=$2, phone_is_verified=true, updated_at=now()
+        `,
+        [targetMember, row.identifier_value]
+      );
+    }
+
+    return res.json({ ok:true, verified:true, attached:true, member_id: targetMember });
+
   } catch (err) {
     console.error('[identity/verify-code] error:', err);
     return res.status(500).json({ ok:false, error:'server_error' });

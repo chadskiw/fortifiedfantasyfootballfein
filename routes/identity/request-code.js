@@ -1,129 +1,200 @@
 // routes/identity/request-code.js
+// Mount with: app.use('/api/identity', require('./routes/identity/request-code'));
+
 const express = require('express');
+const crypto  = require('crypto');
 const pool    = require('../../src/db/pool');
-const notify  = require('../../services/notify'); // sendOne() — best-effort shim
+const { sendOne } = require('../../services/notify'); // your notify.js shim
 
 const router = express.Router();
-router.use(express.json());
+router.use(express.json({ limit: '2mb' }));
+router.use(express.urlencoded({ extended: false }));
 
-const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const E164_RX  = /^\+[1-9]\d{7,14}$/;
+/* ---------------- utils ---------------- */
 
-function six() {
-  // 000000–999999 as zero-padded string
-  return String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const E164_RE  = /^\+[1-9]\d{7,14}$/;
+
+function toE164(raw){
+  if (!raw) return null;
+  const d = String(raw).replace(/\D+/g,'');
+  if (!d) return null;
+  if (d.length === 10) return `+1${d}`;           // US local → +1XXXXXXXXXX
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  if (d.length >= 7 && d.length <= 15) return `+${d}`;
+  return null;
 }
 
-router.post('/request-code', async (req, res) => {
-  try {
-    const rawId = String(req.body?.identifier || '').trim();
-    if (!rawId) return res.status(400).json({ ok:false, error:'missing_identifier' });
+function normalizeIdentifier(input){
+  const raw = String(input || '').trim();
+  if (!raw) return { kind:null, value:null, channel:null, error:'empty' };
 
-    // normalize → kind/value/channel
-    let identifier_kind, identifier_value, channel;
-    if (EMAIL_RX.test(rawId.toLowerCase())) {
-      identifier_kind  = 'email';
-      identifier_value = rawId.toLowerCase();
-      channel          = 'email';
-    } else if (E164_RX.test(rawId)) {
-      identifier_kind  = 'phone';
-      identifier_value = rawId;
-      channel          = 'sms';
-    } else {
-      return res.status(422).json({ ok:false, error:'invalid_identifier' });
+  if (EMAIL_RE.test(raw)) {
+    return { kind:'email', value: raw.toLowerCase(), channel:'email' };
+  }
+  const e164 = toE164(raw);
+  if (e164 && E164_RE.test(e164)) {
+    return { kind:'phone', value: e164, channel:'sms' };
+  }
+  return { kind:null, value:null, channel:null, error:'invalid_identifier' };
+}
+
+function sixDigit(){
+  // cryptographically strong 6-digit numeric code
+  const n = crypto.randomInt(0, 1000000);
+  return String(n).padStart(6, '0');
+}
+
+function maskIdentifier(kind, value){
+  if (kind === 'email') {
+    try {
+      const [user, host] = value.split('@');
+      const u = user.length <= 2 ? user : (user[0] + '***' + user.slice(-1));
+      const h = host.replace(/^(.)(.*)(\..*)$/, (_,a,b,c)=> a + '***' + c);
+      return `${u}@${h}`;
+    } catch { return value; }
+  }
+  if (kind === 'phone') {
+    return value.replace(/^(\+\d{0,2})\d+(?=\d{2}$)/, (_,cc)=> cc + '***'); // keep country & last 2
+  }
+  return value;
+}
+
+/* ---------------- rate limit (very light) ---------------- */
+
+const RL_BUCKET = new Map(); // memory-per-process; OK for Render / single dyno
+function rateLimit(key, limit = 6, windowMs = 60_000){
+  const now = Date.now();
+  const hit = RL_BUCKET.get(key) || { n:0, t: now };
+  if (now - hit.t > windowMs) { hit.n = 0; hit.t = now; }
+  hit.n++;
+  RL_BUCKET.set(key, hit);
+  return hit.n <= limit;
+}
+
+/* ---------------- main ---------------- */
+
+/**
+ * POST /api/identity/request-code
+ * body: { identifier: string }
+ *
+ * Behavior:
+ *  - Upsert the contact into ff_quickhitter for the current cookie member_id (if present)
+ *  - Look for an existing, active code for (kind, value, channel); if present, reuse it
+ *  - Else create a new code row (carrying member_id if available)
+ *  - Send the code via NotificationAPI shim (best-effort; never throws at caller)
+ */
+router.post('/request-code', async (req, res) => {
+  const started = Date.now();
+
+  try {
+    const { identifier } = req.body || {};
+    const { kind, value, channel, error } = normalizeIdentifier(identifier);
+    if (error || !kind) {
+      return res.status(422).json({ ok:false, error:'invalid_identifier', message:'Provide a valid email or +E164 phone.' });
     }
 
-    // who are we sending this for (optional)
-    const memberHint =
-      (req.user && String(req.user.id)) ||
-      (req.body?.member_id ? String(req.body.member_id) : null) ||
-      null;
+    // simple IP+value rate limit
+    const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
+    const key = crypto.createHash('sha256').update(`${ip}::${kind}:${value}`).digest('hex');
+    if (!rateLimit(key, 6, 60_000)) {
+      return res.status(429).json({ ok:false, error:'rate_limited' });
+    }
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    // carry member_id from cookies if present
+    const cookieMemberId = (req.cookies?.ff_member || '').trim() || null;
 
-      // 1) Look for an existing active code (same kind/value/channel) — reuse if present
-      const { rows: existing } = await client.query(
+    // 1) UPSERT into ff_quickhitter *before* we write code
+    //    (only if we have a member cookie)
+    if (cookieMemberId) {
+      const now = new Date();
+      const cols = {
+        email : kind === 'email' ? value : null,
+        phone : kind === 'phone' ? value : null,
+      };
+
+      // We never overwrite a *verified* contact here; we only set the pending value
+      // if that column is currently NULL or equals the same value.
+      await pool.query(
         `
-        SELECT id, code, expires_at
-          FROM ff_identity_code
-         WHERE identifier_kind  = $1
-           AND identifier_value = $2
-           AND channel          = $3
-           AND consumed_at IS NULL
-           AND expires_at > NOW()
-         ORDER BY created_at DESC
-         LIMIT 1
+        INSERT INTO ff_quickhitter (member_id, email, phone, updated_at, created_at)
+        VALUES ($1, $2, $3, $4, $4)
+        ON CONFLICT (member_id) DO UPDATE
+        SET
+          email = COALESCE(ff_quickhitter.email, EXCLUDED.email),
+          phone = COALESCE(ff_quickhitter.phone, EXCLUDED.phone),
+          updated_at = EXCLUDED.updated_at
         `,
-        [identifier_kind, identifier_value, channel]
-      );
-
-      let code, expiresAt;
-      let reused = false;
-
-      if (existing.length) {
-        // Reuse the most recent active code
-        code = existing[0].code;
-        expiresAt = existing[0].expires_at;
-        reused = true;
-
-        // Optional: gently “refresh” expiry window by extending if < 5 min left
-        // (safe because we’re not violating the unique index; we’re not INSERTing)
-        const msLeft = new Date(expiresAt).getTime() - Date.now();
-        if (msLeft < 5 * 60_000) {
-          const { rows: r2 } = await client.query(
-            `UPDATE ff_identity_code
-                SET expires_at = NOW() + interval '10 minutes'
-              WHERE id = $1
-            RETURNING expires_at`,
-            [existing[0].id]
-          );
-          expiresAt = r2[0].expires_at;
-        }
-      } else {
-        // 2) Create a new code
-        code = six();
-        const { rows: ins } = await client.query(
-          `
-          INSERT INTO ff_identity_code
-            (member_id, identifier_kind, identifier_value, channel, code, expires_at)
-          VALUES
-            ($1,        $2,              $3,               $4,      $5,   NOW() + interval '10 minutes')
-          RETURNING expires_at
-          `,
-          [memberHint, identifier_kind, identifier_value, channel, code]
-        );
-        expiresAt = ins[0].expires_at;
-      }
-
-      await client.query('COMMIT');
-
-      // 3) Fire-and-forget notification (never throws; only warns if creds missing)
-      //    Template IDs: email → emailDefault, sms → smsDefault (in your shim) :contentReference[oaicite:1]{index=1}
-      notify.sendOne({
-        channel,
-        to: identifier_value,
-        data: { code },
-        // If you created specific templates, uncomment:
-        // templateId: channel === 'sms' ? 'smsDefault' : 'emailDefault'
+        [cookieMemberId, cols.email, cols.phone, now]
+      ).catch((e) => {
+        // Non-fatal: if the row belongs to another, the quickhitter/upsert route handles that.
+        // Here we just avoid blocking code send.
+        console.warn('[request-code] quickhitter upsert warn:', e?.message || e);
       });
+    }
 
-      // 4) Done
-      return res.json({
-        ok: true,
-        reused,
-        channel,
-        identifier: identifier_value,
-        expiresAt
+    // 2) Reuse active code if exists; else create new
+    let codeRow = null;
+
+    const reuse = await pool.query(
+      `
+      SELECT id, member_id, identifier_kind, identifier_value, channel, code,
+             attempts, expires_at, created_at, consumed_at
+        FROM ff_identity_code
+       WHERE identifier_kind=$1
+         AND identifier_value=$2
+         AND channel=$3
+         AND consumed_at IS NULL
+         AND expires_at > now()
+       ORDER BY created_at DESC
+       LIMIT 1
+      `,
+      [kind, value, channel]
+    );
+
+    if (reuse.rowCount) {
+      codeRow = reuse.rows[0];
+    } else {
+      const code = sixDigit();
+      const expiryMinutes = 12; // generous window
+      const expiresAtSql = `now() + interval '${expiryMinutes} minutes'`;
+
+      const ins = await pool.query(
+        `
+        INSERT INTO ff_identity_code
+          (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at)
+        VALUES
+          ($1,        $2,              $3,              $4,      $5,   0,        ${expiresAtSql}, now())
+        RETURNING id, member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, consumed_at
+        `,
+        [cookieMemberId, kind, value, channel, code]
+      );
+      codeRow = ins.rows[0];
+    }
+
+    // 3) Best-effort send (don’t make the route fail if a provider issue happens)
+    try {
+      await sendOne({
+        channel: channel === 'sms' ? 'sms' : 'email',
+        to: value,
+        data: { code: codeRow.code, site: 'Fortified Fantasy' },
+        templateId: channel === 'sms' ? 'smsDefault' : 'emailDefault'
       });
     } catch (e) {
-      await pool.query('ROLLBACK');
-      console.error('[identity/request-code] db error:', e);
-      return res.status(500).json({ ok:false, error:'db_error' });
-    } finally {
-      client.release();
+      // notify.js already logs; we still succeed the API
     }
+
+    const ms = Date.now() - started;
+    return res.json({
+      ok: true,
+      kind,
+      channel,
+      to: maskIdentifier(kind, value),
+      expires_at: codeRow.expires_at,
+      reused: !!reuse.rowCount,
+      took_ms: ms
+    });
+
   } catch (err) {
     console.error('[identity/request-code] error:', err);
     return res.status(500).json({ ok:false, error:'server_error' });
