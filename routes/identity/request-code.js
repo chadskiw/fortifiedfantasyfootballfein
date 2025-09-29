@@ -164,15 +164,25 @@ router.post('/request-code', async (req, res) => {
       reused = false;
     }
 
-    // (D) Fire-and-forget send; never block API on provider errors
-    try {
-      await sendOne({
-        channel: channel === 'sms' ? 'sms' : 'email',
-        to: value,
-        data: { code: row?.code || '000000', site: 'Fortified Fantasy' },
-        templateId: channel === 'sms' ? 'smsDefault' : 'emailDefault'
-      });
-    } catch (_) {}
+// (D) Send the code (best-effort; don't block API on provider errors)
+try {
+  const theCode = row?.code || '000000';
+  await sendOne({
+    channel: channel === 'sms' ? 'sms' : 'email',
+    to: value,
+    // IMPORTANT: include { code } so templates can render it
+    data: {
+      code: theCode,
+      subject: 'Your Fortified Fantasy code',
+      text: `Your Fortified Fantasy verification code is: ${theCode}`
+    },
+    // optional: use explicit template ids if you have them configured
+    templateId: channel === 'sms' ? 'ff_sms_code' : 'ff_email_code'
+  });
+} catch (e) {
+  console.warn('NotificationAPI warning.', e?.status ? { status: e.status, body: e.body } : (e?.message || e));
+}
+
 
     // (E) Safe response (guard if row is somehow null)
     const ttlMs = 12 * 60 * 1000;
