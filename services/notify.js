@@ -1,8 +1,9 @@
 // services/notify.js
-// Robust, once-per-process notifier shim.
-// - Detects multiple env var names
-// - Loads dotenv (safe even if already loaded)
-// - Never throws; logs at most once per issue
+// Robust notifier shim.
+// - Loads dotenv from DOTENV_CONFIG_PATH or ./.env
+// - Accepts multiple env name variants
+// - Optional debug to log which keys are found (not values)
+// - Never throws
 
 const fetch = global.fetch || require('node-fetch');
 
@@ -11,39 +12,58 @@ let warnedNoTo = false;
 
 function safeLoadDotenv() {
   try {
-    // No-op if already loaded
-    require('dotenv').config();
+    const path = process.env.DOTENV_CONFIG_PATH || '.env';
+    // eslint-disable-next-line import/no-extraneous-dependencies
+    require('dotenv').config({ path, override: false });
   } catch {}
 }
 safeLoadDotenv();
 
+const DEBUG = String(process.env.NOTIF_DEBUG || '').trim() === '1';
+
 function firstEnv(...keys) {
   for (const k of keys) {
     const v = process.env[k];
-    if (v && String(v).trim() !== '') return v.trim();
+    if (v && String(v).trim() !== '') return { key: k, value: v.trim() };
   }
-  return null;
+  return { key: null, value: null };
 }
 
 /**
- * Resolve credentials — supports a few common names.
- *  NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET
- *  NOTIFICATION_API_CLIENT_ID / NOTIFICATION_API_CLIENT_SECRET
- *  (optional) NOTIF_API_BASE (defaults to https://api.notificationapi.com)
+ * Resolve credentials — supports common variants.
+ *  Primary:   NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET
+ *  Variants:  NOTIFICATION_API_CLIENT_ID / SECRET
+ *             NOTIFICATIONAPI_CLIENT_ID / SECRET   (no underscore)
+ *             NOTIF_CLIENT_ID / NOTIF_CLIENT_SECRET
+ *  Base:      NOTIF_API_BASE or NOTIFICATION_API_BASE (optional)
  */
 function getCreds() {
-  const clientId = firstEnv(
+  const id = firstEnv(
     'NOTIF_API_CLIENT_ID',
     'NOTIFICATION_API_CLIENT_ID',
+    'NOTIFICATIONAPI_CLIENT_ID',
     'NOTIF_CLIENT_ID'
   );
-  const clientSecret = firstEnv(
+  const sec = firstEnv(
     'NOTIF_API_CLIENT_SECRET',
     'NOTIFICATION_API_CLIENT_SECRET',
+    'NOTIFICATIONAPI_CLIENT_SECRET',
     'NOTIF_CLIENT_SECRET'
   );
-  const base = firstEnv('NOTIF_API_BASE', 'NOTIFICATION_API_BASE') || 'https://api.notificationapi.com';
-  return { clientId, clientSecret, base };
+  const base = firstEnv('NOTIF_API_BASE', 'NOTIFICATION_API_BASE').value || 'https://api.notificationapi.com';
+
+  if (DEBUG) {
+    const cwd = process.cwd();
+    const seen = {
+      cwd,
+      clientId_key: id.key,
+      clientSecret_key: sec.key,
+      base_key: base ? (process.env.NOTIF_API_BASE ? 'NOTIF_API_BASE' : (process.env.NOTIFICATION_API_BASE ? 'NOTIFICATION_API_BASE' : 'default')) : 'default'
+    };
+    console.log('NotificationAPI debug:', seen);
+  }
+
+  return { clientId: id.value, clientSecret: sec.value, base };
 }
 
 /**
@@ -71,34 +91,26 @@ async function sendOne(opts = {}) {
   const { clientId, clientSecret, base } = getCreds();
   if (!clientId || !clientSecret) {
     if (!warnedNoCreds) {
-      console.warn('NotificationAPI warning. NotificationAPI credentials missing (NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET)');
+      console.warn('NotificationAPI warning. NotificationAPI credentials missing (NOTIF_API_CLIENT_ID / NOTIF_API_CLIENT_SECRET).');
       warnedNoCreds = true;
     }
-    // Don’t fail the caller; verification flow should continue
     return { ok: false, skipped: true, reason: 'missing_creds' };
   }
 
-  // If you have a real NotificationAPI project, wire it here.
-  // Below is a safe best-effort POST; failures are swallowed into a non-throwing result.
+  // Best-effort send
   try {
-    const body = {
-      channel,
-      to,
-      templateId,
-      data
-    };
-
-    const r = await fetch(`${base.replace(/\/+$/, '')}/send`, {
+    const r = await fetch(`${base.replace(/\/+$/,'')}/send`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-client-id': clientId,
         'x-client-secret': clientSecret
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify({
+        channel, to, templateId, data
+      })
     });
 
-    // non-2xx → warn once & keep going
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       console.warn('NotificationAPI warning.', { status: r.status, body: txt?.slice?.(0, 300) || '' });
