@@ -16,7 +16,7 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RE  = /^\+[1-9]\d{7,14}$/;
 const CODE_RE  = /^\d{6}$/;
 
-const ENV = String(process.env.NODE_ENV || '').trim() || 'development';
+const ENV   = String(process.env.NODE_ENV || '').trim() || 'development';
 const DEBUG = process.env.FF_DEBUG_VERIFY === '1';
 
 function toE164(raw){
@@ -56,35 +56,57 @@ router.post('/verify-code', async (req, res) => {
 
     if (DEBUG) console.log('[verify] try', { kind, value, channel, code });
 
-    // NOTE: NO member_id filter. Match by identifier + channel only.
-    const sel = await pool.query(
-      `
-      SELECT id, member_id, code, attempts
-        FROM ff_identity_code
-       WHERE identifier_kind = $1
-         AND identifier_value = $2
-         AND channel          = $3
-         AND consumed_at IS NULL
-         AND (is_active = true OR expires_at > now())
-       ORDER BY created_at DESC
-       LIMIT 1
-      `,
-      [kind, value, channel]
-    );
-    const row = sel.rows[0] || null;
+    // ---- Find latest active code for this identifier+channel (no member filter) ----
+    let sel;
+    if (kind === 'phone') {
+      // Match by digits-only to tolerate +, spaces, parentheses, or rows stored without '+'
+      sel = await pool.query(
+        `
+        SELECT id, member_id, code, attempts, expires_at, created_at, identifier_value
+          FROM ff_identity_code
+         WHERE identifier_kind = 'phone'
+           AND channel = 'sms'
+           AND REGEXP_REPLACE(identifier_value, '\\D', '', 'g') = REGEXP_REPLACE($1, '\\D', '', 'g')
+           AND consumed_at IS NULL
+           AND (is_active = true OR expires_at > now())
+         ORDER BY created_at DESC
+         LIMIT 1
+        `,
+        [value]
+      );
+    } else {
+      sel = await pool.query(
+        `
+        SELECT id, member_id, code, attempts, expires_at, created_at, identifier_value
+          FROM ff_identity_code
+         WHERE identifier_kind = 'email'
+           AND channel = 'email'
+           AND LOWER(identifier_value) = LOWER($1)
+           AND consumed_at IS NULL
+           AND (is_active = true OR expires_at > now())
+         ORDER BY created_at DESC
+         LIMIT 1
+        `,
+        [value]
+      );
+    }
 
-    if (DEBUG) console.log('[verify] found row?', !!row, row && { id: row.id, attempts: row.attempts, member_id: row.member_id });
+    const row = sel.rows[0] || null;
+    if (DEBUG) console.log('[verify] found row?', !!row, row && {
+      id: row.id, attempts: row.attempts, member_id: row.member_id,
+      created_at: row.created_at, identifier_value: row.identifier_value
+    });
 
     if (!row) return res.status(400).json({ ok:false, error:'invalid_or_expired' });
 
-    if (row.code !== String(code)) {
+    if (String(row.code) !== String(code)) {
       const bumped = Math.min((row.attempts || 0) + 1, 10);
       await pool.query(`UPDATE ff_identity_code SET attempts=$1 WHERE id=$2`, [bumped, row.id]);
       if (DEBUG) console.log('[verify] mismatch, attempts ->', bumped);
       return res.status(400).json({ ok:false, error:'invalid_or_expired' });
     }
 
-    // Success — consume and link to current cookie member
+    // ---- Success: consume and link to this cookie member ----
     const memberId = ensureMemberId(req.cookies?.ff_member);
     await pool.query(
       `UPDATE ff_identity_code
@@ -117,11 +139,7 @@ router.post('/verify-code', async (req, res) => {
     // refresh cookie
     res.cookie('ff_member', memberId, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
 
-    const payload = { ok:true, verified: kind, member_id: memberId, took_ms: Date.now() - t0 };
-    // Non-prod: helpful echo for end-to-end tests
-    if (ENV !== 'production') payload.dev_hint = 'verified';
-
-    return res.json(payload);
+    return res.json({ ok:true, verified: kind, member_id: memberId, took_ms: Date.now() - t0 });
   } catch (e) {
     console.error('[identity/verify-code] error:', e);
     return res.status(500).json({ ok:false, error:'server_error' });
