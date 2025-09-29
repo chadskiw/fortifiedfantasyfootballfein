@@ -3,7 +3,14 @@
 
 const express = require('express');
 const crypto  = require('crypto');
-const pool    = require('../../src/db/pool');
+
+// ---- DB pool (works with either default or named export) ----
+let db = require('../../src/db/pool');
+let pool = db.pool || db;
+if (!pool || typeof pool.query !== 'function') {
+  throw new Error('[identity/request-code] pg pool missing/invalid import');
+}
+
 const { sendOne } = require('../../services/notify'); // your notify shim
 
 const router = express.Router();
@@ -15,7 +22,7 @@ router.use(express.urlencoded({ extended: false }));
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RE  = /^\+[1-9]\d{7,14}$/;
 
-function toE164(raw) {
+function toE164(raw){
   if (!raw) return null;
   const d = String(raw).replace(/\D+/g,'');
   if (!d) return null;
@@ -32,9 +39,7 @@ function normalizeIdentifier(input){
     return { kind:'email', value: raw.toLowerCase(), channel:'email' };
   }
   const p = toE164(raw);
-  if (p && E164_RE.test(p)) {
-    return { kind:'phone', value: p, channel:'sms' };
-  }
+  if (p && E164_RE.test(p)) return { kind:'phone', value:p, channel:'sms' };
   return { kind:null, value:null, channel:null, error:'invalid_identifier' };
 }
 
@@ -55,7 +60,7 @@ function mask(kind, value){
   return value;
 }
 
-/* ---------------- light in-proc ratelimit ---------------- */
+/* ---------------- light in-proc rate limit ---------------- */
 
 const RL = new Map();
 function rateLimit(key, limit=6, windowMs=60_000){
@@ -65,6 +70,27 @@ function rateLimit(key, limit=6, windowMs=60_000){
   hit.n++;
   RL.set(key, hit);
   return hit.n <= limit;
+}
+
+/* ---------------- core: find existing active code ---------------- */
+
+async function findActiveCode(kind, value, channel){
+  const q = await pool.query(
+    `
+    SELECT id, member_id, identifier_kind, identifier_value, channel, code, attempts,
+           expires_at, created_at, consumed_at
+      FROM ff_identity_code
+     WHERE identifier_kind=$1
+       AND identifier_value=$2
+       AND channel=$3
+       AND consumed_at IS NULL
+       AND expires_at > now()
+     ORDER BY created_at DESC
+     LIMIT 1
+    `,
+    [kind, value, channel]
+  );
+  return q.rows[0] || null;
 }
 
 /* ---------------- route ---------------- */
@@ -82,7 +108,7 @@ router.post('/request-code', async (req, res) => {
 
     const cookieMemberId = (req.cookies?.ff_member || '').trim() || null;
 
-    // (A) Prewrite contact to ff_quickhitter (ownership scratchpad) — does NOT promote.
+    // (A) Prewrite to ff_quickhitter (no promotion)
     if (cookieMemberId) {
       const colEmail = kind === 'email' ? value : null;
       const colPhone = kind === 'phone' ? value : null;
@@ -100,33 +126,38 @@ router.post('/request-code', async (req, res) => {
       ).catch(e => console.warn('[request-code] quickhitter upsert warn:', e?.message || e));
     }
 
-    // (B) Create a new code OR atomically reuse the existing active one.
-    //     Your unique constraint name is: ff_identity_code_one_active
-    //     We use ON CONFLICT ON CONSTRAINT to avoid 23505 races and RETURN existing.
-    const newCode = sixDigit();
-    const ins = await pool.query(
-      `
-      WITH up AS (
-        INSERT INTO ff_identity_code
-          (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at)
-        VALUES
-          ($1,        $2,              $3,              $4,      $5,   0,        now() + interval '12 minutes', now())
-        ON CONFLICT ON CONSTRAINT ff_identity_code_one_active
-        DO UPDATE SET
-          -- do NOT overwrite the existing code; just keep it & preserve expiry
-          member_id = COALESCE(ff_identity_code.member_id, EXCLUDED.member_id)
-        RETURNING id, member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, consumed_at,
-                  (xmax = 0) AS inserted
-      )
-      SELECT * FROM up
-      `,
-      [cookieMemberId, kind, value, channel, newCode]
-    );
+    // (B) Reuse if active already exists
+    let row = await findActiveCode(kind, value, channel);
+    let reused = !!row;
 
-    const row = ins.rows[0];
-    const reused = !row.inserted;
+    // (C) Otherwise, try to create; on race 23505, re-select and reuse
+    if (!row) {
+      const code = sixDigit();
+      try {
+        const ins = await pool.query(
+          `
+          INSERT INTO ff_identity_code
+            (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at)
+          VALUES
+            ($1,        $2,              $3,              $4,      $5,   0,        now() + interval '12 minutes', now())
+          RETURNING id, member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, consumed_at
+          `,
+          [cookieMemberId, kind, value, channel, code]
+        );
+        row = ins.rows[0];
+        reused = false;
+      } catch (e) {
+        // If a unique/index race exists, just find and reuse the winner
+        if (String(e.code) === '23505') {
+          row = await findActiveCode(kind, value, channel);
+          reused = true;
+        } else {
+          throw e;
+        }
+      }
+    }
 
-    // (C) Best-effort send (never fail the API on provider hiccups)
+    // (D) Best-effort send (don’t fail API on provider hiccups)
     try {
       await sendOne({
         channel: channel === 'sms' ? 'sms' : 'email',
@@ -134,9 +165,7 @@ router.post('/request-code', async (req, res) => {
         data: { code: row.code, site: 'Fortified Fantasy' },
         templateId: channel === 'sms' ? 'smsDefault' : 'emailDefault'
       });
-    } catch (e) {
-      // log inside notify; continue
-    }
+    } catch (_) { /* noop */ }
 
     return res.json({
       ok: true,
