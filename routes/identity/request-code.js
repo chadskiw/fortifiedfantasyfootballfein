@@ -4,7 +4,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 
-// ---- DB pool (works with either default or named export) ----
+// ---- DB pool ----
 let db = require('../../src/db/pool');
 let pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') {
@@ -16,6 +16,12 @@ const { sendOne } = require('../../services/notify'); // your notify shim
 const router = express.Router();
 router.use(express.json({ limit: '2mb' }));
 router.use(express.urlencoded({ extended: false }));
+
+/* ---------------- config knobs ---------------- */
+
+// If your FK points to ff_quickhitter (Option 1), keep this true.
+// If your FK points to ff_member (Option 2), set this to false so we insert NULL.
+const ATTACH_TO_STAGE = true;
 
 /* ---------------- helpers ---------------- */
 
@@ -60,7 +66,7 @@ function mask(kind, value){
   return value;
 }
 
-/* ---------------- light in-proc rate limit ---------------- */
+/* ---------------- rate limit ---------------- */
 
 const RL = new Map();
 function rateLimit(key, limit=6, windowMs=60_000){
@@ -72,7 +78,7 @@ function rateLimit(key, limit=6, windowMs=60_000){
   return hit.n <= limit;
 }
 
-/* ---------------- core: find existing active code ---------------- */
+/* ---------------- core helpers ---------------- */
 
 async function findActiveCode(kind, value, channel){
   const q = await pool.query(
@@ -130,34 +136,58 @@ router.post('/request-code', async (req, res) => {
     let row = await findActiveCode(kind, value, channel);
     let reused = !!row;
 
-    // (C) Otherwise, try to create; on race 23505, re-select and reuse
+    // (C) Otherwise, create; on 23505, re-select and reuse
     if (!row) {
       const code = sixDigit();
+
+      // Decide what to store in member_id to satisfy FK
+      let memberForFK = null;
+      if (ATTACH_TO_STAGE && cookieMemberId) {
+        // FK → ff_quickhitter
+        memberForFK = cookieMemberId;
+      } else {
+        // FK → ff_member (or you chose to not attach during staging)
+        memberForFK = null;
+      }
+
       try {
         const ins = await pool.query(
           `
           INSERT INTO ff_identity_code
-            (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at)
+            (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, is_active)
           VALUES
-            ($1,        $2,              $3,              $4,      $5,   0,        now() + interval '12 minutes', now())
+            ($1,        $2,              $3,              $4,      $5,   0,        now() + interval '12 minutes', now(), true)
           RETURNING id, member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, consumed_at
           `,
-          [cookieMemberId, kind, value, channel, code]
+          [memberForFK, kind, value, channel, code]
         );
         row = ins.rows[0];
         reused = false;
       } catch (e) {
-        // If a unique/index race exists, just find and reuse the winner
         if (String(e.code) === '23505') {
           row = await findActiveCode(kind, value, channel);
           reused = true;
+        } else if (String(e.code) === '23503') {
+          // FK issue: fall back to NULL member and retry once
+          const ins2 = await pool.query(
+            `
+            INSERT INTO ff_identity_code
+              (member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, is_active)
+            VALUES
+              (NULL,      $1,              $2,              $3,      $4,   0,        now() + interval '12 minutes', now(), true)
+            RETURNING id, member_id, identifier_kind, identifier_value, channel, code, attempts, expires_at, created_at, consumed_at
+            `,
+            [kind, value, channel, code]
+          );
+          row = ins2.rows[0];
+          reused = false;
         } else {
           throw e;
         }
       }
     }
 
-    // (D) Best-effort send (don’t fail API on provider hiccups)
+    // (D) Best-effort send
     try {
       await sendOne({
         channel: channel === 'sms' ? 'sms' : 'email',
