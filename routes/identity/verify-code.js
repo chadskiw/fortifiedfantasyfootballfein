@@ -16,6 +16,9 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RE  = /^\+[1-9]\d{7,14}$/;
 const CODE_RE  = /^\d{6}$/;
 
+const ENV = String(process.env.NODE_ENV || '').trim() || 'development';
+const DEBUG = process.env.FF_DEBUG_VERIFY === '1';
+
 function toE164(raw){
   if (!raw) return null;
   const d = String(raw).replace(/\D+/g,'');
@@ -51,14 +54,16 @@ router.post('/verify-code', async (req, res) => {
     const { kind, value, channel, error } = normalizeIdentifier(identifier);
     if (error) return res.status(422).json({ ok:false, error:'invalid_identifier' });
 
-    // Find active code by identifier + channel (no member_id gate; email match is case-insensitive via normalization)
+    if (DEBUG) console.log('[verify] try', { kind, value, channel, code });
+
+    // NOTE: NO member_id filter. Match by identifier + channel only.
     const sel = await pool.query(
       `
       SELECT id, member_id, code, attempts
         FROM ff_identity_code
        WHERE identifier_kind = $1
          AND identifier_value = $2
-         AND channel = $3
+         AND channel          = $3
          AND consumed_at IS NULL
          AND (is_active = true OR expires_at > now())
        ORDER BY created_at DESC
@@ -67,15 +72,19 @@ router.post('/verify-code', async (req, res) => {
       [kind, value, channel]
     );
     const row = sel.rows[0] || null;
+
+    if (DEBUG) console.log('[verify] found row?', !!row, row && { id: row.id, attempts: row.attempts, member_id: row.member_id });
+
     if (!row) return res.status(400).json({ ok:false, error:'invalid_or_expired' });
 
     if (row.code !== String(code)) {
       const bumped = Math.min((row.attempts || 0) + 1, 10);
       await pool.query(`UPDATE ff_identity_code SET attempts=$1 WHERE id=$2`, [bumped, row.id]);
+      if (DEBUG) console.log('[verify] mismatch, attempts ->', bumped);
       return res.status(400).json({ ok:false, error:'invalid_or_expired' });
     }
 
-    // Success — consume and link to current member
+    // Success — consume and link to current cookie member
     const memberId = ensureMemberId(req.cookies?.ff_member);
     await pool.query(
       `UPDATE ff_identity_code
@@ -108,7 +117,11 @@ router.post('/verify-code', async (req, res) => {
     // refresh cookie
     res.cookie('ff_member', memberId, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
 
-    return res.json({ ok:true, verified: kind, member_id: memberId, took_ms: Date.now() - t0 });
+    const payload = { ok:true, verified: kind, member_id: memberId, took_ms: Date.now() - t0 };
+    // Non-prod: helpful echo for end-to-end tests
+    if (ENV !== 'production') payload.dev_hint = 'verified';
+
+    return res.json(payload);
   } catch (e) {
     console.error('[identity/verify-code] error:', e);
     return res.status(500).json({ ok:false, error:'server_error' });
