@@ -14,7 +14,6 @@ const router = express.Router();
 router.use(express.json({ limit: '2mb' }));
 router.use(express.urlencoded({ extended: false }));
 
-/* ---------------- helpers ---------------- */
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RE  = /^\+[1-9]\d{7,14}$/;
 
@@ -31,17 +30,13 @@ function toE164(raw){
 function normalizeIdentifier(input){
   const raw = String(input || '').trim();
   if (!raw) return { kind:null, value:null, channel:null, error:'empty' };
-  if (EMAIL_RE.test(raw)) {
-    return { kind:'email', value: raw.toLowerCase(), channel:'email' };
-  }
+  if (EMAIL_RE.test(raw)) return { kind:'email', value: raw.toLowerCase(), channel:'email' };
   const p = toE164(raw);
   if (p && E164_RE.test(p)) return { kind:'phone', value:p, channel:'sms' };
   return { kind:null, value:null, channel:null, error:'invalid_identifier' };
 }
 
-function sixDigit(){
-  return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-}
+function sixDigit(){ return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0'); }
 
 function mask(kind, value){
   if (kind === 'email') {
@@ -56,18 +51,15 @@ function mask(kind, value){
   return value;
 }
 
-/* ---------------- tiny rate limit ---------------- */
 const RL = new Map();
 function rateLimit(key, limit=6, windowMs=60_000){
   const now = Date.now();
   const hit = RL.get(key) || { n:0, t:now };
   if (now - hit.t > windowMs) { hit.n = 0; hit.t = now; }
-  hit.n++;
-  RL.set(key, hit);
+  hit.n++; RL.set(key, hit);
   return hit.n <= limit;
 }
 
-/* ---------------- db helpers ---------------- */
 async function findActiveCode(kind, value, channel){
   const q = await pool.query(
     `
@@ -102,8 +94,6 @@ async function insertCode({ memberIdForFK, kind, value, channel, ttlMinutes=12 }
   return ins.rows[0] || null;
 }
 
-/* ---------------- main route ---------------- */
-
 router.post('/request-code', async (req, res) => {
   const t0 = Date.now();
   try {
@@ -117,7 +107,7 @@ router.post('/request-code', async (req, res) => {
 
     const cookieMemberId = (req.cookies?.ff_member || '').trim() || null;
 
-    // (A) Prewrite to ff_quickhitter (non-blocking)
+    // Stage contact (non-blocking)
     if (cookieMemberId) {
       const colEmail = kind === 'email' ? value : null;
       const colPhone = kind === 'phone' ? value : null;
@@ -126,30 +116,26 @@ router.post('/request-code', async (req, res) => {
         INSERT INTO ff_quickhitter (member_id, email, phone, created_at, updated_at)
         VALUES ($1, $2, $3, now(), now())
         ON CONFLICT (member_id) DO UPDATE
-        SET
-          email = COALESCE(ff_quickhitter.email, EXCLUDED.email),
-          phone = COALESCE(ff_quickhitter.phone, EXCLUDED.phone),
-          updated_at = now()
+          SET email = COALESCE(ff_quickhitter.email, EXCLUDED.email),
+              phone = COALESCE(ff_quickhitter.phone, EXCLUDED.phone),
+              updated_at = now()
         `,
         [cookieMemberId, colEmail, colPhone]
-      ).catch(e => console.warn('[request-code] quickhitter upsert warn:', e?.message || e));
+      ).catch(()=>{});
     }
 
-    // (B) Try to reuse an active code
+    // Reuse active code if present
     let row = await findActiveCode(kind, value, channel);
     let reused = !!row;
 
-    // (C) Ensure we have a row (create if missing), robust to FK & race
+    // Create if missing (robust to FK / race)
     if (!row) {
       try {
-        // try with cookie member id first (if your FK points to ff_quickhitter)
         row = await insertCode({ memberIdForFK: cookieMemberId, kind, value, channel });
       } catch (e) {
         if (String(e.code) === '23503') {
-          // FK violation → retry with NULL member_id
           row = await insertCode({ memberIdForFK: null, kind, value, channel });
         } else if (String(e.code) === '23505') {
-          // unique race → select winner
           row = await findActiveCode(kind, value, channel);
           reused = true;
         } else {
@@ -157,34 +143,26 @@ router.post('/request-code', async (req, res) => {
         }
       }
     }
-
-    // Last-resort safety: still nothing? create with NULL.
-    if (!row) {
+    if (!row) { // belt & suspenders
       row = await insertCode({ memberIdForFK: null, kind, value, channel }).catch(() => null);
       reused = false;
     }
 
-// (D) Send the code (best-effort; don't block API on provider errors)
-try {
-  const theCode = row?.code || '000000';
-  await sendOne({
-    channel: channel === 'sms' ? 'sms' : 'email',
-    to: value,
-    // IMPORTANT: include { code } so templates can render it
-    data: {
-      code: theCode,
-      subject: 'Your Fortified Fantasy code',
-      text: `Your Fortified Fantasy verification code is: ${theCode}`
-    },
-    // optional: use explicit template ids if you have them configured
-    templateId: channel === 'sms' ? 'ff_sms_code' : 'ff_email_code'
-  });
-} catch (e) {
-  console.warn('NotificationAPI warning.', e?.status ? { status: e.status, body: e.body } : (e?.message || e));
-}
+    // SEND — always include { code }
+    try {
+      const theCode = row?.code || '000000';
+      await sendOne({
+        channel: channel === 'sms' ? 'sms' : 'email',
+        to: value,
+        data: {
+          code: theCode,
+          subject: 'Your Fortified Fantasy code',
+          text: `Your Fortified Fantasy verification code is: ${theCode}`
+        },
+        templateId: channel === 'sms' ? 'ff_sms_code' : 'ff_email_code'
+      });
+    } catch (_) {}
 
-
-    // (E) Safe response (guard if row is somehow null)
     const ttlMs = 12 * 60 * 1000;
     const fallbackExpiry = new Date(Date.now() + ttlMs).toISOString();
 
