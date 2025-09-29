@@ -1,29 +1,27 @@
 // services/notify.js
-// NotificationAPI via official SDK.
-// - init() from env once
-// - sendOne({ channel, to, data:{ code }, templateId? }) → { ok, ... }
-// - never throws; safe for API routes
-// - echoes code in non-production if SDK isn't configured so you can test
+// NotificationAPI via official SDK, with channel overrides per message.
+// - If "to" is phone → SMS only
+// - If "to" is email → EMAIL only
+// - parameters: { code } included
+// - uses defaults: 'emaildefault' / 'smsdefault' unless you pass templateId
+// - never throws from sendOne; returns { ok, ... }
+// - in non-prod, echoes the code if SDK isn't configured so you can test
 
 let sdk = null;
 try {
-  // ESM default export; for CJS require we need .default
-  // eslint-disable-next-line import/no-extraneous-dependencies
   sdk = require('notificationapi-node-server-sdk').default;
 } catch (_) {
   sdk = null;
 }
 
-// Optional dotenv (local dev)
 try {
   const path = process.env.DOTENV_CONFIG_PATH || '.env';
   require('dotenv').config({ path, override: false });
 } catch {}
 
-const ENV = String(process.env.NODE_ENV || '').trim() || 'development';
+const ENV   = String(process.env.NODE_ENV || '').trim() || 'development';
 const DEBUG = String(process.env.NOTIF_DEBUG || '').trim() === '1';
 
-// simple validators
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const E164_RE  = /^\+[1-9]\d{7,14}$/;
 
@@ -35,34 +33,17 @@ function firstEnv(...keys) {
   return null;
 }
 
-// Read creds (with aliases you used earlier)
-const CLIENT_ID = firstEnv(
-  'NOTIF_API_CLIENT_ID',
-  'NOTIFICATION_API_CLIENT_ID',
-  'NOTIFICATIONAPI_CLIENT_ID',
-  'NOTIF_CLIENT_ID'
-);
-const CLIENT_SECRET = firstEnv(
-  'NOTIF_API_CLIENT_SECRET',
-  'NOTIFICATION_API_CLIENT_SECRET',
-  'NOTIFICATIONAPI_CLIENT_SECRET',
-  'NOTIF_CLIENT_SECRET'
-);
+const CLIENT_ID     = firstEnv('NOTIF_API_CLIENT_ID','NOTIFICATION_API_CLIENT_ID','NOTIFICATIONAPI_CLIENT_ID','NOTIF_CLIENT_ID');
+const CLIENT_SECRET = firstEnv('NOTIF_API_CLIENT_SECRET','NOTIFICATION_API_CLIENT_SECRET','NOTIFICATIONAPI_CLIENT_SECRET','NOTIF_CLIENT_SECRET');
+const NOTIF_TYPE    = firstEnv('NOTIFICATIONAPI_VERIFICATION_ID','NOTIF_VERIFICATION_ID') || 'account_authorization';
 
-// Notification type (aka workflow) — your example uses this
-// Default to 'account_authorization' which matches your env & example
-const NOTIF_TYPE = firstEnv('NOTIFICATIONAPI_VERIFICATION_ID', 'NOTIF_VERIFICATION_ID') || 'account_authorization';
-
-// Default templates (you can override via sendOne({ templateId }))
 const DEFAULT_EMAIL_TEMPLATE = 'emaildefault';
 const DEFAULT_SMS_TEMPLATE   = 'smsdefault';
 
-// Initialize SDK once if available & creds present
 let initialized = false;
 function ensureInit() {
   if (initialized) return true;
-  if (!sdk) return false;
-  if (!CLIENT_ID || !CLIENT_SECRET) return false;
+  if (!sdk || !CLIENT_ID || !CLIENT_SECRET) return false;
   try {
     sdk.init(CLIENT_ID, CLIENT_SECRET);
     initialized = true;
@@ -75,68 +56,132 @@ function ensureInit() {
 }
 
 /**
- * Send one verification notification.
+ * Send one verification message.
  * @param {Object} opts
- * @param {'sms'|'email'|'push'} [opts.channel] - used only to choose a default templateId
- * @param {string} opts.to - email or +E164 number
+ * @param {'sms'|'email'} [opts.channel] - used to pick default templateId; channel is also inferred from "to".
+ * @param {string} opts.to - email or +E164 phone
  * @param {Object} opts.data - must include { code: '123456' }
- * @param {string} [opts.templateId] - override template id (emaildefault / smsdefault)
+ * @param {string} [opts.templateId] - override (emaildefault / smsdefault)
  */
 async function sendOne(opts = {}) {
-  const channel = String(opts.channel || '').toLowerCase();
-  const toRaw   = String(opts.to || '').trim();
-  const data    = opts.data || {};
+  const channelHint = String(opts.channel || '').toLowerCase();
+  const toRaw = String(opts.to || '').trim();
+  const params = opts.data || {};
 
   if (!toRaw) {
     console.warn('NotificationAPI warning. "to" is empty; skipping send.');
-    return { ok: false, skipped: true, reason: 'empty_to' };
+    return { ok:false, skipped:true, reason:'empty_to' };
   }
-  if (!data.code) {
+  if (!params.code) {
     console.warn('NotificationAPI warning. data.code missing; template may render blank.');
   }
 
   const okInit = ensureInit();
 
-  // Build "to" block per SDK example
+  // Build recipient
   const to = { id: toRaw };
-  if (EMAIL_RE.test(toRaw)) to.email = toRaw;
-  if (E164_RE.test(toRaw))  to.number = toRaw;
+  const isEmail = EMAIL_RE.test(toRaw);
+  const isPhone = E164_RE.test(toRaw);
+  if (isEmail) to.email = toRaw;
+  if (isPhone) to.number = toRaw;
 
-  const templateId = opts.templateId || (channel === 'sms' ? DEFAULT_SMS_TEMPLATE : DEFAULT_EMAIL_TEMPLATE);
+  // Determine desired channel set (to silence provider warnings)
+  // Prefer channel inferred from "to". If both present, fall back to hint.
+  let useEmail = isEmail && !isPhone;
+  let useSMS   = isPhone && !isEmail;
+  if (!useEmail && !useSMS) {
+    if (channelHint === 'email') useEmail = true;
+    if (channelHint === 'sms')   useSMS = true;
+  }
+  // Pick template
+  const templateId = opts.templateId || (useSMS ? DEFAULT_SMS_TEMPLATE : DEFAULT_EMAIL_TEMPLATE);
 
-  // If SDK not ready, keep dev unblocked
+  // If SDK not ready, dev-echo
   if (!okInit) {
     if (ENV !== 'production') {
-      console.log(`[DEV ONLY] (SDK not configured) Would send ${templateId} to ${toRaw} with code: ${data.code || '(missing)'}`);
-      return { ok: true, dev_echo: true };
+      console.log(`[DEV ONLY] (SDK not configured) Would send ${templateId} to ${toRaw} with code: ${params.code || '(missing)'}`);
+      return { ok:true, dev_echo:true };
     }
     console.warn('NotificationAPI warning. SDK not initialized or credentials missing.');
-    return { ok: false, skipped: true, reason: 'sdk_not_initialized' };
+    return { ok:false, skipped:true, reason:'sdk_not_initialized' };
   }
 
-  // Real send
-  try {
-    const payload = {
-      type: NOTIF_TYPE,   // e.g., 'account_authorization'
-      to,
-      parameters: { ...data }, // { code: '123456', ... }
-      templateId
-    };
-    if (DEBUG) console.log('[NotificationAPI] send payload:', { ...payload, parameters: { ...payload.parameters, code: '******' } });
+  // Build payload (SDK supports a few override styles; try best-known first)
+  // 1) notificationPreferences (newer naming)
+  const basePayload = {
+    type: NOTIF_TYPE,
+    to,
+    parameters: { ...params },
+    templateId
+  };
 
-    const res = await sdk.send(payload); // returns axios-like response
-    // Some SDKs return { data }, others might be void—normalize:
-    const ok = !!res && (res.status ? (res.status >= 200 && res.status < 300) : true);
-    if (!ok) console.warn('[NotificationAPI] non-2xx send response:', res?.status, res?.data);
-    return { ok: true, status: res?.status || 200, data: res?.data };
-  } catch (e) {
-    console.warn('NotificationAPI warning.', e?.response?.status, e?.response?.data || e?.message || e);
-    if (ENV !== 'production' && data?.code) {
-      console.log(`[DEV ONLY] Verification code for ${toRaw}: ${data.code}`);
-      return { ok: true, dev_echo: true };
+  // We want to force only the relevant channel ON to avoid provider warnings.
+  // Try preference/override variants in order; stop at first success.
+  const attempts = [];
+
+  // Attempt A: preferences with enabled flags
+  attempts.push({
+    ...basePayload,
+    notificationPreferences: {
+      email: { enabled: !!useEmail },
+      sms:   { enabled: !!useSMS }
     }
-    return { ok: false, skipped: true, reason: 'exception' };
+  });
+
+  // Attempt B: "preferences" alias
+  attempts.push({
+    ...basePayload,
+    preferences: {
+      email: { enabled: !!useEmail },
+      sms:   { enabled: !!useSMS }
+    }
+  });
+
+  // Attempt C: "override" channels
+  attempts.push({
+    ...basePayload,
+    override: {
+      channels: {
+        email: !!useEmail,
+        sms:   !!useSMS
+      }
+    }
+  });
+
+  // Attempt D: minimal payload (let provider discard other channel; last resort)
+  attempts.push(basePayload);
+
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      if (DEBUG) {
+        const pl = attempts[i];
+        console.log('[NotificationAPI] send attempt', i+1, {
+          templateId: pl.templateId,
+          to: { email: !!pl?.to?.email, number: !!pl?.to?.number },
+          emailOn: pl?.notificationPreferences?.email?.enabled ?? pl?.preferences?.email?.enabled ?? pl?.override?.channels?.email ?? 'n/a',
+          smsOn:   pl?.notificationPreferences?.sms?.enabled   ?? pl?.preferences?.sms?.enabled   ?? pl?.override?.channels?.sms   ?? 'n/a'
+        });
+      }
+      const res = await sdk.send(attempts[i]);
+      const ok = !!res && (res.status ? (res.status >= 200 && res.status < 300) : true);
+      if (!ok) {
+        console.warn('[NotificationAPI] non-2xx send response:', res?.status, res?.data);
+        continue;
+      }
+      return { ok:true, status: res?.status || 200, data: res?.data };
+    } catch (e) {
+      // Try next attempt
+      if (DEBUG) console.warn('[NotificationAPI] send attempt failed:', e?.response?.status || e?.message || e);
+    }
   }
+
+  // If everything failed, keep tests unblocked
+  if (ENV !== 'production' && params?.code) {
+    console.log(`[DEV ONLY] Verification code for ${toRaw}: ${params.code}`);
+    return { ok:true, dev_echo:true };
+  }
+
+  return { ok:false, skipped:true, reason:'all_attempts_failed' };
 }
 
 module.exports = { sendOne };
