@@ -26,7 +26,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
-
+app.use('/api/identity/me', require('./routes/identity/me'));
 // CORS
 const allow = {
   'access-control-allow-origin': 'https://fortifiedfantasy.com',
