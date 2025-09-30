@@ -9,6 +9,8 @@ const cookieParser = require('cookie-parser');
 const path         = require('path');
 // const imagesPresign = require('./routes/images/presign');
 const imagesPresign = require('./routes/images/presign-r2');
+// ✅ single mount
+const createImagesRouter = require('./src/routes/images');   // <- your file above
 
 
 const app = express();
@@ -34,14 +36,8 @@ app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/identity/me', require('./routes/identity/me'));
 // images router (presign + upload)
 // ✅ mount early, before any /api catch-all 404
-app.use('/api/images', require('./routes/images'));
+app.use('/api/images', createImagesRouter());
 
-// (optional legacy shim)
-app.post('/api/identity/avatar', (req, res) =>
-  res.redirect(307, '/api/images/upload?kind=avatars')
-);
-app.use('/api/images/presign', imagesPresign);
-app.use('/api/images',         require('./routes/images/upload-r2')); 
 // … later …
 //app.use('/api', (req, res) => {
 //  if (res.headersSent) return;
