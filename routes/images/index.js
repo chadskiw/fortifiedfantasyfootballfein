@@ -1,50 +1,38 @@
-// routes/images/index.js  (ensure this is what /api/images mounts)
+// routes/images/index.js
 const express = require('express');
-const crypto = require('crypto');
 const multer = require('multer');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
+const r2 = require('../../src/r2');
 
+const upload = multer(); // memory storage
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, // path-style
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
-
-const BUCKET = process.env.R2_BUCKET || 'ff-media';  // <-- ff-media
-const PUBLIC_HOST = process.env.R2_PUBLIC_HOST || 'img.fortifiedfantasy.com';
-
-function extFrom(type='') {
-  if (type.includes('webp')) return 'webp';
-  if (type.includes('png'))  return 'png';
-  return 'jpg';
-}
 
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
+    const bucket = process.env.R2_BUCKET;
+    if (!bucket) return res.status(500).json({ ok:false, error:'bucket_missing' });
+    if (!req.file) return res.status(400).json({ ok:false, error:'file_required' });
 
-    const kind = String(req.query.kind || 'avatars');
-    const ct = req.file.mimetype || 'image/jpeg';
-    const key = `${kind}/${crypto.randomUUID()}.${extFrom(ct)}`;
+    const kind = String(req.query.kind || 'misc');
+    const ext = (req.file.mimetype === 'image/png') ? 'png'
+             : (req.file.mimetype === 'image/webp') ? 'webp'
+             : (req.file.mimetype === 'image/jpeg') ? 'jpg' : 'bin';
+    const key = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2,10)}.${ext}`;
 
-    await s3.send(new PutObjectCommand({
-      Bucket: BUCKET,
+    await r2.send(new PutObjectCommand({
+      Bucket: bucket,
       Key: key,
       Body: req.file.buffer,
-      ContentType: ct,
-      // IMPORTANT: no ACL on R2
+      ContentType: req.file.mimetype || 'application/octet-stream',
     }));
 
-    res.json({ ok:true, key, public_url: `https://${PUBLIC_HOST}/${key}` });
-  } catch (e) {
-    console.error('[images/upload] error', e);
-    res.status(500).json({ ok:false, error: e.Code || 'upload_failed' });
+    const public_base = process.env.R2_PUBLIC_BASE || process.env.IMG_CDN_BASE || '';
+    const public_url = public_base ? `${public_base.replace(/\/+$/,'')}/${key}` : null;
+
+    res.json({ ok:true, key, public_url });
+  } catch (err) {
+    console.error('[images/upload] error', err);
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
