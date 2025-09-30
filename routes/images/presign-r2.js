@@ -1,15 +1,11 @@
 // routes/images/presign-r2.js
 const express = require('express');
 const crypto = require('crypto');
-const { makeKey, publicUrl, presignPut } = require('./r2');
+const { makeKey, publicUrl} = require('./r2');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { s3, BUCKET } = require('./r2');
 const router = express.Router();
-function makeKey(kind, ext){
-  const k = (kind || 'avatars').toLowerCase();
-  const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
-  return `${k}/${id}.${ext}`;
-}
+
 router.post('/', express.json(), async (req, res) => {
   try {
     const kind = (req.body?.kind || 'avatars').toLowerCase();
