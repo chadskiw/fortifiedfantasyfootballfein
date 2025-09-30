@@ -1,6 +1,6 @@
 const express = require('express');
 const multer  = require('multer');
-const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { s3, BUCKET } = require('./r2');
 const upload = multer({ limits: { fileSize: 6 * 1024 * 1024 } }); // 6MB guard
 const router = express.Router();
