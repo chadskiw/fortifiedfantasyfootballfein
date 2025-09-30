@@ -12,6 +12,50 @@ if (!pool || typeof pool.query !== 'function') {
 router.use(express.json({ limit: '1mb' }));
 
 /* ---------- helpers ---------- */
+// ----- session + contact owner helpers -----
+function getSessionMemberId(req) {
+  // your session cookie is 'ff_member'
+  return (req?.cookies?.ff_member && String(req.cookies.ff_member).trim()) || null;
+}
+
+async function ownerOfContact({ email, phone }) {
+  // Return the member_id that currently owns this email/phone, if any
+  if (!email && !phone) return null;
+
+  if (email) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE LOWER(email)=LOWER($1)
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE LOWER(email)=LOWER($1)
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(email).toLowerCase()]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
+  if (phone) {
+    const { rows } = await pool.query(
+      `
+      SELECT member_id FROM (
+        SELECT member_id FROM ff_member      WHERE phone_e164=$1
+        UNION ALL
+        SELECT member_id FROM ff_quickhitter WHERE phone=$1
+      ) t
+      WHERE member_id IS NOT NULL
+      LIMIT 1
+      `,
+      [String(phone)]
+    );
+    if (rows[0]?.member_id) return rows[0].member_id;
+  }
+
+  return null;
+}
 
 async function ensureTables(){
   await pool.query(`
@@ -117,7 +161,7 @@ router.get('/lookup', async (req, res) => {
 
     const { rows } = await pool.query(`
       SELECT q.member_id, q.handle, q.color_hex, q.image_key, q.avatar_url,
-             q.email, q.phone, q.adj1, q.adj2, q.noun,
+             q.email, q.phone_e164, q.adj1, q.adj2, q.noun,
              m.email_verified_at, m.phone_verified_at
         FROM ff_quickhitter q
    LEFT JOIN ff_member m ON m.member_id = q.member_id

@@ -143,7 +143,7 @@ async function getFeinMetaByKey({ season, platform = 'espn', league_id, team_id 
   const sql = `
     SELECT id, season, platform, sport, league_id, team_id,
            name, handle, league_size, fb_groups, updated_at
-    FROM fein_meta
+    FROM ff_sport_ffl
     WHERE season = $1 AND platform = $2 AND league_id = $3 AND team_id = $4
     LIMIT 1
   `;

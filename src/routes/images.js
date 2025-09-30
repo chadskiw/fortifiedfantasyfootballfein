@@ -14,7 +14,7 @@ const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB cap
 const R2_ACCOUNT_ID       = process.env.R2_ACCOUNT_ID || ''; // required by public base if you use R2 endpoint style
 const R2_ACCESS_KEY_ID    = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY= process.env.R2_SECRET_ACCESS_KEY;
-const R2_BUCKET           = process.env.R2_BUCKET || 'ff-images';
+const R2_BUCKET           = process.env.R2_BUCKET || 'ff-media';
 const R2_REGION           = process.env.R2_REGION || 'auto';
 // public CDN/base for viewing files (e.g. https://img.fortifiedfantasy.com or R2 custom domain)
 const PUBLIC_BASE         = (process.env.R2_PUBLIC_BASE || 'https://img.fortifiedfantasy.com').replace(/\/+$/,'');
