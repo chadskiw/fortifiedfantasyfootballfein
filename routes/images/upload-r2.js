@@ -7,8 +7,7 @@ const router = express.Router();
 
 
  const IMG_CDN_BASE = 'https://img.fortifiedfantasy.com'
-    const contentType = ['image/webp','image/jpeg','image/png'].includes(requestedType)
-      ? requestedType : 'image/webp';
+
 
 function makeKey(kind, ext){
   const k = (kind || 'avatars').toLowerCase();
@@ -20,6 +19,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
     const kind = (req.query.kind || 'avatars').toLowerCase();
+    const requestedType = String(req.body?.content_type || '').toLowerCase();
+    const contentType = ['image/webp','image/jpeg','image/png'].includes(requestedType)
+      ? requestedType : 'image/webp';
     const ct = req.file.mimetype || 'image/webp';
     const ext = ct.includes('png') ? 'png' : ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : 'webp';
     const key = makeKey(kind, ext);
