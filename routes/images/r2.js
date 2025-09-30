@@ -4,11 +4,12 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const BUCKET   = process.env.R2_BUCKET;                         // ff-media
-const ENDPOINT = process.env.R2_ENDPOINT;                       // https://<account>.r2.cloudflarestorage.com
+const R2_ENDPOINT = process.env.R2_ENDPOINT;                       // https://<account>.r2.cloudflarestorage.com
+const R2_REGION   = process.env.R2_REGION || 'auto';
 const PUB_BASE = (process.env.R2_PUBLIC_BASE || '').replace(/\/+$/,'');
 
-if (!BUCKET || !ENDPOINT) {
-  console.warn(`[R2] missing env — BUCKET=${BUCKET} ENDPOINT=${ENDPOINT}`);
+if (!BUCKET || !R2_ENDPOINT) {
+  console.warn(`[R2] missing env — BUCKET=${BUCKET} ENDPOINT=${R2_ENDPOINT}`);
 }
 
 // src/routes/images.js (or wherever you build the S3 client)
