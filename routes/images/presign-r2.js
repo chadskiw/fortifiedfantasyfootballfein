@@ -11,37 +11,34 @@ const router = express.Router();
  * body: { content_type: string, kind?: 'avatars' | ... }
  * returns: { ok, key, url, public_url }
  */
-router.post('/presign', express.json(), async (req, res) => {
-  try {
-    const { content_type, kind = 'avatars' } = req.body || {};
-    const safeType = typeof content_type === 'string' && content_type ? content_type : 'image/webp';
+router.post('/presign', async (req, res) => {
+  const contentType = String(req.body?.content_type || '').toLowerCase() || 'image/webp';
+  const kind = (req.body?.kind || 'avatars').toString();
+  const ext  = contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp';
 
-    // simple unique-ish key
-    const key = `${kind}/${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${
-      safeType === 'image/png' ? '.png' : safeType === 'image/jpeg' ? '.jpg' : '.webp'
-    }`;
+  const key = genKey({ kind, member_id: req.cookies?.ff_member || null, ext });
 
-    const cmd = new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,                         // ✅ correct case
-      ContentType: safeType,            // ✅ used by R2
-      CacheControl: 'public, max-age=31536000, immutable',
-      // ❌ do not set ACL with R2
-    });
+  const cmd = new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    ContentType: contentType,
+    // CacheControl: 'public, max-age=31536000, immutable'   // optional; safe to add
+  });
 
-    // ✅ STRING URL
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 });
+  const url = await getSignedUrl(s3, cmd, {
+    expiresIn: 300,
+    // keep content-type as a header (optional but nice)
+    unhoistableHeaders: new Set(['content-type']),
+  });
 
-    res.json({
-      ok: true,
-      key,
-      url,                              // ✅ plain string
-      public_url: `${process.env.R2_PUBLIC_BASE}/${key}`,
-    });
-  } catch (e) {
-    console.error('[images/presign]', e);
-    res.status(500).json({ ok: false, error: 'presign_failed' });
-  }
+  res.json({
+    ok: true,
+    url,
+    key,
+    public_url: `${PUBLIC_BASE}/${key}`,
+    headers: { 'content-type': contentType }
+  });
 });
+
 
 module.exports = router;

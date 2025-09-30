@@ -12,15 +12,31 @@ if (!BUCKET || !ENDPOINT) {
   console.warn(`[R2] missing env — BUCKET=${BUCKET} ENDPOINT=${ENDPOINT}`);
 }
 
+// src/routes/images.js (or wherever you build the S3 client)
 const s3 = new S3Client({
-  region: REGION,
-  endpoint: ENDPOINT,              // account root (NOT including bucket)
-  forcePathStyle: true,            // so URL becomes /ff-media/<key>
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
+  region: R2_REGION || 'auto',
+  endpoint: R2_ENDPOINT,              // https://<account>.r2.cloudflarestorage.com
+  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+  forcePathStyle: true,
 });
+
+// Remove flexible checksum headers for presigned PUTs
+try { s3.middlewareStack.remove('flexibleChecksumsMiddleware'); } catch {}
+s3.middlewareStack.addRelativeTo(
+  (next) => async (args) => {
+    const req = args.request;
+    if (req && req.headers) {
+      delete req.headers['x-amz-sdk-checksum-algorithm'];
+      delete req.headers['x-amz-checksum-crc32'];
+      delete req.headers['x-amz-checksum-crc32c'];
+      delete req.headers['x-amz-checksum-sha1'];
+      delete req.headers['x-amz-checksum-sha256'];
+    }
+    return next(args);
+  },
+  { relation: 'before', toMiddleware: 'awsAuthMiddleware', name: 'stripChecksums' }
+);
+
 
 // ---- helpers ---------------------------------------------------------------
 function makeKey(kind = 'misc', ext = 'webp') {
