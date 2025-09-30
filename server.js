@@ -5,7 +5,6 @@ const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
-const imagesPresign = require('./routes/images/presign');
 
 const app = express();
 app.disable('x-powered-by');
@@ -28,7 +27,8 @@ app.use(cookieParser());
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/identity/me', require('./routes/identity/me'));
-app.use('/api/images/presign', imagesPresign);
+// images router (presign + upload)
+
 
 // CORS
 const allow = {
@@ -76,16 +76,21 @@ app.post('/api/verify/start', require('./routes/identity/request-code')); // leg
 
 const qh = require('./routes/quickhitter');  
 // map legacy FE calls to the new images endpoints
-app.post('/api/identity/avatar',        (req, res) => res.redirect(307, '/src/api/images/presign'));
-app.post('/api/identity/avatar/commit', (req, res) => res.redirect(307, '/src/api/images/commit'));
-app.use('/api/identity', require('./routes/identity/avatar'));
 // server.js
 app.use('/api/platforms/espn', require('./routes/full-pool'));
 
 // mount the real router at /api/images
 //app.use('/api/images', require('./src/routes/images'));
 // server.js
+// images router (presign + upload)
 app.use('/api/images', require('./routes/images'));
+
+// legacy shims pointing to the new endpoints the FE uses today
+app.post('/api/identity/avatar', (req, res) => {
+  // FE legacy path → our fallback multipart path
+  res.redirect(307, '/api/images/upload?kind=avatars');
+});
+
 // server.js (or app.js)
 app.use('/api/identity', require('./src/routes/identity-signup-email')); // exposes POST /signup
 app.use('/api/profile',  require('./src/routes/profile'));                // exposes POST /update
