@@ -85,44 +85,35 @@ module.exports = function createImagesRouter(){
 
   // POST /api/images/presign { content_type?, kind?, ext? }
   // -> { ok, url, key, public_url, headers }
-  router.post('/presign', async (req, res) => {
-    try {
-      const member_id = req.cookies?.ff_member || null;
-      const contentType = safeContentType(req.body?.content_type || req.body?.contentType);
-      const kind = (req.body?.kind || 'avatars').toString();
-      let ext = (req.body?.ext || '').replace(/^\.+/,'').toLowerCase();
-      if (!ext) {
-        ext = contentType === 'image/png' ? 'png'
-            : contentType === 'image/jpeg' ? 'jpg'
-            : 'webp';
-      }
+router.post('/presign', async (req, res) => {
+  const contentType = String(req.body?.content_type || '').toLowerCase() || 'image/webp';
+  const kind = (req.body?.kind || 'avatars').toString();
+  const ext  = contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp';
 
-      const key = genKey({ kind, member_id, ext });
-      const putCmd = new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        ContentType: contentType,
-        // You can also add CacheControl if desired:
-        // CacheControl: 'public, max-age=31536000, immutable',
-      });
+  const key = genKey({ kind, member_id: req.cookies?.ff_member || null, ext });
 
-      // 5 minutes URL
-      const url = await getSignedUrl(s3, putCmd, { expiresIn: 300 });
-
-      const public_url = `${PUBLIC_BASE}/${key}`;
-      res.set('Cache-Control', 'no-store');
-      return res.json({
-        ok: true,
-        url,
-        key,
-        public_url,
-        headers: { 'content-type': contentType }
-      });
-    } catch (e) {
-      console.error('[images.presign] error:', e);
-      return res.status(500).json({ ok:false, error:'presign_failed' });
-    }
+  const cmd = new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    ContentType: contentType,
+    // CacheControl: 'public, max-age=31536000, immutable'   // optional; safe to add
   });
+
+  const url = await getSignedUrl(s3, cmd, {
+    expiresIn: 300,
+    // keep content-type as a header (optional but nice)
+    unhoistableHeaders: new Set(['content-type']),
+  });
+
+  res.json({
+    ok: true,
+    url,
+    key,
+    public_url: `${PUBLIC_BASE}/${key}`,
+    headers: { 'content-type': contentType }
+  });
+});
+
 
   // POST /api/images/upload  (server-side upload fallback)
   // multipart/form-data; field: file; query/body: kind?
