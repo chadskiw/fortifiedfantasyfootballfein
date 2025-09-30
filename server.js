@@ -39,7 +39,7 @@ app.post('/api/identity/avatar', (req, res) =>
   res.redirect(307, '/api/images/upload?kind=avatars')
 );
 app.use('/api/images/presign', imagesPresign);
-
+app.use('/api/images',         require('./routes/images/upload-r2')); 
 // … later …
 //app.use('/api', (req, res) => {
 //  if (res.headersSent) return;
