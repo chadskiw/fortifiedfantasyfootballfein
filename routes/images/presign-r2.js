@@ -1,54 +1,46 @@
 // routes/images/presign-r2.js
 const express = require('express');
-const crypto = require('crypto');
-const { makeKey, publicUrl} = require('./r2');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { s3, BUCKET } = require('./r2');
+
 const router = express.Router();
 
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-
-router.post('/api/images/presign', async (req, res) => {
+/**
+ * POST /api/images/presign
+ * body: { content_type: string, kind?: 'avatars' | ... }
+ * returns: { ok, key, url, public_url }
+ */
+router.post('/presign', express.json(), async (req, res) => {
   try {
     const { content_type, kind = 'avatars' } = req.body || {};
-    const key = `${kind}/${Date.now().toString(36)}${Math.random().toString(36).slice(2)}.webp`;
+    const safeType = typeof content_type === 'string' && content_type ? content_type : 'image/webp';
+
+    // simple unique-ish key
+    const key = `${kind}/${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${
+      safeType === 'image/png' ? '.png' : safeType === 'image/jpeg' ? '.jpg' : '.webp'
+    }`;
 
     const cmd = new PutObjectCommand({
       Bucket: BUCKET,
-      Key: key,
-      ContentType: content_type || 'application/octet-stream',
-      // ❌ do NOT set ACL with R2
-      // ACL: 'private',
-      // Optional: CacheControl for avatars
+      Key: key,                         // ✅ correct case
+      ContentType: safeType,            // ✅ used by R2
       CacheControl: 'public, max-age=31536000, immutable',
+      // ❌ do not set ACL with R2
     });
 
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 }); // <-- this MUST be a string
-    res.json({ ok: true, key, url, public_url: `${process.env.R2_PUBLIC_BASE}/${key}` });
+    // ✅ STRING URL
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 });
+
+    res.json({
+      ok: true,
+      key,
+      url,                              // ✅ plain string
+      public_url: `${process.env.R2_PUBLIC_BASE}/${key}`,
+    });
   } catch (e) {
     console.error('[images/presign]', e);
     res.status(500).json({ ok: false, error: 'presign_failed' });
-  }
-});
-
-router.post('/', express.json(), async (req, res) => {
-  try {
-    const kind = (req.body?.kind || 'avatars').toLowerCase();
-    const requestedType = String(req.body?.content_type || '').toLowerCase();
-    const contentType = ['image/webp','image/jpeg','image/png'].includes(requestedType)
-      ? requestedType : 'image/webp';
-
-    const ext = contentType === 'image/png' ? 'png'
-              : contentType === 'image/jpeg' ? 'jpg'
-              : 'webp';
-
-    const key = makeKey(kind, ext);
-    const url = await new PutObjectCommand({ Bucket: BUCKET, key, contentType });
-
-    res.json({ ok:true, url, key, public_url: publicUrl(key) });
-  } catch (e) {
-    console.error('[images/presign-r2] error', e);
-    res.status(500).json({ ok:false, error:'presign_failed' });
   }
 });
 
