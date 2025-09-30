@@ -2,6 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { makeKey, publicUrl, presignPut } = require('./r2');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { s3, BUCKET } = require('./r2');
 const router = express.Router();
 
