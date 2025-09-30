@@ -27,7 +27,6 @@ router.post('/upload', upload.single('file'), async (req, res) => {
    Key: key,
    Body: req.file.buffer,        // <-- bytes from multer
    ContentType: contentType,
-   ACL: 'private'
  }));
 
     res.json({ ok:true, key, public_url: `${IMG_CDN_BASE}/${key}` });
