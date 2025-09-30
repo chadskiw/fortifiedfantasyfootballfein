@@ -7,6 +7,14 @@ const r2 = require('../../src/r2');
 const upload = multer(); // memory storage
 const router = express.Router();
 
+
+router.post('/presign', require('./presign-r2')); // uses r2.js
+router.post('/upload', require('./upload-r2'));   // uses r2.js
+
+
+
+
+
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const bucket = process.env.R2_BUCKET;
