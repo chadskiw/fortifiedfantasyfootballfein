@@ -5,7 +5,9 @@ const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
-const imagesPresign = require('./routes/images/presign');
+// const imagesPresign = require('./routes/images/presign');
+const imagesPresign = require('./routes/images/presign-r2');
+
 
 const app = express();
 app.disable('x-powered-by');
@@ -36,6 +38,7 @@ app.use('/api/images', require('./routes/images'));
 app.post('/api/identity/avatar', (req, res) =>
   res.redirect(307, '/api/images/upload?kind=avatars')
 );
+app.use('/api/images/presign', imagesPresign);
 
 // … later …
 //app.use('/api', (req, res) => {
