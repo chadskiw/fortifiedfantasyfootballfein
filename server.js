@@ -5,6 +5,7 @@ const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
+const imagesPresign = require('./routes/images/presign');
 
 const app = express();
 app.disable('x-powered-by');
@@ -28,7 +29,7 @@ app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/identity/me', require('./routes/identity/me'));
 // images router (presign + upload)
-
+app.use('/api/images/presign', imagesPresign);
 
 // CORS
 const allow = {
