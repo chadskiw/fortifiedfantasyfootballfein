@@ -6,9 +6,6 @@ const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { s3, BUCKET } = require('./r2');
 const router = express.Router();
 
-// routes/images/presign.js (or presign-r2.js)
-const { s3, BUCKET } = require('./r2');
-const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 app.post('/api/images/presign', async (req, res) => {
