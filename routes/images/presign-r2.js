@@ -8,7 +8,7 @@ const router = express.Router();
 
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
-app.post('/api/images/presign', async (req, res) => {
+router.post('/api/images/presign', async (req, res) => {
   try {
     const { content_type, kind = 'avatars' } = req.body || {};
     const key = `${kind}/${Date.now().toString(36)}${Math.random().toString(36).slice(2)}.webp`;
