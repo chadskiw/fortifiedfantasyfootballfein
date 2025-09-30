@@ -5,7 +5,6 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const BUCKET   = process.env.R2_BUCKET;                         // ff-media
 const ENDPOINT = process.env.R2_ENDPOINT;                       // https://<account>.r2.cloudflarestorage.com
-const REGION   = process.env.R2_REGION || 'auto';
 const PUB_BASE = (process.env.R2_PUBLIC_BASE || '').replace(/\/+$/,'');
 
 if (!BUCKET || !ENDPOINT) {
