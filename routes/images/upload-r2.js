@@ -1,7 +1,7 @@
 const express = require('express');
 const multer  = require('multer');
 const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
-
+const { s3, BUCKET } = require('./r2');
 const upload = multer({ limits: { fileSize: 6 * 1024 * 1024 } }); // 6MB guard
 const router = express.Router();
 
@@ -33,13 +33,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const ext = ct.includes('png') ? 'png' : ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : 'webp';
     const key = makeKey(kind, ext);
 
-    await s3.send(new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: key,
-      Body: req.file.buffer,
-      ContentType: ct,
-      CacheControl: 'public, max-age=31536000, immutable'
-    }));
+    await s3.send(new PutObjectCommand({ Bucket: BUCKET, key, ContentType }));
 
     res.json({ ok:true, key, public_url: `${IMG_CDN_BASE}/${key}` });
   } catch (e) {

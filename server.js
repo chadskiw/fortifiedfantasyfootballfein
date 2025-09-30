@@ -1,5 +1,7 @@
 // server.js — FF Platform Service
 require('dotenv').config();
+console.log('[R2] using bucket =', process.env.R2_BUCKET);
+console.log('[R2] endpoint =', process.env.R2_ENDPOINT);
 
 const express      = require('express');
 const morgan       = require('morgan');

@@ -2,7 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { makeKey, publicUrl, presignPut } = require('./r2');
-
+const { s3, BUCKET } = require('./r2');
 const router = express.Router();
 
 router.post('/', express.json(), async (req, res) => {
@@ -17,7 +17,7 @@ router.post('/', express.json(), async (req, res) => {
               : 'webp';
 
     const key = makeKey(kind, ext);
-    const url = await presignPut({ contentType, key });
+    const url = await new PutObjectCommand({ Bucket: BUCKET, key, contentType });
 
     res.json({ ok:true, url, key, public_url: publicUrl(key) });
   } catch (e) {
