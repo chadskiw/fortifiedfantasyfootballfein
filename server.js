@@ -29,7 +29,20 @@ app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/identity/me', require('./routes/identity/me'));
 // images router (presign + upload)
-app.use('/api/images/presign', imagesPresign);
+// ✅ mount early, before any /api catch-all 404
+app.use('/api/images', require('./routes/images'));
+
+// (optional legacy shim)
+app.post('/api/identity/avatar', (req, res) =>
+  res.redirect(307, '/api/images/upload?kind=avatars')
+);
+
+// … later …
+app.use('/api', (req, res) => {
+  if (res.headersSent) return;
+  res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
+});
+
 
 // CORS
 const allow = {
@@ -79,18 +92,6 @@ const qh = require('./routes/quickhitter');
 // map legacy FE calls to the new images endpoints
 // server.js
 app.use('/api/platforms/espn', require('./routes/full-pool'));
-
-// mount the real router at /api/images
-//app.use('/api/images', require('./src/routes/images'));
-// server.js
-// images router (presign + upload)
-app.use('/api/images', require('./routes/images'));
-
-// legacy shims pointing to the new endpoints the FE uses today
-app.post('/api/identity/avatar', (req, res) => {
-  // FE legacy path → our fallback multipart path
-  res.redirect(307, '/api/images/upload?kind=avatars');
-});
 
 // server.js (or app.js)
 app.use('/api/identity', require('./src/routes/identity-signup-email')); // exposes POST /signup
