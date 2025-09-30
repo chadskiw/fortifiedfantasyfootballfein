@@ -1,60 +1,51 @@
-// routes/images/index.js
+// routes/images/index.js  (ensure this is what /api/images mounts)
 const express = require('express');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const multer = require('multer'); // for fallback upload
 const crypto = require('crypto');
+const multer = require('multer');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const router = express.Router();
-
-const {
-  R2_BUCKET,           // REQUIRED (R2/S3 bucket name)
-  R2_PUBLIC_BASE,      // e.g. https://img.fortifiedfantasy.com
-  R2_REGION,           // e.g. auto or us-east-1 for R2 S3-compatible
-  R2_ENDPOINT,         // e.g. https://<accountid>.r2.cloudflarestorage.com
-  R2_ACCESS_KEY_ID,
-  R2_SECRET_ACCESS_KEY,
-} = process.env;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 const s3 = new S3Client({
-  region: R2_REGION || 'auto',
-  endpoint: R2_ENDPOINT,            // keep undefined if using AWS proper
-  forcePathStyle: true,              // R2 usually needs this
-  credentials: R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY ? {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  } : undefined,
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, // path-style
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
 });
 
-// util: make a key under a “kind/” prefix
-function makeKey(kind = 'uploads', ext = '') {
-  const base = crypto.randomBytes(16).toString('hex');
-  return `${kind}/${base}${ext ? (ext.startsWith('.') ? ext : '.'+ext) : ''}`;
+const BUCKET = process.env.R2_BUCKET || 'ff-media';  // <-- ff-media
+const PUBLIC_HOST = process.env.R2_PUBLIC_HOST || 'img.fortifiedfantasy.com';
+
+function extFrom(type='') {
+  if (type.includes('webp')) return 'webp';
+  if (type.includes('png'))  return 'png';
+  return 'jpg';
 }
 
-// POST /api/images/presign  {content_type, kind}
-// -> {ok, url, key, public_url}
-router.post('/presign', async (req, res) => {
+router.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!R2_BUCKET) {
-      return res.status(500).json({ ok:false, error:'missing_bucket' });
-    }
-    const { content_type = 'image/webp', kind = 'avatars' } = req.body || {};
-    const ext = content_type.split('/')[1] || 'bin';
-    const key = makeKey(kind, ext);
+    if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
 
-    const put = new PutObjectCommand({
-      Bucket: R2_BUCKET,                 // <-- THIS WAS MISSING
+    const kind = String(req.query.kind || 'avatars');
+    const ct = req.file.mimetype || 'image/jpeg';
+    const key = `${kind}/${crypto.randomUUID()}.${extFrom(ct)}`;
+
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
       Key: key,
-      ContentType: content_type,
-      ACL: 'public-read',                 // if your bucket allows it
-    });
+      Body: req.file.buffer,
+      ContentType: ct,
+      // IMPORTANT: no ACL on R2
+    }));
 
-    const url = await getSignedUrl(s3, put, { expiresIn: 60 }); // 60s is fine
-    const public_url = `${R2_PUBLIC_BASE?.replace(/\/$/,'')}/${key}`;
-    res.json({ ok:true, url, key, public_url });
-  } catch (err) {
-    console.error('[images/presign] error:', err);
-    res.status(500).json({ ok:false, error:'presign_failed' });
+    res.json({ ok:true, key, public_url: `https://${PUBLIC_HOST}/${key}` });
+  } catch (e) {
+    console.error('[images/upload] error', e);
+    res.status(500).json({ ok:false, error: e.Code || 'upload_failed' });
   }
 });
+
+module.exports = router;
