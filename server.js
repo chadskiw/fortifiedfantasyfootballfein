@@ -38,10 +38,10 @@ app.post('/api/identity/avatar', (req, res) =>
 );
 
 // … later …
-app.use('/api', (req, res) => {
-  if (res.headersSent) return;
-  res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
-});
+//app.use('/api', (req, res) => {
+//  if (res.headersSent) return;
+//  res.status(404).json({ ok:false, error:'not_found', path:req.originalUrl });
+//});
 
 
 // CORS
