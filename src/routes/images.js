@@ -27,15 +27,30 @@ if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET || !PUBLIC_BASE) {
   console.warn('[images] Missing R2 env vars. Presign/upload will fail without them.');
 }
 
+// src/routes/images.js (or wherever you build the S3 client)
 const s3 = new S3Client({
-  region: R2_REGION,
-  endpoint: R2_ENDPOINT,       // R2: MUST provide endpoint (or set via env)
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID || 'missing',
-    secretAccessKey: R2_SECRET_ACCESS_KEY || 'missing',
-  },
-  forcePathStyle: true,         // R2 requires path-style
+  region: R2_REGION || 'auto',
+  endpoint: R2_ENDPOINT,              // https://<account>.r2.cloudflarestorage.com
+  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+  forcePathStyle: true,
 });
+
+// Remove flexible checksum headers for presigned PUTs
+try { s3.middlewareStack.remove('flexibleChecksumsMiddleware'); } catch {}
+s3.middlewareStack.addRelativeTo(
+  (next) => async (args) => {
+    const req = args.request;
+    if (req && req.headers) {
+      delete req.headers['x-amz-sdk-checksum-algorithm'];
+      delete req.headers['x-amz-checksum-crc32'];
+      delete req.headers['x-amz-checksum-crc32c'];
+      delete req.headers['x-amz-checksum-sha1'];
+      delete req.headers['x-amz-checksum-sha256'];
+    }
+    return next(args);
+  },
+  { relation: 'before', toMiddleware: 'awsAuthMiddleware', name: 'stripChecksums' }
+);
 
 function safeContentType(s) {
   const v = String(s || '').toLowerCase();
