@@ -2,6 +2,11 @@
 const express = require('express');
 const crypto  = require('crypto');
 const router  = express.Router();
+// at top of routes/quickhitter.js
+const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { s3 } = require('../routes/images/r2');      // or wherever your configured client is
+const R2_BUCKET = process.env.R2_BUCKET;
+
 router.use(express.json());
 
 // ---------- DB pool ----------
@@ -395,87 +400,37 @@ function toE164(raw){
 }
 
 router.post('/upsert', async (req, res) => {
-  try{
+  try {
     const b = req.body || {};
-    const email = b.email ? String(b.email).trim() : null;
-    const phone = b.phone ? toE164(b.phone) : null;
+    // ... your existing validation / member_id logic ...
 
-    if (phone && !E164_RE.test(phone)){
-      return res.status(422).json({ ok:false, error:'invalid_phone', message:'Phone must be E.164 like +15551231234.' });
-    }
-    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){
-      return res.status(422).json({ ok:false, error:'invalid_email', message:'Email looks invalid.' });
-    }
+    // 1) Load existing row first (to know the previous image_key)
+    const cur = await pool.query(
+      `SELECT image_key FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
+      [member_id]
+    );
+    const oldKey = cur.rows[0]?.image_key || null;
 
-    // resolve member_id: session → body → cookie → new
-    let member_id = (getSessionMemberId(req) || b.member_id || req.cookies?.ff_member);
-    member_id = ensureMemberId(member_id);
-    res.cookie('ff_member', member_id, { httpOnly:true, secure:true, sameSite:'Lax', maxAge: 365*24*3600*1000 });
+    // ... build handle/color/email/phone/image_key (you already have stripCdn) ...
 
-    const handle = b.handle ? normHandle(b.handle) : null;
-    let color    = b.color_hex ? normHex(b.color_hex) : null; // '#RRGGBB'
-    const image_key = stripCdn(b.image_key || b.image_url || '');
-
-    if (handle && !isHandleShape(handle)) {
-      return res.status(400).json({ ok:false, error:'bad_handle' });
-    }
-
-    // Contact conflict (belongs to someone else)?
-    if (email || phone) {
-      const owner = await ownerOfContact({ email, phone });
-      if (owner && owner !== member_id) {
-        return res.status(409).json({
-          ok: false,
-          error: 'contact_belongs_to_other',
-          owner: { member_id: owner }
-        });
-      }
-    }
-
-    // If (handle,color) collides anywhere, auto-pick an open color from PALETTE.
-    if (handle) {
-      const used = await usedColorsForHandle(handle);
-      if (!color || used.has(color)) {
-        const picked = await pickColorForHandleAvoidingCollisions(handle, color);
-        color = picked || color;
-      }
-    }
-
-    // INSERT/UPSERT — we STORE color WITH the '#'
-    const sql = `
-      INSERT INTO ff_quickhitter (
-        member_id, handle, color_hex, image_key, email, phone,
-        email_is_verified, phone_is_verified, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), now())
-      ON CONFLICT (member_id) DO UPDATE SET
-        handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
-        color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
-        image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
-        email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
-        phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-        email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
-        phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
-        updated_at = now()
-      RETURNING *;
-    `;
-    const params = [
-      member_id,
-      handle,
-      color,                 // keep '#RRGGBB' in staging
-      image_key || null,
-      email,
-      phone,
-      !!b.email_is_verified,
-      !!b.phone_is_verified
-    ];
+    // 2) UPSERT (your existing SQL stays the same)
     const { rows } = await pool.query(sql, params);
     const m = rowToMember(rows[0]);
+    const newKey = m.image_key || null;
 
-    // IMPORTANT: do NOT promote here. Promotion only after verify-code.
-    // If you had a DB trigger doing promotion, update it per SQL below.
+    // 3) If avatar changed → delete the old object in R2 (keeps “one image per user”)
+    if (oldKey && newKey && oldKey !== newKey) {
+      try {
+        if (/^avatars\//.test(oldKey)) {
+          await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: oldKey }));
+        }
+      } catch (e) {
+        console.warn('[images] delete old failed:', e?.Code || e?.message);
+      }
+    }
 
     return res.json({
-      ok:true,
+      ok: true,
       member_id: m.member_id,
       handle: m.handle,
       color_hex: m.color_hex,
@@ -486,5 +441,6 @@ router.post('/upsert', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 module.exports = router;

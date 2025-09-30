@@ -3,9 +3,13 @@ const express = require('express');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { s3, BUCKET } = require('./r2');
-
+const crypto = require('crypto');
 const router = express.Router();
-
+function genKey({ kind='avatars', ext='webp' }) {
+  const ts   = Date.now().toString(36);
+  const rand = crypto.randomBytes(8).toString('hex').slice(0,12);
+  return `${kind}/${ts}-${rand}.${ext}`;   // e.g. avatars/lph0qo-7a3f1b2c3d.webp
+}
 /**
  * POST /api/images/presign
  * body: { content_type: string, kind?: 'avatars' | ... }
