@@ -7,7 +7,8 @@ const router = express.Router();
 
 
  const IMG_CDN_BASE = 'https://img.fortifiedfantasy.com'
-
+    const contentType = ['image/webp','image/jpeg','image/png'].includes(requestedType)
+      ? requestedType : 'image/webp';
 
 function makeKey(kind, ext){
   const k = (kind || 'avatars').toLowerCase();
@@ -23,7 +24,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const ext = ct.includes('png') ? 'png' : ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : 'webp';
     const key = makeKey(kind, ext);
 
-    await s3.send(new PutObjectCommand({ Bucket: BUCKET, key, ContentType }));
+    await s3.send(new PutObjectCommand({ Bucket: BUCKET, key, contentType }));
 
     res.json({ ok:true, key, public_url: `${IMG_CDN_BASE}/${key}` });
   } catch (e) {
