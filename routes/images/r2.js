@@ -7,7 +7,8 @@ const BUCKET   = process.env.R2_BUCKET;                         // ff-media
 const R2_ENDPOINT = process.env.R2_ENDPOINT;                       // https://<account>.r2.cloudflarestorage.com
 const R2_REGION   = process.env.R2_REGION || 'auto';
 const PUB_BASE = (process.env.R2_PUBLIC_BASE || '').replace(/\/+$/,'');
-
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 if (!BUCKET || !R2_ENDPOINT) {
   console.warn(`[R2] missing env — BUCKET=${BUCKET} ENDPOINT=${R2_ENDPOINT}`);
 }
