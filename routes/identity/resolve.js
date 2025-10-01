@@ -1,7 +1,8 @@
 // routes/identity/resolve.js
 const express = require('express');
-const router  = express.Router();
+const { createOption } = require('./store');
 
+const router  = express.Router();
 router.use(express.json());
 
 const maskEmail = (e) => {
@@ -35,41 +36,46 @@ router.post('/resolve', async (req, res) => {
     const input = (req.body && (req.body.handle ?? req.body.identifier)) || '';
     const { kind, value } = classify(input);
 
-    // For the chooser we only resolve by handle; never error-out for other kinds
+    // Only handles show the chooser; others return empty (no 4xx)
     if (kind !== 'handle') return res.json({ ok:true, candidates: [] });
 
-    const pool = req.app.get('pg'); // set in server.js via app.set('pg', pool)
-// routes/identity/resolve.js  (replace the SELECT block)
-const { rows } = await pool.query(`
-  SELECT member_id, handle, color_hex, image_key,
-         email, email_is_verified,
-         phone, phone_is_verified,
-         (quick_snap IS NOT NULL AND quick_snap <> '') AS espn
-    FROM ff_quickhitter
-   WHERE LOWER(handle) = LOWER($1)
-`, [value]);
+    const pool = req.app.get('pg'); // set in server.js: app.set('pg', pool)
+    const { rows } = await pool.query(`
+      SELECT member_id, handle, color_hex, image_key,
+             email, email_is_verified,
+             phone, phone_is_verified,
+             (quick_snap IS NOT NULL AND quick_snap <> '') AS espn
+        FROM ff_quickhitter
+       WHERE LOWER(handle) = LOWER($1)
+    `, [value]);
 
+    const candidates = rows.map(r => {
+      const options = [];
 
-    const candidates = rows.map(r => ({
-      display: {
-        handle: r.handle,
-        color:  r.color_hex || '#77E0FF',
-        image_key: r.image_key || null,
-        espn: !!r.espn, 
-      },
-      // only hints here; the real send happens via /api/identity/request-code
-      options: [
-        ...(r.email && String(r.email_is_verified).toLowerCase().startsWith('t')
-            ? [{ kind:'email', hint:maskEmail(r.email) }] : []),
-        ...(r.phone && String(r.phone_is_verified).toLowerCase().startsWith('t')
-            ? [{ kind:'sms',   hint:maskPhone(r.phone)  }] : []),
-      ]
-    }));
+      if (r.email && (String(r.email_is_verified).toLowerCase().startsWith('t') || r.email_is_verified === true)) {
+        const option_id = createOption({ member_id: r.member_id, kind: 'email', identifier: r.email.toLowerCase() });
+        options.push({ kind:'email', hint:maskEmail(r.email), option_id });
+      }
+      if (r.phone && (String(r.phone_is_verified).toLowerCase().startsWith('t') || r.phone_is_verified === true)) {
+        const option_id = createOption({ member_id: r.member_id, kind: 'phone', identifier: r.phone });
+        options.push({ kind:'sms', hint:maskPhone(r.phone), option_id });
+      }
 
-    res.json({ ok:true, candidates });
+      return {
+        display: {
+          handle: r.handle,
+          color: r.color_hex || '#77E0FF',
+          image_key: r.image_key || null,
+          espn: !!r.espn
+        },
+        options
+      };
+    });
+
+    return res.json({ ok:true, candidates });
   } catch (e) {
     console.error('[signin/resolve] error', e);
-    res.status(200).json({ ok:true, candidates: [] }); // never 4xx here
+    return res.status(200).json({ ok:true, candidates: [] }); // never 4xx here
   }
 });
 
