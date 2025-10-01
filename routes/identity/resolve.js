@@ -39,21 +39,23 @@ router.post('/resolve', async (req, res) => {
     if (kind !== 'handle') return res.json({ ok:true, candidates: [] });
 
     const pool = req.app.get('pg'); // set in server.js via app.set('pg', pool)
-    const { rows } = await pool.query(`
-      SELECT member_id, handle, color_hex, image_key,
-             email, email_is_verified,
-             phone, phone_is_verified,
-             COALESCE(quick_snap, FALSE) AS quick_snap
-        FROM ff_quickhitter
-       WHERE LOWER(handle) = LOWER($1)
-    `, [value]);
+// routes/identity/resolve.js  (replace the SELECT block)
+const { rows } = await pool.query(`
+  SELECT member_id, handle, color_hex, image_key,
+         email, email_is_verified,
+         phone, phone_is_verified,
+         (quick_snap IS NOT NULL AND quick_snap <> '') AS espn
+    FROM ff_quickhitter
+   WHERE LOWER(handle) = LOWER($1)
+`, [value]);
+
 
     const candidates = rows.map(r => ({
       display: {
         handle: r.handle,
         color:  r.color_hex || '#77E0FF',
         image_key: r.image_key || null,
-        espn: !!r.quick_snap
+        espn: !!r.espn, 
       },
       // only hints here; the real send happens via /api/identity/request-code
       options: [
