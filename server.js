@@ -92,7 +92,7 @@ app.get('/link', (req, res) => {
     : '';
   res.redirect(302, `/api/espn/link${qs}`);
 });
-app.use('/api/pp', require('./src/routes/pp/teams'));
+app.use('/api/pp', require('./routes/pp/teams'));
 
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
