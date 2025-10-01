@@ -2,6 +2,22 @@
 const express = require('express');
 const router  = express.Router();
 router.use(express.json());
+// ==== OPAQUE OPTION + CHALLENGE STATE (use Redis in prod) ====
+const crypto = require('crypto');
+const mem = {
+  options: new Map(),    // option_id -> { member_id, kind:'email'|'phone', identifier, exp }
+  challenges: new Map(), // challenge_id -> { member_id, identifier, channel, code_hash, exp }
+};
+const TTL_OPTION_MS = 10 * 60 * 1000;   // 10m
+const TTL_CHALLENGE_MS = 5 * 60 * 1000; // 5m
+
+const rid = (p)=> `${p}_${crypto.randomBytes(16).toString('hex')}`;
+const sha = (s)=> crypto.createHash('sha256').update(String(s)).digest('hex');
+const nowMs = ()=> Date.now();
+const expMs = (ms)=> nowMs() + ms;
+
+function maskEmail(e){ const [u,d]=String(e).split('@'); return d ? `${u.slice(0,2)}…@${d}` : e; }
+function maskPhone(p){ const t=String(p).replace(/[^\d]/g,''); return t.length>=4 ? `••• ••${t.slice(-4)}` : p; }
 
 let db = require('../src/db/pool'); // adjust path to your pool
 let pool = db.pool || db;
@@ -15,25 +31,110 @@ const norm = v => String(v || '').trim();
 function getMemberId(req){
   return (req.cookies && String(req.cookies.ff_member || '').trim()) || null;
 }
+// POST /api/signin/resolve  { handle }
+router.post('/signin/resolve', async (req, res) => {
+  try{
+    const handle = norm(req.body?.handle);
+    if (!handle || !/^[a-zA-Z0-9_.]{3,24}$/.test(handle)) {
+      return res.status(400).json({ ok:false, error:'invalid_handle' });
+    }
+
+    // Get ONLY what we need from quickhitter (server-side)
+    // IMPORTANT: do not send email/phone/member_id to FE.
+    const { rows } = await pool.query(`
+      SELECT member_id, handle, color_hex, image_key,
+             email, email_is_verified, phone, phone_is_verified, COALESCE(quick_snap, FALSE) AS quick_snap
+      FROM ff_quickhitter
+      WHERE LOWER(handle)=LOWER($1)
+    `, [handle]);
+
+    const candidates = [];
+    for(const r of rows){
+      const options = [];
+
+      if (r.email && (r.email_is_verified === true || String(r.email_is_verified).toLowerCase() === 't')) {
+        const option_id = rid('opt');
+        mem.options.set(option_id, {
+          member_id: r.member_id,
+          kind: 'email',
+          identifier: r.email.toLowerCase(),
+          exp: expMs(TTL_OPTION_MS),
+        });
+        options.push({ kind:'email', hint: maskEmail(r.email), option_id });
+      }
+
+      if (r.phone && (r.phone_is_verified === true || String(r.phone_is_verified).toLowerCase() === 't')) {
+        const option_id = rid('opt');
+        mem.options.set(option_id, {
+          member_id: r.member_id,
+          kind: 'phone',
+          identifier: r.phone, // already E.164 in your DB
+          exp: expMs(TTL_OPTION_MS),
+        });
+        options.push({ kind:'sms', hint: maskPhone(r.phone), option_id });
+      }
+
+      candidates.push({
+        display: {
+          handle: r.handle,
+          color: r.color_hex || '#77E0FF',
+          image_key: r.image_key || null,
+          espn: !!r.quick_snap
+        },
+        options
+      });
+    }
+
+    return res.json({ ok:true, candidates });
+  }catch(e){
+    console.error('[signin.resolve] error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 // ---------- POST /api/identity/request-code ----------
+// PATCH to existing route: POST /api/identity/request-code
 router.post('/request-code', async (req, res) => {
   try{
     const member_id = getMemberId(req) || null;
+
+    // NEW: opaque option path
+    const option_id = norm(req.body?.option_id);
+    if (option_id) {
+      const opt = mem.options.get(option_id);
+      if (!opt || opt.exp < nowMs()) return res.status(400).json({ ok:false, error:'option_expired' });
+
+      const code = ('' + Math.floor(100000 + Math.random()*900000)).slice(-6);
+      const challenge_id = rid('ch');
+      mem.challenges.set(challenge_id, {
+        member_id: opt.member_id,
+        identifier: opt.identifier,
+        channel: opt.kind === 'email' ? 'email' : 'sms',
+        code_hash: sha(code),
+        exp: expMs(TTL_CHALLENGE_MS)
+      });
+
+      // send using your existing service
+      const sent = await sendVerification({ identifier: opt.identifier, code, expiresMin:5 });
+      if (!sent.ok) {
+        return res.status(202).json({ ok:false, error:'delivery_unavailable', reason: sent.reason });
+      }
+      return res.json({ ok:true, channel: sent.channel, challenge_id });
+    }
+
+    // OLD path (keep working): raw identifier
     const raw = norm(req.body?.identifier);
     if (!raw) return res.status(400).json({ ok:false, error:'missing_identifier' });
 
-    // normalize identifier
     const isEmail = EMAIL_RE.test(raw);
     const phoneE164 = ensureE164(raw);
     const identifier = isEmail ? raw.toLowerCase() : (phoneE164 || null);
     if (!identifier) return res.status(422).json({ ok:false, error:'bad_identifier', message:'Enter a valid email or E.164 phone.' });
 
-    // Create a fresh code (6 digits), 10-min TTL
+    // Create and stage code as you already do…
     const code = ('' + Math.floor(100000 + Math.random()*900000)).slice(-6);
     const expiresAt = addMinutes(now(), 10);
 
-    // Stage it in DB (upsert by identifier)
     await pool.query(`
       INSERT INTO ff_identity_code (member_id, identifier, channel, code, attempts, expires_at)
       VALUES ($1, $2, $3, $4, 0, $5)
@@ -45,47 +146,56 @@ router.post('/request-code', async (req, res) => {
         expires_at = EXCLUDED.expires_at
     `, [member_id || 'ANON', identifier, isEmail ? 'email' : 'sms', code, expiresAt]);
 
-    // Ensure quickhitter has the contact (unverified)
-    if (member_id) {
-      await pool.query(`
-        INSERT INTO ff_quickhitter (member_id, email, phone)
-        VALUES ($1, ${isEmail ? '$2' : 'NULL'}, ${!isEmail ? '$2' : 'NULL'})
-        ON CONFLICT (member_id) DO UPDATE SET
-          email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
-          phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-          updated_at = now()
-      `, [member_id, identifier]);
-    }
-
-    // Send via NotificationAPI
     const sent = await sendVerification({ identifier, code, expiresMin:10 });
-
     if (!sent.ok) {
-      // Non-fatal: return 202 so UI can show a friendly message
-      return res.status(202).json({
-        ok:false,
-        error:'delivery_unavailable',
-        reason: sent.reason,
-        message:
-          sent.reason === 'sms_not_configured' ? 'SMS delivery is not configured.' :
-          sent.reason === 'email_not_configured' ? 'Email delivery is not configured.' :
-          sent.reason === 'bad_identifier' ? 'Enter a valid email or E.164 phone.' :
-          'Delivery failed; try again later.'
-      });
+      return res.status(202).json({ ok:false, error:'delivery_unavailable', reason: sent.reason });
     }
-
     return res.json({ ok:true, channel: sent.channel });
+
   }catch(e){
     console.error('[identity.request-code] error:', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
+
 // ---------- POST /api/identity/verify ----------
+// PATCH to existing route: POST /api/identity/verify
 router.post('/verify', async (req, res) => {
   try{
+    const ch = norm(req.body?.challenge_id);
+    const code = norm(req.body?.code);
+
+    if (ch) {
+      const row = mem.challenges.get(ch);
+      if (!row || row.exp < nowMs()) return res.status(410).json({ ok:false, error:'challenge_expired' });
+      if (sha(code) !== row.code_hash) return res.status(401).json({ ok:false, error:'code_mismatch' });
+
+      // mark verified in quickhitter
+      if (row.channel === 'email') {
+        await pool.query(`
+          UPDATE ff_quickhitter
+             SET email = COALESCE($1, email),
+                 email_is_verified = TRUE,
+                 updated_at = now()
+           WHERE member_id = $2 OR LOWER(email) = LOWER($1)
+        `,[row.identifier, row.member_id]);
+      } else {
+        await pool.query(`
+          UPDATE ff_quickhitter
+             SET phone = COALESCE($1, phone),
+                 phone_is_verified = TRUE,
+                 updated_at = now()
+           WHERE member_id = $2 OR phone = $1
+        `,[row.identifier, row.member_id]);
+      }
+
+      mem.challenges.delete(ch);
+      return res.json({ ok:true, verified:true, channel: row.channel });
+    }
+
+    // OLD path (identifier + code) — unchanged from your current implementation
     const rawId = norm(req.body?.identifier);
-    const code  = norm(req.body?.code);
     if (!rawId || !code) return res.status(400).json({ ok:false, error:'bad_request' });
 
     const isEmail = EMAIL_RE.test(rawId);
@@ -99,19 +209,14 @@ router.post('/verify', async (req, res) => {
       WHERE identifier=$1
       LIMIT 1
     `, [identifier]);
-    const row = rows[0];
-    if (!row) return res.status(404).json({ ok:false, error:'code_not_found' });
-
-    if (now() > new Date(row.expires_at)) {
-      return res.status(410).json({ ok:false, error:'code_expired' });
-    }
-
-    if (row.code !== code) {
-      await pool.query(`UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id=$1`, [row.id]);
+    const r = rows[0];
+    if (!r) return res.status(404).json({ ok:false, error:'code_not_found' });
+    if (now() > new Date(r.expires_at)) return res.status(410).json({ ok:false, error:'code_expired' });
+    if (r.code !== code) {
+      await pool.query(`UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id=$1`, [r.id]);
       return res.status(401).json({ ok:false, error:'code_mismatch' });
     }
 
-    // Success → mark verified on quickhitter
     if (isEmail) {
       await pool.query(`
         UPDATE ff_quickhitter
@@ -120,7 +225,7 @@ router.post('/verify', async (req, res) => {
                updated_at = now()
          WHERE COALESCE(member_id,'') <> ''
            AND (LOWER(email)=LOWER($1) OR member_id = $2)
-      `,[identifier, row.member_id]);
+      `,[identifier, r.member_id]);
     } else {
       await pool.query(`
         UPDATE ff_quickhitter
@@ -129,17 +234,17 @@ router.post('/verify', async (req, res) => {
                updated_at = now()
          WHERE COALESCE(member_id,'') <> ''
            AND (phone=$1 OR member_id = $2)
-      `,[identifier, row.member_id]);
+      `,[identifier, r.member_id]);
     }
 
-    // (optional) delete used code
-    await pool.query(`DELETE FROM ff_identity_code WHERE id=$1`, [row.id]);
+    await pool.query(`DELETE FROM ff_identity_code WHERE id=$1`, [r.id]);
+    return res.json({ ok:true, verified:true, channel: r.channel });
 
-    return res.json({ ok:true, verified:true, channel: row.channel });
   }catch(e){
     console.error('[identity.verify] error:', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 module.exports = router;
