@@ -76,7 +76,7 @@ app.get('/status', (req, res) => {
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
 //app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
-
+app.use('/api/platforms/espn', require('./routes/espn'));
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
 //app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
@@ -86,7 +86,7 @@ app.use('/api/ghosts', require('./routes/ghosts'));
 app.use('/api/signin', require('./routes/identity/resolve')); // -> POST /api/signin/resolve
 app.use('/api/session', require('./routes/session/loginFromPre'));
 
-app.use('/api/platforms/espn/cred', require('./routes/espn-cred'));
+//app.use('/api/platforms/espn/cred', require('./routes/espn-cred'));
 app.use('/api/identity', require('./routes/identity/request-code'));
 app.use('/api/identity', require('./routes/identity/verify-code'));
 app.post('/api/verify/start', require('./routes/identity/request-code')); // legacy alias
@@ -96,7 +96,7 @@ app.post('/api/verify/start', require('./routes/identity/request-code')); // leg
 const qh = require('./routes/quickhitter');  
 // map legacy FE calls to the new images endpoints
 // server.js
-app.use('/api/platforms/espn', require('./routes/full-pool'));
+//app.use('/api/platforms/espn', require('./routes/full-pool'));
 
 // server.js (or app.js)
 app.use('/api/identity', require('./src/routes/identity-signup-email')); // exposes POST /signup
@@ -111,10 +111,10 @@ app.use('/api/identity',   qh); // alias for legacy FE calls
 
 app.use('/api/members',          require('./routes/members'));
 // server.js
-app.use('/api/platforms/espn', require('./routes/espn-ingest'));
+//app.use('/api/platforms/espn', require('./routes/espn-ingest'));
 
 
-app.use('/api/platforms/espn', require('./routes/espn')); 
+//app.use('/api/platforms/espn', require('./routes/espn')); 
 app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
 //app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
 // optional: if login is its own file and not included above

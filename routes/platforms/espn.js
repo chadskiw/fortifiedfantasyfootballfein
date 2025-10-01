@@ -1,4 +1,4 @@
-// src/routes/platforms/espn.js
+// routes/platforms/espn.js
 const express = require('express');
 const db = require('../../src/db/pool');
 const pool = db.pool || db;
