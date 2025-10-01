@@ -56,37 +56,38 @@ function sha256(s) {
  * - If not found, INSERTs a new session row.
  * - Always returns the (session_id, ip_hash, user_agent) to set in cookies.
  */
-async function ensureSession(member_id, req) {
-  const ua = clientUserAgent(req);
-  const ip = clientIP(req);
-  const ipHash = sha256(ip);
+async function ensureSession(member_id, req, res) {
+  if (!member_id) return null;
 
-  // Try to find an existing session for this exact fingerprint
-  const sel = `
-    SELECT session_id
-      FROM ff_session
-     WHERE member_id = $1
-       AND ip_hash   = $2
-       AND user_agent = $3
-     ORDER BY created_at DESC
-     LIMIT 1
-  `;
-  const { rows } = await pool.query(sel, [member_id, ipHash, ua]);
-  if (rows[0]?.session_id) {
-    // Touch last_seen_at
-    await pool.query(`UPDATE ff_session SET last_seen_at = now() WHERE session_id = $1`, [rows[0].session_id]);
-    return { session_id: rows[0].session_id, ip_hash: ipHash, user_agent: ua };
+  const ua = String(req.headers['user-agent'] || '').slice(0, 512);
+  const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
+  const ip_hash = crypto.createHash('sha256').update(ip).digest('hex');
+
+  // See if an active session exists
+  const q = await pool.query(
+    `SELECT session_id FROM ff_session WHERE member_id=$1 ORDER BY created_at DESC LIMIT 1`,
+    [member_id]
+  );
+  let sid = q.rows[0]?.session_id;
+
+  if (!sid) {
+    const ins = await pool.query(
+      `INSERT INTO ff_session (session_id, member_id, created_at, last_seen_at, ip_hash, user_agent)
+       VALUES (gen_random_uuid(), $1, now(), now(), $2, $3)
+       RETURNING session_id`,
+      [member_id, ip_hash, ua]
+    );
+    sid = ins.rows[0].session_id;
   }
 
-  // No match — create a fresh session row
-  const ins = `
-    INSERT INTO ff_session (member_id, ip_hash, user_agent, created_at, last_seen_at)
-    VALUES ($1, $2, $3, now(), now())
-    RETURNING session_id
-  `;
-  const insRes = await pool.query(ins, [member_id, ipHash, ua]);
-  return { session_id: insRes.rows[0].session_id, ip_hash: ipHash, user_agent: ua };
+  // set cookies
+  res.cookie('ff_member', member_id, { httpOnly:true, sameSite:'Lax', path:'/' });
+  res.cookie('ff_session', sid,       { httpOnly:true, sameSite:'Lax', path:'/' });
+  res.cookie('ff_logged_in', '1',     { sameSite:'Lax', path:'/' });
+
+  return sid;
 }
+
 
 /**
  * setLoginCookies(res, {member_id, session_id})
@@ -201,7 +202,8 @@ router.post('/verify-code', async (req, res) => {
       }
 
       await client.query('COMMIT');
-      return res.json({ ok:true, member_id: member_id || null, kind, value });
+const sid = await ensureSession(memberId, req, res);
+return res.json({ ok:true, member_id: member_id, kind: id.kind, value: id.value, session_id: sid });
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch {}
       console.error('[identity/verify-code opaque] error:', err);
@@ -314,7 +316,8 @@ router.post('/verify-code', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    return res.json({ ok:true, member_id: memberId || null, kind: id.kind, value: id.value });
+const sid = await ensureSession(memberId, req, res);
+return res.json({ ok:true, member_id: memberId, kind: id.kind, value: id.value, session_id: sid });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch {}
     console.error('[identity/verify-code legacy] error:', err);
