@@ -184,7 +184,7 @@ router.post('/request-code', async (req, res) => {
 
 
 // ---------- POST /api/identity/verify ----------
-// PATCH to existing route: POST /api/identity/verify
+/* PATCH to existing route: POST /api/identity/verify
 router.post('/verify', async (req, res) => {
   try{
     const ch = norm(req.body?.challenge_id);
@@ -269,6 +269,6 @@ router.post('/verify', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
-
+*/
 
 module.exports = router;
