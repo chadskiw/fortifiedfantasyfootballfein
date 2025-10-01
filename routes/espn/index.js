@@ -15,13 +15,7 @@ const bad = (res, code, error, extra = {}) => res.status(code).json({ ok: false,
 const num = (v, d=null) => (Number.isFinite(+v) ? +v : d);
 const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest('hex');
 
-function normalizeSwid(raw) {
-  if (!raw) return null;
-  let s = String(raw);
-  try { s = decodeURIComponent(s); } catch {}
-  s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
-  return `{${s}}`;
-}
+
 function normalizeS2(raw) {
   if (!raw) return null;
   let s = String(raw);
@@ -45,38 +39,48 @@ async function getAuthedMemberId(req) {
 
 // ---------------- DB helpers ----------------
 
-/** Save or update creds and force-attach member_id. */
+
+
+function normalizeSwid(raw) {
+  if (!raw) return null;
+  let s = String(raw);
+  try { s = decodeURIComponent(s); } catch {}
+  s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
+  return `{${s}}`;
+}
+
 async function saveCredWithMember({ swid, s2, memberId, ref }) {
+  // If s2 is null/empty, do NOT overwrite an existing s2.
   const swidHash = sha256(swid);
-  const s2Hash   = sha256(s2);
+  const s2Val    = (s2 && String(s2).trim()) ? String(s2).trim() : null;
+  const s2Hash   = s2Val ? sha256(s2Val) : null;
 
-  // Update by SWID first
-  const up = await pool.query(
-    `UPDATE ff_espn_cred
-        SET espn_s2=$2, s2_hash=$3, swid_hash=$4,
-            member_id=$5,
-            last_seen=now(),
-            ref = COALESCE($6, ref)
-      WHERE swid=$1
-      RETURNING cred_id`,
-    [swid, s2, s2Hash, swidHash, memberId, ref || null]
-  );
-  if (up.rowCount > 0) return up.rows[0];
+  const upd = await pool.query(`
+    UPDATE ff_espn_cred
+       SET swid_hash = $2,
+           member_id = $3,
+           last_seen = now(),
+           ref       = COALESCE($4, ref)
+         ${s2Val ? ', espn_s2 = $5, s2_hash = $6' : ''}
+     WHERE swid = $1
+     RETURNING cred_id
+  `, s2Val ? [swid, swidHash, memberId, ref || null, s2Val, s2Hash]
+           : [swid, swidHash, memberId, ref || null]);
 
-  // Else insert
-  const ins = await pool.query(
-    `INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-     VALUES ($1,$2,$3,$4,$5, now(), now(), $6)
-     RETURNING cred_id`,
-    [swid, s2, swidHash, s2Hash, memberId, ref || null]
-  );
+  if (upd.rowCount > 0) return upd.rows[0];
+
+  // Insert new row; espn_s2 may be null here (that’s OK)
+  const ins = await pool.query(`
+    INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
+    VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
+    RETURNING cred_id
+  `, [swid, s2Val, swidHash, s2Hash, memberId, ref || null]);
+
   return ins.rows[0];
 }
 
-/** Ensure quick_snap exists; update if row exists, else insert a minimal one. */
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
-
   const normalized = normalizeSwid(swid);
 
   const sel = await pool.query(
@@ -99,13 +103,18 @@ async function ensureQuickSnap(memberId, swid) {
     return;
   }
 
-  // No row for this member — insert a minimal one with the quick_snap
+  // No row yet – create a minimal one with quick_snap
   await pool.query(
-    `INSERT INTO ff_quickhitter (member_id, handle, quick_snap, color_hex, created_at, updated_at, is_member)
-     VALUES ($1, NULL, $2, COALESCE((SELECT color_hex FROM ff_member WHERE member_id=$1 LIMIT 1), '#77E0FF'), now(), now(), FALSE)`
-    , [memberId, normalized]
+    `INSERT INTO ff_quickhitter
+       (member_id, handle, quick_snap, color_hex, created_at, updated_at, is_member)
+     VALUES
+       ($1, NULL, $2,
+        COALESCE((SELECT color_hex FROM ff_member WHERE member_id = $1 LIMIT 1), '#77E0FF'),
+        now(), now(), FALSE)`,
+    [memberId, normalized]
   );
 }
+
 
 // ---------------- link endpoints ----------------
 
@@ -253,14 +262,28 @@ router.get('/poll', async (req, res) => {
 
 // ---------------- misc probes / aliases ----------------
 
-router.get('/cred', (req, res) => {
-  const c = req.cookies || {};
-  const h = req.headers || {};
-  const swid = c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || null;
-  const s2   = c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null;
-  res.set('Cache-Control','no-store');
-  ok(res, { hasCookies: !!(swid && s2) });
+router.get('/cred', async (req, res) => {
+  try {
+    const c = req.cookies || {};
+    const h = req.headers || {};
+    const swid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
+    const s2   = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
+    const memberId = await getAuthedMemberId(req);
+
+    if (memberId && swid) {
+      // Link SWID to member; if s2 is present we’ll store/update it, else keep existing s2.
+      await saveCredWithMember({ swid, s2, memberId, ref: 'cred-probe' });
+      await ensureQuickSnap(memberId, swid);
+    }
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: true, hasCookies: !!(swid && s2) });
+  } catch (e) {
+    console.error('[espn/cred]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
 });
+
 
 router.get('/authcheck', (req, res) => {
   const c = req.cookies || {};
