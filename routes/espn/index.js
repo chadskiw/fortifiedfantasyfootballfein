@@ -1,12 +1,22 @@
 // routes/espn/index.js
-// Mount once: app.use('/api/platforms/espn', require('./routes/espn'));
+// Mount in server.js like:
+//   const espnRouter = require('./routes/espn');
+//   app.use('/api/platforms/espn', espnRouter);   // canonical
+//   app.use('/api/espn', espnRouter);             // legacy short base (bookmarklet)
+//   app.use('/api/espn-auth', espnRouter);        // to satisfy /api/espn-auth/creds (alias)
+//   // shim for public /link endpoint:
+//   app.get('/link', (req, res) => {
+//     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+//     res.redirect(302, `/api/espn/link${qs}`);
+//   });
 
 const express = require('express');
 const crypto  = require('crypto');
 const router  = express.Router();
 
-const poolMod = require('../../src/db/pool');
-const pool = poolMod.pool || poolMod;
+let db;
+try { db = require('../../src/db/pool'); } catch { db = require('../../src/db/pool'); }
+const pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool missing');
 
 // ---------------- helpers ----------------
@@ -15,6 +25,26 @@ const bad = (res, code, error, extra = {}) => res.status(code).json({ ok: false,
 const num = (v, d=null) => (Number.isFinite(+v) ? +v : d);
 const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest('hex');
 
+function safeNextURL(req, fallback = '/fein') {
+  const to = (req.query.to || req.query.return || req.query.next || '').toString().trim();
+  if (!to) return fallback;
+  try {
+    const u = new URL(to, `${req.protocol}://${req.get('host')}`);
+    const sameHost  = u.host === req.get('host');
+    const isRel     = !/^[a-z]+:/i.test(to);
+    return (sameHost || isRel) ? (u.pathname + (u.search || '') + (u.hash || '')) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeSwid(raw) {
+  if (!raw) return null;
+  let s = String(raw);
+  try { s = decodeURIComponent(s); } catch {}
+  s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
+  return `{${s}}`;
+}
 
 function normalizeS2(raw) {
   if (!raw) return null;
@@ -39,18 +69,11 @@ async function getAuthedMemberId(req) {
 
 // ---------------- DB helpers ----------------
 
-
-
-function normalizeSwid(raw) {
-  if (!raw) return null;
-  let s = String(raw);
-  try { s = decodeURIComponent(s); } catch {}
-  s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
-  return `{${s}}`;
-}
-
+/**
+ * Upsert creds and attach member_id.
+ * If s2 is null/empty, we DO NOT overwrite an existing s2.
+ */
 async function saveCredWithMember({ swid, s2, memberId, ref }) {
-  // If s2 is null/empty, do NOT overwrite an existing s2.
   const swidHash = sha256(swid);
   const s2Val    = (s2 && String(s2).trim()) ? String(s2).trim() : null;
   const s2Hash   = s2Val ? sha256(s2Val) : null;
@@ -79,6 +102,7 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
   return ins.rows[0];
 }
 
+/** Ensure quick_snap exists; update if row exists, else insert a minimal one. */
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
   const normalized = normalizeSwid(swid);
@@ -115,31 +139,35 @@ async function ensureQuickSnap(memberId, swid) {
   );
 }
 
-
 // ---------------- link endpoints ----------------
 
+/**
+ * Accepts swid (required) and s2 (optional).
+ * Writes creds + quick_snap; sets cookies; redirects to ?to= or /fein.
+ */
 async function linkHandler(req, res) {
   try {
     const swid = normalizeSwid(req.body?.swid ?? req.query?.swid);
     const s2   = normalizeS2(req.body?.s2   ?? req.query?.s2);
-    if (!swid || !s2) return bad(res, 400, 'missing_cred');
+    if (!swid) return bad(res, 400, 'missing_swid');
 
     const memberId = await getAuthedMemberId(req);
     const ref = (req.query?.ref || req.body?.ref || '').toString().slice(0, 64) || null;
 
-    await saveCredWithMember({ swid, s2, memberId, ref });
-    if (memberId) await ensureQuickSnap(memberId, swid);
+    if (memberId) {
+      await saveCredWithMember({ swid, s2, memberId, ref });
+      await ensureQuickSnap(memberId, swid);
+    }
 
     // Cookies for FE convenience
     const maxYear = 1000 * 60 * 60 * 24 * 365;
     const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: maxYear };
     res.cookie('SWID', swid, base);
-    res.cookie('espn_s2', s2, base);
+    if (s2) res.cookie('espn_s2', s2, base);
     res.cookie('fein_has_espn', '1', { ...base, httpOnly: false, maxAge: 1000 * 60 * 60 * 24 * 90 });
 
-const next = safeNextURL(req, '/fein');
-return res.redirect(302, next);
-
+    const next = safeNextURL(req, '/fein');
+    return res.redirect(302, next);
   } catch (e) {
     console.error('[espn/link] error', e);
     return bad(res, 500, 'link_failed');
@@ -151,16 +179,37 @@ router.post('/link', linkHandler);
 
 // ---------------- core FE endpoints ----------------
 
+/**
+ * “Am I linked?” — true if we have SWID (quick_snap or cred) or S2.
+ * This is what the FE should drive its state off of.
+ */
 router.get('/link-status', async (req, res) => {
   try {
     const memberId = await getAuthedMemberId(req);
     if (!memberId) return ok(res, { linked: false, reason: 'no_session' });
 
-    const q = await pool.query(
-      `SELECT 1 FROM ff_espn_cred WHERE member_id = $1 AND swid IS NOT NULL AND espn_s2 IS NOT NULL LIMIT 1`,
-      [memberId]
-    );
-    return ok(res, { linked: q.rowCount > 0 });
+    const { rows } = await pool.query(`
+      WITH q AS (
+        SELECT quick_snap FROM ff_quickhitter WHERE member_id = $1 LIMIT 1
+      ),
+      c AS (
+        SELECT swid, espn_s2
+          FROM ff_espn_cred
+         WHERE member_id = $1
+         ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+         LIMIT 1
+      )
+      SELECT
+        (SELECT quick_snap FROM q) AS quick_snap,
+        (SELECT swid FROM c)       AS swid,
+        (SELECT espn_s2 FROM c)    AS espn_s2
+    `, [memberId]);
+
+    const r = rows[0] || {};
+    const swid = r.swid || r.quick_snap || null;
+    const linked = !!(swid || r.espn_s2);
+
+    return ok(res, { linked, swid: swid || null, hasS2: !!r.espn_s2 });
   } catch (e) {
     console.error('[espn/link-status]', e);
     return bad(res, 500, 'server_error');
@@ -181,20 +230,6 @@ router.get('/leagues', async (req, res) => {
     return bad(res, 500, 'server_error');
   }
 });
-// routes/espn/index.js (add near the top)
-function safeNextURL(req, fallback = '/fein') {
-  const to = (req.query.to || req.query.return || req.query.next || '').toString().trim();
-  if (!to) return fallback;
-  try {
-    const u = new URL(to, `${req.protocol}://${req.get('host')}`);
-    // allow same-origin absolute, or any relative path
-    const sameHost = u.host === req.get('host');
-    const isRelative = !/^[a-z]+:/i.test(to);
-    return (sameHost || isRelative) ? u.pathname + (u.search || '') + (u.hash || '') : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 /** Primary ingest handler (used by all aliases). */
 async function ingestHandler(req, res) {
@@ -208,23 +243,26 @@ async function ingestHandler(req, res) {
     if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
     if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
 
-    // Creds may be forwarded by CF/linker via headers; if present, save & attach.
+    // Creds may be forwarded via headers; if present, save & attach + backfill quick_snap.
     const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
     const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
     if (hdrSwid && hdrS2) {
       await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
       await ensureQuickSnap(memberId, hdrSwid);
     } else {
-      // Fall back to filling quick_snap from stored swid if empty
+      // Fall back to stored creds; ensure quick_snap exists if we have a swid.
       const row = await pool.query(
         `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
         [memberId]
       );
-      if (row.rows[0]?.swid) await ensureQuickSnap(memberId, row.rows[0].swid);
-      else return bad(res, 412, 'espn_not_linked', { needAuth: true });
+      if (row.rows[0]?.swid) {
+        await ensureQuickSnap(memberId, row.rows[0].swid);
+      } else {
+        return bad(res, 412, 'espn_not_linked', { needAuth: true });
+      }
     }
 
-    // TODO: kick real ingestion job here
+    // TODO: trigger actual ingestion
     return res.status(202).json({
       ok: true,
       accepted: true,
@@ -238,31 +276,29 @@ async function ingestHandler(req, res) {
   }
 }
 
-// Primary route
+// Primary route + alias seen in logs
 router.post('/ingest', ingestHandler);
+router.post('/ingest/espn/fan', ingestHandler);
 
-// --- Aliases your FE is hitting (avoid 404s) ---
-router.post('/ingest/espn/fan', ingestHandler); // seen in your logs
-
-// Poll endpoint used by your PP module — stub so UI loads without 404
+// Lightweight poll (keeps UI quiet)
 router.get('/poll', async (req, res) => {
   try {
     const size = Math.max(1, Math.min(100, num(req.query?.size, 10)));
     const season = num(req.query?.season, new Date().getUTCFullYear());
-    return ok(res, {
-      season,
-      size,
-      items: [] // TODO: populate from your PP source; empty list is fine for now
-    });
+    return ok(res, { season, size, items: [] });
   } catch (e) {
     console.error('[espn/poll]', e);
     return bad(res, 500, 'server_error');
   }
 });
 
-// ---------------- misc probes / aliases ----------------
+// ---------------- probes / aliases ----------------
 
-router.get('/cred', async (req, res) => {
+/**
+ * /cred — AND — /creds (alias)
+ * If user is authenticated and SWID cookie exists, upsert/link creds and backfill quick_snap.
+ */
+async function credProbe(req, res) {
   try {
     const c = req.cookies || {};
     const h = req.headers || {};
@@ -271,7 +307,6 @@ router.get('/cred', async (req, res) => {
     const memberId = await getAuthedMemberId(req);
 
     if (memberId && swid) {
-      // Link SWID to member; if s2 is present we’ll store/update it, else keep existing s2.
       await saveCredWithMember({ swid, s2, memberId, ref: 'cred-probe' });
       await ensureQuickSnap(memberId, swid);
     }
@@ -282,8 +317,10 @@ router.get('/cred', async (req, res) => {
     console.error('[espn/cred]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
-});
+}
 
+router.get('/cred', credProbe);
+router.get('/creds', credProbe); // allows /api/espn-auth/creds if you mount at /api/espn-auth
 
 router.get('/authcheck', (req, res) => {
   const c = req.cookies || {};
