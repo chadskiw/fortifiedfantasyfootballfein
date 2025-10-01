@@ -62,6 +62,9 @@ app.get('/healthz', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 const pool = require('./src/db/pool');
+// make pg pool available to routers that use req.app.get('pg')
+app.set('pg', pool);
+
 app.get('/status', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
@@ -80,7 +83,7 @@ app.use('/api/session',          require('./routes/session'));               // 
 app.use('/api/whoami', require('./routes/whoami'));
 app.use('/api/ghosts', require('./routes/ghosts'));
 // server.js
-app.use('/api/signin', require('./routes/identity/resolve'));
+app.use('/api/signin', require('./routes/identity/resolve')); // -> POST /api/signin/resolve
 app.use('/api/session', require('./routes/session/loginFromPre'));
 
 app.use('/api/platforms/espn/cred', require('./routes/espn-cred'));

@@ -1,226 +1,73 @@
-// src/routes/identity/resolve.js
+// routes/identity/resolve.js
 const express = require('express');
-const pool = require('../../src/db/pool');
-const router = express.Router();
+const router  = express.Router();
 
-/* ---------- helpers ---------- */
+router.use(express.json());
 
-function classifyIdentifier(raw) {
-  const v = String(raw || '').trim();
-  const isEmail  = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
-  const isPhone  = /^\+?[0-9][0-9\s\-().]{5,}$/.test(v);
-  const isHandle = /^[a-zA-Z0-9_.]{3,24}$/.test(v);
-  const normPhone = (x)=>{ let t=(x||'').replace(/[^\d+]/g,''); if(t && !t.startsWith('+') && t.length===10) t='+1'+t; return t; };
-  if (isEmail)  return { kind:'email',  value:v };
-  if (isPhone)  return { kind:'phone',  value:normPhone(v) };
-  if (isHandle) return { kind:'handle', value:v };
-  return { kind:'unknown', value:v };
-}
+const maskEmail = (e) => {
+  const [u, d] = String(e || '').split('@');
+  return d ? `${u.slice(0, 2)}…@${d}` : '';
+};
+const maskPhone = (p) => {
+  const t = String(p || '').replace(/[^\d]/g, '');
+  return t.length >= 4 ? `••• ••${t.slice(-4)}` : '';
+};
 
-function hasValidHandleHex(row) {
-  const h = row?.handle || '';
-  const hex = (row?.color_hex || '').replace(/^#/, '');
-  return /^[a-zA-Z0-9_.]{3,24}$/.test(h) && /^[0-9a-fA-F]{6}$/.test(hex);
-}
+const classify = (v) => {
+  if (!v) return { kind: 'null' };
+  const s = String(v).trim();
+  const isEmail  = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+  const isPhone  = /^\+?[0-9][0-9\s\-().]{5,}$/.test(s);
+  const isHandle = /^[A-Za-z0-9_.]{3,24}$/.test(s);
+  if (isEmail)  return { kind:'email',  value:s.toLowerCase() };
+  if (isPhone)  {
+    let t = s.replace(/[^\d+]/g,'');
+    if (t && !t.startsWith('+') && t.length === 10) t = '+1'+t;
+    return { kind:'phone', value:t };
+  }
+  if (isHandle) return { kind:'handle', value:s };
+  return { kind:'bad' };
+};
 
-function isVerified(row) {
-  // Your ff_quickhitter shows boolean-ish columns `email_is_verified`, `phone_is_verified` (t/f)
-  return !!(row?.email_is_verified || row?.phone_is_verified);
-}
-
-function setMemberCookie(res, memberId) {
-  res.cookie('ff_member', memberId, {
-    path: '/', sameSite: 'lax', secure: true, httpOnly: false, maxAge: 31536000 * 1000
-  });
-}
-
-/* Copy a quickhitter row into ff_member (upsert). 
- * Adjust column names to your ff_member schema if different.
- */
-async function promoteQhToMember(client, qh) {
-  const hex = (qh.color_hex || '').replace(/^#/, '').toLowerCase();
-  await client.query(`
-    INSERT INTO ff_member (member_id, handle, color_hex, email, phone_e164, email_is_verified, phone_is_verified, created_at, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now())
-    ON CONFLICT (member_id) DO UPDATE
-       SET handle            = EXCLUDED.handle,
-           color_hex         = EXCLUDED.color_hex,
-           email             = COALESCE(EXCLUDED.email, ff_member.email),
-           phone_e164        = COALESCE(EXCLUDED.phone_e164, ff_member.phone_e164),
-           email_is_verified = GREATEST(COALESCE(ff_member.email_is_verified,false), COALESCE(EXCLUDED.email_is_verified,false)),
-           phone_is_verified = GREATEST(COALESCE(ff_member.phone_is_verified,false), COALESCE(EXCLUDED.phone_is_verified,false)),
-           updated_at        = now()
-  `, [
-    qh.member_id,
-    qh.handle || null,
-    hex || null,
-    qh.email || null,
-    qh.phone || null,                 // your quickhitter column is "phone"; ff_member uses "phone_e164"
-    !!qh.email_is_verified,
-    !!qh.phone_is_verified,
-  ]);
-}
-
-/* ---------- main endpoint ---------- */
-
+// POST /api/signin/resolve  { handle }
 router.post('/resolve', async (req, res) => {
   try {
-    const raw = (req.body?.identifier || '').trim();
-    const verifyContact = (req.body?.verifyContact || '').trim();
-    const { kind, value } = classifyIdentifier(raw);
-    if (kind === 'unknown') return res.status(422).json({ ok:false, error:'bad_identifier' });
+    const input = (req.body && (req.body.handle ?? req.body.identifier)) || '';
+    const { kind, value } = classify(input);
 
-    // 1) Try ff_member first
-    let m = null;
-    if (kind === 'email') {
-      const r = await pool.query(`SELECT * FROM ff_member WHERE LOWER(email)=LOWER($1) LIMIT 1`, [value]);
-      m = r.rows[0] || null;
-    } else if (kind === 'phone') {
-      const r = await pool.query(`SELECT * FROM ff_member WHERE phone_e164=$1 LIMIT 1`, [value]);
-      m = r.rows[0] || null;
-    } else if (kind === 'handle') {
-      const r = await pool.query(`SELECT * FROM ff_member WHERE handle=$1 LIMIT 1`, [value]);
-      m = r.rows[0] || null;
-    }
+    // For the chooser we only resolve by handle; never error-out for other kinds
+    if (kind !== 'handle') return res.json({ ok:true, candidates: [] });
 
-    if (m) {
-      // Found in ff_member → you can route however you already do (descriptor, /fein, etc.)
-      setMemberCookie(res, m.member_id);
-      return res.json({
-        ok: true,
-        source: 'member',
-        next: 'fein', // or 'descriptor' if you require it; adjust to your flow
-        prefill: {
-          member_id: m.member_id,
-          handle: m.handle || '',
-          hex: (m.color_hex || '').startsWith('#') ? m.color_hex : ('#' + (m.color_hex || '77e0ff')),
-          email: m.email || null,
-          phone: m.phone_e164 || null
-        }
-      });
-    }
+    const pool = req.app.get('pg'); // set in server.js via app.set('pg', pool)
+    const { rows } = await pool.query(`
+      SELECT member_id, handle, color_hex, image_key,
+             email, email_is_verified,
+             phone, phone_is_verified,
+             COALESCE(quick_snap, FALSE) AS quick_snap
+        FROM ff_quickhitter
+       WHERE LOWER(handle) = LOWER($1)
+    `, [value]);
 
-    // 2) Not in member → check ff_quickhitter
-    let qh = null;
-    if (kind === 'email') {
-      const r = await pool.query(`SELECT * FROM ff_quickhitter WHERE LOWER(email)=LOWER($1) LIMIT 1`, [value]);
-      qh = r.rows[0] || null;
-    } else if (kind === 'phone') {
-      const r = await pool.query(`SELECT * FROM ff_quickhitter WHERE phone=$1 LIMIT 1`, [value]);
-      qh = r.rows[0] || null;
-    } else if (kind === 'handle') {
-      const r = await pool.query(`SELECT * FROM ff_quickhitter WHERE handle=$1 LIMIT 1`, [value]);
-      qh = r.rows[0] || null;
-    }
+    const candidates = rows.map(r => ({
+      display: {
+        handle: r.handle,
+        color:  r.color_hex || '#77E0FF',
+        image_key: r.image_key || null,
+        espn: !!r.quick_snap
+      },
+      // only hints here; the real send happens via /api/identity/request-code
+      options: [
+        ...(r.email && String(r.email_is_verified).toLowerCase().startsWith('t')
+            ? [{ kind:'email', hint:maskEmail(r.email) }] : []),
+        ...(r.phone && String(r.phone_is_verified).toLowerCase().startsWith('t')
+            ? [{ kind:'sms',   hint:maskPhone(r.phone)  }] : []),
+      ]
+    }));
 
-    if (qh) {
-      // 2a) If QH is complete (verified contact + valid handle/hex) → copy to ff_member and go
-      if (isVerified(qh) && hasValidHandleHex(qh)) {
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          await promoteQhToMember(client, qh);
-          await client.query('COMMIT');
-        } catch (e) {
-          await client.query('ROLLBACK'); throw e;
-        } finally {
-          client.release();
-        }
-        setMemberCookie(res, qh.member_id);
-        return res.json({
-          ok: true,
-          source: 'quickhitter',
-          outcome: 'promoted',
-          next: 'fein',
-          prefill: {
-            member_id: qh.member_id, handle: qh.handle || '',
-            hex: (qh.color_hex || '').startsWith('#') ? qh.color_hex : ('#' + (qh.color_hex || '77e0ff')),
-            email: qh.email || null, phone: qh.phone || null
-          }
-        });
-      }
-
-      // 2b) If identifier is email/phone → send to signup-details with prefill (and set cookie)
-      if (kind === 'email' || kind === 'phone') {
-        setMemberCookie(res, qh.member_id);
-        return res.json({
-          ok: true,
-          source: 'quickhitter',
-          outcome: 'needs_verification',
-          next: 'signup-details',
-          prefill: {
-            member_id: qh.member_id,
-            handle: qh.handle || '',
-            hex: (qh.color_hex || '#77e0ff').replace(/^#/, '#'),
-            avatarDataUrl: null,
-            pending: {
-              email: kind==='email' ? value : (qh.email || undefined),
-              phone: kind==='phone' ? value : (qh.phone || undefined)
-            }
-          }
-        });
-      }
-
-      // 2c) Identifier is handle → we require a contact to match what's on that handle (if any)
-      if (kind === 'handle') {
-        const hasAnyContact = !!(qh.email || qh.phone);
-        if (verifyContact) {
-          const v = verifyContact.trim();
-          const vEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
-          const vPhone = /^\+?[0-9][0-9\s\-().]{5,}$/.test(v);
-          const normPhone = (x)=>{ let t=(x||'').replace(/[^\d+]/g,''); if(t && !t.startsWith('+') && t.length===10) t='+1'+t; return t; };
-          const phoneNorm = vPhone ? normPhone(v) : '';
-          const emailOk = !!(vEmail && qh.email && v.toLowerCase() === qh.email.toLowerCase());
-          const phoneOk = !!(vPhone && qh.phone && phoneNorm === qh.phone);
-
-          if (emailOk || phoneOk) {
-            setMemberCookie(res, qh.member_id);
-            return res.json({
-              ok: true,
-              source: 'quickhitter',
-              outcome: 'handle_verified_by_contact',
-              next: 'signup-details',
-              prefill: {
-                member_id: qh.member_id,
-                handle: qh.handle || '',
-                hex: (qh.color_hex || '#77e0ff').replace(/^#/, '#'),
-                pending: {
-                  email: emailOk ? qh.email : undefined,
-                  phone: phoneOk ? qh.phone : undefined
-                }
-              }
-            });
-          }
-          // contact provided but didn't match
-          return res.status(403).json({
-            ok:false, error:'contact_mismatch',
-            message:'Provided contact does not match this handle.'
-          });
-        }
-
-        // No verifyContact supplied yet → ask client to collect it
-        return res.json({
-          ok: true,
-          source: 'quickhitter',
-          outcome: 'handle_needs_contact',
-          next: 'collect-contact',
-          hints: { hasEmail: !!qh.email, hasPhone: !!qh.phone }
-        });
-      }
-    }
-
-    // 3) Nothing found anywhere → new signup
-    return res.json({
-      ok: true,
-      source: 'none',
-      outcome: 'new_signup',
-      next: 'signup',
-      prefill: { firstIdentifier: value, type: kind }
-    });
-
+    res.json({ ok:true, candidates });
   } catch (e) {
-    console.error('identity.resolve.error', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    console.error('[signin/resolve] error', e);
+    res.status(200).json({ ok:true, candidates: [] }); // never 4xx here
   }
 });
 
