@@ -70,7 +70,7 @@ router.get('/', async (req, res) => {
   try {
     const c = req.cookies || {};
     const memberCookie  = (c.ff_member_id || c.ff_member || '').trim();
-    const sessionCookie = (c.ff_session_id || '').trim();
+const sessionCookie = (c.ff_session_id || c.ff_session || '').trim();
     const loggedFlag    = (c.ff_logged_in || '') === '1';
 
     // If any of the 3 flags is missing, treat as not logged in.
