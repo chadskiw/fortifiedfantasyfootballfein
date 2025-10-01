@@ -1,8 +1,10 @@
 // routes/identity/verify-code.js
 const express = require('express');
+const crypto  = require('crypto');
 const router  = express.Router();
 router.use(express.json());
 
+// ---- DB pool (supports either default or named export) ----
 let db = require('../../src/db/pool');
 let pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') {
@@ -11,6 +13,7 @@ if (!pool || typeof pool.query !== 'function') {
 
 const { consumeChallenge } = require('./store');
 
+// ---------- helpers ----------
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const CODE_RE  = /^\d{6}$/;
 
@@ -35,6 +38,73 @@ function classifyIdentifier(id) {
   return { kind: null, value: null, channel: null };
 }
 
+function clientUserAgent(req) {
+  return String(req.headers['user-agent'] || '').slice(0, 1024);
+}
+function clientIP(req) {
+  // Trust first value in XFF when behind proxy, else req.ip
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (xff || req.ip || '').replace(/^::ffff:/, '');
+}
+function sha256(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+
+/**
+ * ensureSession(member_id, req)
+ * - Looks for an existing ff_session row for (member_id, ip_hash, user_agent).
+ * - If not found, INSERTs a new session row.
+ * - Always returns the (session_id, ip_hash, user_agent) to set in cookies.
+ */
+async function ensureSession(member_id, req) {
+  const ua = clientUserAgent(req);
+  const ip = clientIP(req);
+  const ipHash = sha256(ip);
+
+  // Try to find an existing session for this exact fingerprint
+  const sel = `
+    SELECT session_id
+      FROM ff_session
+     WHERE member_id = $1
+       AND ip_hash   = $2
+       AND user_agent = $3
+     ORDER BY created_at DESC
+     LIMIT 1
+  `;
+  const { rows } = await pool.query(sel, [member_id, ipHash, ua]);
+  if (rows[0]?.session_id) {
+    // Touch last_seen_at
+    await pool.query(`UPDATE ff_session SET last_seen_at = now() WHERE session_id = $1`, [rows[0].session_id]);
+    return { session_id: rows[0].session_id, ip_hash: ipHash, user_agent: ua };
+  }
+
+  // No match — create a fresh session row
+  const ins = `
+    INSERT INTO ff_session (member_id, ip_hash, user_agent, created_at, last_seen_at)
+    VALUES ($1, $2, $3, now(), now())
+    RETURNING session_id
+  `;
+  const insRes = await pool.query(ins, [member_id, ipHash, ua]);
+  return { session_id: insRes.rows[0].session_id, ip_hash: ipHash, user_agent: ua };
+}
+
+/**
+ * setLoginCookies(res, {member_id, session_id})
+ * - Sets cookies the client will use + a boolean "logged in" flag.
+ */
+function setLoginCookies(res, { member_id, session_id }) {
+  // 30 days
+  const maxAge = 30 * 24 * 60 * 60 * 1000;
+  const cookieOpts = {
+    httpOnly: true, secure: true, sameSite: 'Lax', maxAge, path: '/'
+  };
+  res.cookie('ff_member_id', String(member_id || ''), cookieOpts);
+  res.cookie('ff_session_id', String(session_id || ''), cookieOpts);
+  // For compatibility with frontend checks, mirror a readable flag
+  res.cookie('ff_logged_in', '1', { ...cookieOpts, httpOnly: false });
+}
+
+// ---------- resolveMemberId via contact ----------
 async function resolveMemberId({ member_id, kind, value }) {
   if (member_id) return member_id;
 
@@ -63,10 +133,9 @@ async function resolveMemberId({ member_id, kind, value }) {
   return null;
 }
 
-// ---------- NEW: opaque challenge path ----------
+// ================== ROUTE ==================
 router.post('/verify-code', async (req, res) => {
   const rawCode = String(req.body?.code || '').trim();
-
   if (!CODE_RE.test(rawCode)) {
     return res.status(400).json({ ok: false, error: 'bad_code', message: 'Enter the 6-digit code.' });
   }
@@ -122,6 +191,13 @@ router.post('/verify-code', async (req, res) => {
             [member_id, value]
           );
         }
+      }
+
+      // --- Create/ensure session + set cookies
+      const resolvedMemberId = member_id || await resolveMemberId({ member_id, kind, value });
+      if (resolvedMemberId) {
+        const sess = await ensureSession(resolvedMemberId, req);
+        setLoginCookies(res, { member_id: resolvedMemberId, session_id: sess.session_id });
       }
 
       await client.query('COMMIT');
@@ -229,6 +305,12 @@ router.post('/verify-code', async (req, res) => {
           [id.value]
         );
       }
+    }
+
+    // --- Create/ensure session + set cookies
+    if (memberId) {
+      const sess = await ensureSession(memberId, req);
+      setLoginCookies(res, { member_id: memberId, session_id: sess.session_id });
     }
 
     await client.query('COMMIT');
