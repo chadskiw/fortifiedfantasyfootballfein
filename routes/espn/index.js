@@ -17,31 +17,17 @@ const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest
 
 function normalizeSwid(raw) {
   if (!raw) return null;
-  let s = decodeURIComponent(String(raw)).trim();
-  // ensure braces; upper-case inside
-  s = s.replace(/^\{|\}$/g, '').toUpperCase();
+  let s = String(raw);
+  try { s = decodeURIComponent(s); } catch {}
+  s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
   return `{${s}}`;
 }
 function normalizeS2(raw) {
   if (!raw) return null;
-  // ESPN_S2 sometimes arrives url-encoded or with spaces
   let s = String(raw);
   try { s = decodeURIComponent(s); } catch {}
   s = s.replace(/ /g, '+').trim();
   return s || null;
-}
-
-/**
- * Convert any SWID to "{Number}" format:
- * - If it's already "{123...}" return as-is.
- * - Else, strip all non-digits and wrap in braces. If no digits exist, fall back to "{0}".
- */
-function swidToBraceNumber(swid) {
-  if (!swid) return '{0}';
-  const trimmed = String(swid).trim();
-  if (/^\{\d+\}$/.test(trimmed)) return trimmed;
-  const digits = trimmed.replace(/\D+/g, '');
-  return `{${digits || '0'}}`;
 }
 
 async function getAuthedMemberId(req) {
@@ -59,15 +45,12 @@ async function getAuthedMemberId(req) {
 
 // ---------------- DB helpers ----------------
 
-/**
- * Save or update creds and force-attach member_id.
- * Works even if (swid) doesn't have a unique constraint.
- */
+/** Save or update creds and force-attach member_id. */
 async function saveCredWithMember({ swid, s2, memberId, ref }) {
   const swidHash = sha256(swid);
   const s2Hash   = sha256(s2);
 
-  // Try UPDATE by exact swid first
+  // Update by SWID first
   const up = await pool.query(
     `UPDATE ff_espn_cred
         SET espn_s2=$2, s2_hash=$3, swid_hash=$4,
@@ -80,7 +63,7 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
   );
   if (up.rowCount > 0) return up.rows[0];
 
-  // Else INSERT
+  // Else insert
   const ins = await pool.query(
     `INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
      VALUES ($1,$2,$3,$4,$5, now(), now(), $6)
@@ -90,40 +73,41 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
   return ins.rows[0];
 }
 
-async function getCredByMember(memberId) {
-  const q = await pool.query(
-    `SELECT cred_id, swid, espn_s2, swid_hash, s2_hash
-       FROM ff_espn_cred
-      WHERE member_id = $1
-      ORDER BY last_seen DESC NULLS LAST, first_seen DESC
-      LIMIT 1`,
-    [memberId]
-  );
-  const row = q.rows[0];
-  if (row) await pool.query(`UPDATE ff_espn_cred SET last_seen = now() WHERE cred_id = $1`, [row.cred_id]);
-  return row || null;
-}
-
-/** If user has no quick_snap, set it to SWID in "{Number}" format. */
+/** Ensure quick_snap exists; update if row exists, else insert a minimal one. */
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
-  const qs = await pool.query(
-    `SELECT quick_snap FROM ff_quickhitter WHERE member_id = $1 LIMIT 1`,
+
+  const normalized = normalizeSwid(swid);
+
+  const sel = await pool.query(
+    `SELECT id, quick_snap FROM ff_quickhitter WHERE member_id = $1 LIMIT 1`,
     [memberId]
   );
-  const current = qs.rows[0]?.quick_snap || '';
-  if (current && String(current).trim() !== '') return; // already set
+  const row = sel.rows[0];
 
-  // Use normalized SWID (already looks like {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX})
-  const normalized = normalizeSwid(swid);
+  if (row) {
+    const current = String(row.quick_snap || '').trim();
+    if (!current) {
+      await pool.query(
+        `UPDATE ff_quickhitter
+            SET quick_snap = $2,
+                updated_at = now()
+          WHERE id = $1`,
+        [row.id, normalized]
+      );
+    }
+    return;
+  }
+
+  // No row for this member — insert a minimal one with the quick_snap
   await pool.query(
-    `UPDATE ff_quickhitter SET quick_snap = $2, updated_at = now() WHERE member_id = $1`,
-    [memberId, normalized]
+    `INSERT INTO ff_quickhitter (member_id, handle, quick_snap, color_hex, created_at, updated_at, is_member)
+     VALUES ($1, NULL, $2, COALESCE((SELECT color_hex FROM ff_member WHERE member_id=$1 LIMIT 1), '#77E0FF'), now(), now(), FALSE)`
+    , [memberId, normalized]
   );
 }
 
-
-// ---------------- Link endpoints (kept) ----------------
+// ---------------- link endpoints ----------------
 
 async function linkHandler(req, res) {
   try {
@@ -134,13 +118,10 @@ async function linkHandler(req, res) {
     const memberId = await getAuthedMemberId(req);
     const ref = (req.query?.ref || req.body?.ref || '').toString().slice(0, 64) || null;
 
-    // Save creds and force-attach member_id
     await saveCredWithMember({ swid, s2, memberId, ref });
-
-    // If no quick_snap, set it to {Number} from SWID
     if (memberId) await ensureQuickSnap(memberId, swid);
 
-    // Set cookies for FE convenience
+    // Cookies for FE convenience
     const maxYear = 1000 * 60 * 60 * 24 * 365;
     const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: maxYear };
     res.cookie('SWID', swid, base);
@@ -158,14 +139,18 @@ async function linkHandler(req, res) {
 router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
 
-// ---------------- FE endpoints ----------------
+// ---------------- core FE endpoints ----------------
 
 router.get('/link-status', async (req, res) => {
   try {
     const memberId = await getAuthedMemberId(req);
     if (!memberId) return ok(res, { linked: false, reason: 'no_session' });
-    const row = await getCredByMember(memberId);
-    return ok(res, { linked: !!(row?.swid && row?.espn_s2) });
+
+    const q = await pool.query(
+      `SELECT 1 FROM ff_espn_cred WHERE member_id = $1 AND swid IS NOT NULL AND espn_s2 IS NOT NULL LIMIT 1`,
+      [memberId]
+    );
+    return ok(res, { linked: q.rowCount > 0 });
   } catch (e) {
     console.error('[espn/link-status]', e);
     return bad(res, 500, 'server_error');
@@ -178,10 +163,8 @@ router.get('/leagues', async (req, res) => {
     if (!memberId) return bad(res, 401, 'unauthorized');
 
     const season = num(req.query?.season, new Date().getUTCFullYear());
-    const row = await getCredByMember(memberId);
-    if (!row) return ok(res, { season, leagues: [] });
 
-    // TODO: replace with real ESPN fetch using row.swid / row.espn_s2
+    // TODO: replace with real ESPN fetch using stored creds
     return ok(res, { season, leagues: [] });
   } catch (e) {
     console.error('[espn/leagues]', e);
@@ -189,14 +172,8 @@ router.get('/leagues', async (req, res) => {
   }
 });
 
-/**
- * POST /api/platforms/espn/ingest?season=YYYY&leagueId=...&teamId=...
- * Requirements you asked for:
- *  - If member has no quick_snap, upsert SWID as {Number}.
- *  - Ensure ff_espn_cred has member_id set (attach/overwrite).
- * We read SWID/S2 from headers if provided by your link function (x-espn-swid/x-espn-s2).
- */
-router.post('/ingest', async (req, res) => {
+/** Primary ingest handler (used by all aliases). */
+async function ingestHandler(req, res) {
   try {
     const memberId = await getAuthedMemberId(req);
     if (!memberId) return bad(res, 401, 'unauthorized');
@@ -207,24 +184,23 @@ router.post('/ingest', async (req, res) => {
     if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
     if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
 
-    // Take SWID/S2 from headers if provided by CF function, otherwise from db
+    // Creds may be forwarded by CF/linker via headers; if present, save & attach.
     const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
     const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
-
     if (hdrSwid && hdrS2) {
       await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
       await ensureQuickSnap(memberId, hdrSwid);
     } else {
-      // No headers: still ensure we have creds and quick_snap if possible
-      const existing = await getCredByMember(memberId);
-      if (existing?.swid) await ensureQuickSnap(memberId, existing.swid);
-      if (!existing?.espn_s2) {
-        // not linked → tell FE to open auth
-        return bad(res, 412, 'espn_not_linked', { needAuth: true });
-      }
+      // Fall back to filling quick_snap from stored swid if empty
+      const row = await pool.query(
+        `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
+        [memberId]
+      );
+      if (row.rows[0]?.swid) await ensureQuickSnap(memberId, row.rows[0].swid);
+      else return bad(res, 412, 'espn_not_linked', { needAuth: true });
     }
 
-    // TODO: kick off real ingest here (background job / queue)
+    // TODO: kick real ingestion job here
     return res.status(202).json({
       ok: true,
       accepted: true,
@@ -236,9 +212,32 @@ router.post('/ingest', async (req, res) => {
     console.error('[espn/ingest]', e);
     return bad(res, 500, 'server_error');
   }
+}
+
+// Primary route
+router.post('/ingest', ingestHandler);
+
+// --- Aliases your FE is hitting (avoid 404s) ---
+router.post('/ingest/espn/fan', ingestHandler); // seen in your logs
+
+// Poll endpoint used by your PP module — stub so UI loads without 404
+router.get('/poll', async (req, res) => {
+  try {
+    const size = Math.max(1, Math.min(100, num(req.query?.size, 10)));
+    const season = num(req.query?.season, new Date().getUTCFullYear());
+    return ok(res, {
+      season,
+      size,
+      items: [] // TODO: populate from your PP source; empty list is fine for now
+    });
+  } catch (e) {
+    console.error('[espn/poll]', e);
+    return bad(res, 500, 'server_error');
+  }
 });
 
-// Simple probe for some UIs
+// ---------------- misc probes / aliases ----------------
+
 router.get('/cred', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
