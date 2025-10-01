@@ -3,14 +3,14 @@ const express = require('express');
 const router  = express.Router();
 router.use(express.json());
 
-/* ---------- DB pool ---------- */
-let db = require('../../src/db/pool'); // adjust if your pool path differs
+let db = require('../../src/db/pool');
 let pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') {
   throw new Error('[pg] pool.query not available — check require path/export');
 }
 
-/* ---------- helpers ---------- */
+const { consumeChallenge } = require('./store');
+
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const CODE_RE  = /^\d{6}$/;
 
@@ -63,15 +63,80 @@ async function resolveMemberId({ member_id, kind, value }) {
   return null;
 }
 
-/* ---------- POST /api/identity/verify-code ---------- */
+// ---------- NEW: opaque challenge path ----------
 router.post('/verify-code', async (req, res) => {
-  const rawIdentifier = String(req.body?.identifier || '').trim();
-  const rawCode       = String(req.body?.code || '').trim();
+  const rawCode = String(req.body?.code || '').trim();
 
   if (!CODE_RE.test(rawCode)) {
     return res.status(400).json({ ok: false, error: 'bad_code', message: 'Enter the 6-digit code.' });
   }
 
+  // Prefer opaque challenge path if provided
+  if (req.body?.challenge_id) {
+    const out = consumeChallenge(String(req.body.challenge_id), rawCode);
+    if (!out.ok) return res.status(401).json({ ok:false, error: out.error });
+
+    const { member_id, identifier, channel } = out.data;
+    const kind = channel === 'email' ? 'email' : 'phone';
+    const value = identifier;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      if (kind === 'email') {
+        await client.query(
+          `UPDATE ff_quickhitter
+              SET email = COALESCE(email, $2),
+                  email_is_verified = TRUE,
+                  updated_at = now()
+            WHERE member_id = $1 OR LOWER(email) = LOWER($2)`,
+          [member_id, value]
+        );
+        if (member_id) {
+          await client.query(
+            `UPDATE ff_member
+                SET email = COALESCE(email, $2),
+                    email_verified_at = COALESCE(email_verified_at, now()),
+                    updated_at = now()
+              WHERE member_id = $1`,
+            [member_id, value]
+          );
+        }
+      } else {
+        await client.query(
+          `UPDATE ff_quickhitter
+              SET phone = COALESCE(phone, $2),
+                  phone_is_verified = TRUE,
+                  updated_at = now()
+            WHERE member_id = $1 OR phone = $2`,
+          [member_id, value]
+        );
+        if (member_id) {
+          await client.query(
+            `UPDATE ff_member
+                SET phone_e164 = COALESCE(phone_e164, $2),
+                    phone_verified_at = COALESCE(phone_verified_at, now()),
+                    updated_at = now()
+              WHERE member_id = $1`,
+            [member_id, value]
+          );
+        }
+      }
+
+      await client.query('COMMIT');
+      return res.json({ ok:true, member_id: member_id || null, kind, value });
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch {}
+      console.error('[identity/verify-code opaque] error:', err);
+      return res.status(500).json({ ok:false, error:'server_error' });
+    } finally {
+      client.release();
+    }
+  }
+
+  // ---------- Legacy identifier path ----------
+  const rawIdentifier = String(req.body?.identifier || '').trim();
   const id = classifyIdentifier(rawIdentifier);
   if (!id.value) {
     return res.status(400).json({ ok: false, error: 'bad_identifier', message: 'Email or E.164 phone required.' });
@@ -81,7 +146,6 @@ router.post('/verify-code', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Grab the most recent active code for this (kind,value,channel)
     const sel = `
       SELECT id, member_id, identifier_kind, identifier_value, channel, code, attempts,
              expires_at, created_at, consumed_at, is_active
@@ -98,18 +162,12 @@ router.post('/verify-code', async (req, res) => {
     const { rows } = await client.query(sel, [id.kind, id.value, id.channel]);
     const row = rows[0] || null;
 
-    if (!row) {
-      await client.query('COMMIT');
-      return res.status(400).json({ ok: false, error: 'no_active_code', message: 'Invalid or expired code.' });
-    }
-
-    if (String(row.code) !== rawCode) {
-      await client.query('UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+    if (!row || String(row.code) !== rawCode) {
+      if (row) await client.query('UPDATE ff_identity_code SET attempts = attempts + 1 WHERE id = $1', [row.id]);
       await client.query('COMMIT');
       return res.status(400).json({ ok: false, error: 'mismatch', message: 'Invalid or expired code.' });
     }
 
-    // Mark consumed
     await client.query(
       `UPDATE ff_identity_code
          SET consumed_at = now(), is_active = FALSE
@@ -117,16 +175,22 @@ router.post('/verify-code', async (req, res) => {
       [row.id]
     );
 
-    // Figure out who owns this contact (favor code.member_id; otherwise lookup)
     const memberId = await resolveMemberId({ member_id: row.member_id, kind: id.kind, value: id.value });
 
-    // Reflect verification into ff_quickhitter (for this member or this contact)
     if (id.kind === 'email') {
       if (memberId) {
         await client.query(
           `UPDATE ff_quickhitter
               SET email = COALESCE(email, $2),
                   email_is_verified = TRUE,
+                  updated_at = now()
+            WHERE member_id = $1`,
+          [memberId, id.value]
+        );
+        await client.query(
+          `UPDATE ff_member
+              SET email = COALESCE(email, $2),
+                  email_verified_at = COALESCE(email_verified_at, now()),
                   updated_at = now()
             WHERE member_id = $1`,
           [memberId, id.value]
@@ -139,24 +203,20 @@ router.post('/verify-code', async (req, res) => {
           [id.value]
         );
       }
-      // Mirror to ff_member if we can
-      if (memberId) {
-        await client.query(
-          `UPDATE ff_member
-              SET email = COALESCE(email, $2),
-                  email_verified_at = COALESCE(email_verified_at, now()),
-                  updated_at = now()
-            WHERE member_id = $1`,
-          [memberId, id.value]
-        );
-      }
     } else {
-      // phone
       if (memberId) {
         await client.query(
           `UPDATE ff_quickhitter
               SET phone = COALESCE(phone, $2),
                   phone_is_verified = TRUE,
+                  updated_at = now()
+            WHERE member_id = $1`,
+          [memberId, id.value]
+        );
+        await client.query(
+          `UPDATE ff_member
+              SET phone_e164 = COALESCE(phone_e164, $2),
+                  phone_verified_at = COALESCE(phone_verified_at, now()),
                   updated_at = now()
             WHERE member_id = $1`,
           [memberId, id.value]
@@ -169,26 +229,14 @@ router.post('/verify-code', async (req, res) => {
           [id.value]
         );
       }
-      if (memberId) {
-        await client.query(
-          `UPDATE ff_member
-              SET phone_e164 = COALESCE(phone_e164, $2),
-                  phone_verified_at = COALESCE(phone_verified_at, now()),
-                  updated_at = now()
-            WHERE member_id = $1`,
-          [memberId, id.value]
-        );
-      }
     }
 
     await client.query('COMMIT');
-
-    // Keep the cookie the same; whoami can re-hydrate
-    return res.json({ ok: true, member_id: memberId || null, kind: id.kind, value: id.value });
+    return res.json({ ok:true, member_id: memberId || null, kind: id.kind, value: id.value });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('[identity/verify-code] error:', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    console.error('[identity/verify-code legacy] error:', err);
+    return res.status(500).json({ ok:false, error:'server_error' });
   } finally {
     client.release();
   }

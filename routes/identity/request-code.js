@@ -9,6 +9,7 @@ if (!pool || typeof pool.query !== 'function') {
 }
 
 const { sendOne } = require('../../services/notify');
+const { getOption, createChallenge } = require('./store');
 
 const router = express.Router();
 router.use(express.json({ limit: '2mb' }));
@@ -51,15 +52,7 @@ function mask(kind, value){
   return value;
 }
 
-const RL = new Map();
-function rateLimit(key, limit=6, windowMs=60_000){
-  const now = Date.now();
-  const hit = RL.get(key) || { n:0, t:now };
-  if (now - hit.t > windowMs) { hit.n = 0; hit.t = now; }
-  hit.n++; RL.set(key, hit);
-  return hit.n <= limit;
-}
-
+// ---- identifier-code table helpers (legacy path) ----
 async function findActiveCode(kind, value, channel){
   const q = await pool.query(
     `
@@ -94,9 +87,55 @@ async function insertCode({ memberIdForFK, kind, value, channel, ttlMinutes=12 }
   return ins.rows[0] || null;
 }
 
+// ---- rate limit (simple in-proc) ----
+const RL = new Map();
+function rateLimit(key, limit=6, windowMs=60_000){
+  const now = Date.now();
+  const hit = RL.get(key) || { n:0, t:now };
+  if (now - hit.t > windowMs) { hit.n = 0; hit.t = now; }
+  hit.n++; RL.set(key, hit);
+  return hit.n <= limit;
+}
+
 router.post('/request-code', async (req, res) => {
   const t0 = Date.now();
   try {
+    // ---------- NEW: opaque option path ----------
+    if (req.body && req.body.option_id) {
+      const opt = getOption(String(req.body.option_id || ''));
+      if (!opt) return res.status(422).json({ ok:false, error:'option_expired' });
+
+      const code = sixDigit();
+      const challenge_id = createChallenge({
+        member_id: opt.member_id,
+        identifier: opt.identifier,
+        channel: opt.kind === 'email' ? 'email' : 'sms',
+        code
+      });
+
+      try {
+        await sendOne({
+          channel: opt.kind === 'phone' ? 'sms' : 'email',
+          to: opt.identifier,
+          data: {
+            code,
+            subject: 'Your Fortified Fantasy code',
+            text: `Your Fortified Fantasy verification code is: ${code}`
+          },
+          templateId: opt.kind === 'phone' ? 'ff_sms_code' : 'ff_email_code'
+        });
+      } catch (_) { /* don’t block on provider errors */ }
+
+      return res.json({
+        ok: true,
+        challenge_id,
+        channel: opt.kind === 'phone' ? 'sms' : 'email',
+        to: mask(opt.kind, opt.identifier),
+        took_ms: Date.now() - t0
+      });
+    }
+
+    // ---------- Legacy: direct identifier path ----------
     const { identifier } = req.body || {};
     const { kind, value, channel, error } = normalizeIdentifier(identifier);
     if (error) return res.status(422).json({ ok:false, error:'invalid_identifier' });
@@ -124,33 +163,22 @@ router.post('/request-code', async (req, res) => {
       ).catch(()=>{});
     }
 
-    // Reuse active code if present
+    // reuse or insert
     let row = await findActiveCode(kind, value, channel);
-    let reused = !!row;
-
-    // Create if missing (robust to FK / race)
     if (!row) {
       try {
         row = await insertCode({ memberIdForFK: cookieMemberId, kind, value, channel });
       } catch (e) {
         if (String(e.code) === '23503') {
           row = await insertCode({ memberIdForFK: null, kind, value, channel });
-        } else if (String(e.code) === '23505') {
-          row = await findActiveCode(kind, value, channel);
-          reused = true;
         } else {
           throw e;
         }
       }
     }
-    if (!row) { // belt & suspenders
-      row = await insertCode({ memberIdForFK: null, kind, value, channel }).catch(() => null);
-      reused = false;
-    }
 
-    // SEND — always include { code }
     try {
-      const theCode = row?.code || '000000';
+      const theCode = row?.code || sixDigit();
       await sendOne({
         channel: channel === 'sms' ? 'sms' : 'email',
         to: value,
@@ -172,7 +200,6 @@ router.post('/request-code', async (req, res) => {
       channel,
       to: mask(kind, value),
       expires_at: row?.expires_at || fallbackExpiry,
-      reused: !!reused,
       took_ms: Date.now() - t0
     });
   } catch (err) {
