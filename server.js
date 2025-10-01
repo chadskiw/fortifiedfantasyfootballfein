@@ -79,7 +79,7 @@ app.use('/api/session',          require('./routes/session'));               // 
 //app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
 app.use('/api/whoami', require('./routes/whoami'));
 app.use('/api/ghosts', require('./routes/ghosts'));
-app.use('/api/signin', require('./routes/identity'));  // adds /api/identity/resolve
+app.use('/api/signin/resolve', require('./routes/identity/resolve'));  // adds /api/identity/resolve
 app.use('/api/session', require('./routes/session/loginFromPre'));
 
 app.use('/api/platforms/espn/cred', require('./routes/espn-cred'));
