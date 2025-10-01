@@ -31,66 +31,90 @@ const norm = v => String(v || '').trim();
 function getMemberId(req){
   return (req.cookies && String(req.cookies.ff_member || '').trim()) || null;
 }
-// POST /api/signin/resolve  { handle }
-router.post('/signin/resolve', async (req, res) => {
-  try{
-    const handle = norm(req.body?.handle);
-    if (!handle || !/^[a-zA-Z0-9_.]{3,24}$/.test(handle)) {
-      return res.status(400).json({ ok:false, error:'invalid_handle' });
+// routes/identity/resolve.js
+
+// mask helpers (display-only hints)
+const maskEmail = (e) => {
+  const [u, d] = String(e || '').split('@');
+  return d ? `${u.slice(0, 2)}…@${d}` : '';
+};
+const maskPhone = (p) => {
+  const t = String(p || '').replace(/[^\d]/g, '');
+  return t.length >= 4 ? `••• ••${t.slice(-4)}` : '';
+};
+
+// Accepts handle/email/phone, but we’ll use handle here
+const classify = (v) => {
+  if (!v) return { kind: 'null' };
+  const s = String(v).trim();
+  const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+  const phone = /^\+?[0-9][0-9\s\-().]{5,}$/.test(s);
+  const handle = /^[A-Za-z0-9_.]{3,24}$/.test(s);
+  if (email) return { kind: 'email', value: s.toLowerCase() };
+  if (phone) {
+    let t = s.replace(/[^\d+]/g, '');
+    if (t && !t.startsWith('+') && t.length === 10) t = '+1' + t;
+    return { kind: 'phone', value: t };
+  }
+  if (handle) return { kind: 'handle', value: s };
+  return { kind: 'bad' };
+};
+
+// POST /api/signin/resolve
+router.post('/resolve', async (req, res) => {
+  try {
+    const body = req.body || {};
+    // allow either {handle} or {identifier}, prefer handle for chooser
+    const input = body.handle ?? body.identifier ?? '';
+    const { kind, value } = classify(input);
+
+    // For the chooser UI we only resolve by handle; all other kinds just return empty
+    if (kind !== 'handle') {
+      return res.json({ ok: true, candidates: [] });
     }
 
-    // Get ONLY what we need from quickhitter (server-side)
-    // IMPORTANT: do not send email/phone/member_id to FE.
-    const { rows } = await pool.query(`
-      SELECT member_id, handle, color_hex, image_key,
-             email, email_is_verified, phone, phone_is_verified, COALESCE(quick_snap, FALSE) AS quick_snap
-      FROM ff_quickhitter
-      WHERE LOWER(handle)=LOWER($1)
-    `, [handle]);
+    // server-side lookup — NO PII goes back to client
+    // expects you have `pool` (pg) in req.app.locals or global
+    const pool = req.app.get('pg'); // set this in server.js: app.set('pg', pool)
+    const { rows } = await pool.query(
+      `SELECT member_id, handle, color_hex, image_key,
+              email, email_is_verified,
+              phone, phone_is_verified,
+              COALESCE(quick_snap, FALSE) AS quick_snap
+         FROM ff_quickhitter
+        WHERE LOWER(handle) = LOWER($1)`,
+      [value]
+    );
 
-    const candidates = [];
-    for(const r of rows){
-      const options = [];
-
-      if (r.email && (r.email_is_verified === true || String(r.email_is_verified).toLowerCase() === 't')) {
-        const option_id = rid('opt');
-        mem.options.set(option_id, {
-          member_id: r.member_id,
-          kind: 'email',
-          identifier: r.email.toLowerCase(),
-          exp: expMs(TTL_OPTION_MS),
-        });
-        options.push({ kind:'email', hint: maskEmail(r.email), option_id });
+    const candidates = rows.map((r) => {
+      const opts = [];
+      if (r.email && String(r.email_is_verified).toLowerCase().startsWith('t')) {
+        opts.push({ kind: 'email', hint: maskEmail(r.email), option_id: null /* fill later via /request-code */ });
       }
-
-      if (r.phone && (r.phone_is_verified === true || String(r.phone_is_verified).toLowerCase() === 't')) {
-        const option_id = rid('opt');
-        mem.options.set(option_id, {
-          member_id: r.member_id,
-          kind: 'phone',
-          identifier: r.phone, // already E.164 in your DB
-          exp: expMs(TTL_OPTION_MS),
-        });
-        options.push({ kind:'sms', hint: maskPhone(r.phone), option_id });
+      if (r.phone && String(r.phone_is_verified).toLowerCase().startsWith('t')) {
+        opts.push({ kind: 'sms', hint: maskPhone(r.phone), option_id: null /* fill later via /request-code */ });
       }
-
-      candidates.push({
+      return {
         display: {
           handle: r.handle,
           color: r.color_hex || '#77E0FF',
           image_key: r.image_key || null,
-          espn: !!r.quick_snap
+          espn: !!r.quick_snap,
         },
-        options
-      });
-    }
+        // opaque options will be issued per-click by /identity/request-code
+        // to avoid ever sending email/phone/member_id to FE
+        options: opts,
+      };
+    });
 
-    return res.json({ ok:true, candidates });
-  }catch(e){
-    console.error('[signin.resolve] error:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    return res.json({ ok: true, candidates });
+  } catch (e) {
+    console.error('[signin/resolve] error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
+
 
 // ---------- POST /api/identity/request-code ----------
 // PATCH to existing route: POST /api/identity/request-code
