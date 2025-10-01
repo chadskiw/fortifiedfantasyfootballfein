@@ -128,8 +128,9 @@ async function linkHandler(req, res) {
     res.cookie('espn_s2', s2, base);
     res.cookie('fein_has_espn', '1', { ...base, httpOnly: false, maxAge: 1000 * 60 * 60 * 24 * 90 });
 
-    const next = (req.query.to || req.query.return || req.query.next || '/fein').toString();
-    return res.redirect(302, next);
+const next = safeNextURL(req, '/fein');
+return res.redirect(302, next);
+
   } catch (e) {
     console.error('[espn/link] error', e);
     return bad(res, 500, 'link_failed');
@@ -171,6 +172,20 @@ router.get('/leagues', async (req, res) => {
     return bad(res, 500, 'server_error');
   }
 });
+// routes/espn/index.js (add near the top)
+function safeNextURL(req, fallback = '/fein') {
+  const to = (req.query.to || req.query.return || req.query.next || '').toString().trim();
+  if (!to) return fallback;
+  try {
+    const u = new URL(to, `${req.protocol}://${req.get('host')}`);
+    // allow same-origin absolute, or any relative path
+    const sameHost = u.host === req.get('host');
+    const isRelative = !/^[a-z]+:/i.test(to);
+    return (sameHost || isRelative) ? u.pathname + (u.search || '') + (u.hash || '') : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 /** Primary ingest handler (used by all aliases). */
 async function ingestHandler(req, res) {

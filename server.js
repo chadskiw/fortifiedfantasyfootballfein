@@ -7,6 +7,8 @@ const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
+const espnRouter = require('./routes/espn');
+
 // const imagesPresign = require('./routes/images/presign');
 const imagesPresign = require('./routes/images/presign-r2');
 // ✅ single mount
@@ -76,7 +78,21 @@ app.get('/status', (req, res) => {
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
 //app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
-app.use('/api/platforms/espn', require('./routes/espn'));
+// server.js (or app.js)
+
+// Canonical base
+app.use('/api/platforms/espn', espnRouter);
+
+// Legacy/short base used by older FE and tools
+app.use('/api/espn', espnRouter);
+// server.js (or app.js) — put this AFTER body parsers and BEFORE your SPA/static/404
+app.get('/link', (req, res) => {
+  const qs = req.originalUrl.includes('?')
+    ? req.originalUrl.slice(req.originalUrl.indexOf('?'))
+    : '';
+  res.redirect(302, `/api/espn/link${qs}`);
+});
+
 // Routers (canonical locations under src/routes/*)
 app.use('/api/session',          require('./routes/session'));               // whoami source of truth
 //app.get(['/whoami','/api/whoami'], (req,res)=>res.redirect(307, '/api/session/whoami'));
@@ -115,10 +131,10 @@ app.use('/api/members',          require('./routes/members'));
 
 
 //app.use('/api/platforms/espn', require('./routes/espn')); 
-app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
+//app.use('/api/espn',             require('./routes/espn'));                  // consolidated ESPN (dir with index.js)
 //app.use('/api/platforms/espn',   require('./routes/platforms/espn'));        // legacy alias surface
 // optional: if login is its own file and not included above
-try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
+//try { app.use('/api/espn/login', require('./routes/espn/login')); } catch (_) {}
 
 // optional debug
 try { app.use('/api/debug',      require('./routes/debug/db')); } catch (_) {}
