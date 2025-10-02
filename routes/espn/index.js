@@ -54,24 +54,42 @@ function normalizeS2(raw) {
 }
 const GAMES = ['ffl','fba','flb','fhl'];
 
+// Try to list leagues for the given owner (works only for the owner whose S2 we have)
 async function listOwnerLeagues(game, season, ownerGuid, cred) {
-  const guid = normalizeSwid(ownerGuid); // "{GUID}"
+  // ESPN is picky; try multiple encodings and brace variants
+  const raw = (ownerGuid || '').toString().trim();
+  const norm = normalizeSwid(raw);                // "{GUID}"
+  const nobrace = norm.replace(/[{}]/g, '');      // "GUID" (no braces)
+  const variants = [
+    norm,                      // "{GUID}"
+    nobrace,                   // "GUID"
+    norm.toLowerCase(),
+    nobrace.toLowerCase(),
+    norm.toUpperCase(),
+    nobrace.toUpperCase()
+  ];
+
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues`;
-  const url  = `${base}?forTeamOwner=${encodeURIComponent(guid)}&view=mTeam&view=mSettings`;
-  try {
-    // returns an array of league bundles (not a single object)
-    const arr = await espnFetchJSON(url, cred);
-    if (!Array.isArray(arr)) return [];
-    return arr.map(bundle => ({
-      game,
-      season,
-      leagueId: String(bundle.id),
-      bundle
-    }));
-  } catch (_) {
-    return []; // no access or none found this season/game
+
+  for (const v of variants) {
+    const url = `${base}?forTeamOwner=${encodeURIComponent(v)}&view=mTeam&view=mSettings`;
+    try {
+      const arr = await espnFetchJSON(url, cred);
+      if (Array.isArray(arr) && arr.length) {
+        return arr.map(bundle => ({
+          game,
+          season,
+          leagueId: String(bundle.id),
+          bundle
+        }));
+      }
+    } catch (_) {
+      // ignore and try next variant
+    }
   }
+  return [];
 }
+
 function hasInlineCreds(req){
   const c = req.cookies || {};
   const h = req.headers || {};
