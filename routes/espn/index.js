@@ -72,6 +72,13 @@ async function listOwnerLeagues(game, season, ownerGuid, cred) {
     return []; // no access or none found this season/game
   }
 }
+function hasInlineCreds(req){
+  const c = req.cookies || {};
+  const h = req.headers || {};
+  const swid = (c.SWID || c.swid || h['x-espn-swid'] || '').trim();
+  const s2   = (c.espn_s2 || c.ESPN_S2 || h['x-espn-s2'] || '').trim();
+  return !!(swid && s2);
+}
 
 // ---------------- auth/session helpers ----------------
 async function getAuthedMemberId(req) {
@@ -904,40 +911,28 @@ router.get('/owners', async (req, res) => {
 // ---------------- legacy ingest acceptor (kept) ----------------
 async function ingestHandler(req, res) {
   try {
-    const memberId = await getAuthedMemberId(req);
-    if (!memberId) return bad(res, 401, 'unauthorized');
-
+    const memberId = await getAuthedMemberId(req);          // may be null or a GHOST
     const season   = num(req.query?.season ?? req.body?.season);
     const leagueId = (req.query?.leagueId ?? req.body?.leagueId ?? '').toString().trim();
     const teamId   = (req.query?.teamId   ?? req.body?.teamId   ?? '').toString().trim() || null;
     if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
     if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
 
+    // If caller provided creds inline (cookie/header), allow anonymous run
     const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
     const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
+    const allowAnonViaCookies = hasInlineCreds(req);
 
-    if (hdrSwid && hdrS2) {
-      // Only persist if real member (skip ghosts to avoid immutability trigger)
-// in ingestHandler header path
-if (hdrSwid && hdrS2 && !isGhost(memberId)) {
-  await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
-  await ensureQuickSnap(memberId, hdrSwid);
-}
-    } else {
-      // No headers; just ensure quick_snap if we already have a swid (also skip for ghosts)
-      if (!isGhost(memberId)) {
-        const row = await pool.query(
-          `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
-          [memberId]
-        );
-        if (row.rows[0]?.swid) {
-          await ensureQuickSnap(memberId, row.rows[0].swid);
-        } else {
-          return bad(res, 412, 'espn_not_linked', { needAuth: true });
-        }
-      }
+    if (hdrSwid && hdrS2 && memberId && !isGhost(memberId)) {
+      // Persist only for real members; ghosts/anon skip writes to ff_espn_cred
+      await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+      await ensureQuickSnap(memberId, hdrSwid);
+    } else if (!memberId && !allowAnonViaCookies) {
+      // Neither session nor inline creds → block
+      return bad(res, 401, 'unauthorized');
     }
 
+    // Accept the job (your worker/ghost-ingest path will pick it up downstream)
     return res.status(202).json({
       ok: true,
       accepted: true,
@@ -950,6 +945,7 @@ if (hdrSwid && hdrS2 && !isGhost(memberId)) {
     return bad(res, 500, 'server_error');
   }
 }
+
 
 router.post('/ingest', ingestHandler);
 router.post('/ingest/espn/fan', ingestHandler);
