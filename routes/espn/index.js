@@ -756,6 +756,87 @@ async function safeSaveCredWithMember({ swid, s2, memberId, ref }) {
   );
   return ins.rows[0];
 }
+// Accepts either a specific seed league OR runs a fan-wide ingest if no params are given.
+router.post('/ingest/espn/fan', ensureCred, async (req, res) => {
+  try {
+    const memberId = await getAuthedMemberId(req); // may be null or a GHOST
+    const seasonParam   = req.query?.season ?? req.body?.season ?? null;
+    const leagueIdParam = req.query?.leagueId ?? req.body?.leagueId ?? null;
+    const season   = Number.isFinite(+seasonParam) ? +seasonParam : null;
+    const leagueId = (leagueIdParam ?? '').toString().trim() || null;
+
+    // Allow anonymous if SWID+s2 are on the request (cookies/headers)
+    const allowAnon = (()=>{
+      const c = req.cookies || {};
+      const h = req.headers || {};
+      const swid = (c.SWID || c.swid || h['x-espn-swid'] || '').trim();
+      const s2   = (c.espn_s2 || c.ESPN_S2 || h['x-espn-s2'] || '').trim();
+      return !!(swid && s2);
+    })();
+    if (!allowAnon && !memberId) return res.status(401).json({ ok:false, error:'unauthorized' });
+
+    // If caller supplied both season & leagueId, fast-path accept
+    if (season && leagueId) {
+      // Persist creds only for real members (never for ghosts)
+      const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
+      const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
+      if (hdrSwid && hdrS2 && memberId && !isGhost(memberId)) {
+        await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+        await ensureQuickSnap(memberId, hdrSwid);
+      }
+      return res.status(202).json({ ok:true, accepted:true, season, leagueId:String(leagueId), teamId:null });
+    }
+
+    // ---------- FAN-WIDE MODE (no params): discover everything for this SWID ----------
+    const ownerGuid = req._espn?.swid; // "{GUID}" from ensureCred
+    if (!ownerGuid) return res.status(401).json({ ok:false, error:'missing_creds' });
+
+    const thisYear = new Date().getUTCFullYear();
+    const seasons = [];
+    for (let y = thisYear; y >= thisYear - 6; y--) seasons.push(y); // 7-season sweep
+    const games = ['ffl','fba','flb','fhl'];
+
+    const discovered = [];
+    for (const g of games) {
+      for (const y of seasons) {
+        const leagues = await listOwnerLeagues(g, y, ownerGuid, req._espn);
+        for (const L of leagues) {
+          discovered.push({ game: L.game, season: L.season, leagueId: L.leagueId, bundle: L.bundle || null });
+        }
+      }
+    }
+
+    // Dedup by (game, season, leagueId)
+    const seen = new Set();
+    const todo = [];
+    for (const d of discovered) {
+      const k = `${d.game}|${d.season}|${d.leagueId}`;
+      if (!seen.has(k)) { seen.add(k); todo.push(d); }
+    }
+
+    // Write into the corresponding ff_sport_* tables now
+    const results = [];
+    for (const d of todo) {
+      try {
+        const bundle = d.bundle || await fetchLeagueBundle(d.game, d.season, d.leagueId, req._espn);
+        const write  = await upsertLeagueIntoSportTable(d.game, d.season, d.leagueId, bundle);
+        results.push({ ...d, queued:true, write, bundle: undefined });
+      } catch (e) {
+        results.push({ ...d, queued:false, reason: e.message || 'probe_or_write_failed', bundle: undefined });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      mode: 'fan-wide',
+      ownerGuid,
+      discovered: results.map(({bundle, ...r})=>r)
+    });
+  } catch (e) {
+    console.error('[espn/ingest/espn/fan]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 // ============================================================================
 //                       GHOST INGEST (UPGRADED)
@@ -948,6 +1029,5 @@ async function ingestHandler(req, res) {
 
 
 router.post('/ingest', ingestHandler);
-router.post('/ingest/espn/fan', ingestHandler);
 
 module.exports = router;
