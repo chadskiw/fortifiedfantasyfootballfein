@@ -786,26 +786,49 @@ router.get('/poll', async (req, res) => {
  * Upsert all teams from a league into ff_sport_<game>.
  * Relies on a common schema across your ff_sport_* tables (as in ff_sport_ffl).
  */
+// REPLACE ENTIRE FUNCTION
 async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
-  const char_code = String(game).toLowerCase();         // 'ffl' | 'fba' | 'flb' | 'fhl' | etc.
-  const table = await ensureSportArtifacts(char_code);  // ← auto-creates table + code_map + index
+  const char_code = String(game).toLowerCase();        // 'ffl' | 'flb' | 'fba' | 'fhl'
+  const table = await ensureSportArtifacts(char_code); // ensures table + code_map + index
 
-  // get num_code from your map (after ensureSportArtifacts, it must exist)
+  // map lookup (exists after ensureSportArtifacts)
   const { rows: mapRows } = await pool.query(
-    `SELECT num_code FROM ff_sport_code_map WHERE char_code = $1 LIMIT 1`,
+    `SELECT num_code FROM ff_sport_code_map WHERE char_code=$1 LIMIT 1`,
     [char_code]
   );
-  const num_code = mapRows[0]?.num_code ?? null;
+  const num_code = mapRows[0]?.num_code ?? 0;
 
-  const leagueName  = bundle?.settings?.name || bundle?.metadata?.leagueName || bundle?.leagueName || null;
-  const leagueSize  = Array.isArray(bundle?.teams) ? bundle.teams.length : null;
+  // League meta
+  const leagueName = bundle?.settings?.name
+                  || bundle?.metadata?.leagueName
+                  || bundle?.leagueName
+                  || null;
 
-  // Build up rows (one per team)
-  const rows = (bundle?.teams || []).map(t => {
-    const teamName = `${t.location || ''} ${t.nickname || ''}`.trim();
-    const payload  = {
+  const teams = Array.isArray(bundle?.teams) ? bundle.teams : [];
+  const leagueSize = teams.length || 0;
+
+  // Count distinct ESPN owner GUIDs in the league (for NOT NULL cols)
+  const ownerGuidSet = new Set();
+  for (const t of teams) {
+    if (!t) continue;
+    const owners = Array.isArray(t.owners) ? t.owners : (t.owners ? [t.owners] : []);
+    for (const o of owners) {
+      const guid = typeof o === 'string' ? o
+                 : (o?.id || o?.owner || o?.guid || o?.swid || '');
+      if (guid) ownerGuidSet.add(String(guid));
+    }
+  }
+  const unique_sid_count = ownerGuidSet.size;     // ESPN “SIDs”/owner GUIDs
+  const unique_member_count = leagueSize;         // fallback; can refine later
+
+  // Build insert rows (one per team)
+  const now = new Date();
+  const rows = teams.map((t, idx) => {
+    const teamId = String(t?.id ?? (idx+1));
+    const teamName = `${t?.location || ''} ${t?.nickname || ''}`.trim();
+    const payload = {
       _kind: 'espn.mTeam+mSettings',
-      pulled_at: new Date().toISOString(),
+      pulled_at: now.toISOString(),
       league: { id: String(leagueId), name: leagueName },
       team: t
     };
@@ -813,44 +836,59 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
 
     return {
       char_code,
-      season,
-      num_code,
-      sport: char_code,               // keep same as char_code
+      season: Number(season),
+      num_code: Number(num_code) || 0,
+      sport: char_code,
       competition_type: 'league',
       total_count: leagueSize,
-      unique_sid_count: null,
-      unique_member_count: null,
+      unique_sid_count: Number(unique_sid_count) || 0,      // <<< NOT NULL safe
+      unique_member_count: Number(unique_member_count) || 0, // <<< NOT NULL safe
       table_name: table,
+
       platform: 'espn',
       league_id: String(leagueId),
-      team_id: String(t.id),
+      team_id: teamId,
+
       league_name: leagueName,
       league_size: leagueSize,
       team_name: teamName || '',
       handle: null,
-      team_logo_url: t.logo || null,
+      team_logo_url: t?.logo || null,
       in_season: true,
       is_live: null,
-      current_scoring_period: bundle?.scoringPeriodId || bundle?.status?.currentMatchupPeriod || null,
+      current_scoring_period: bundle?.scoringPeriodId
+                            || bundle?.status?.currentMatchupPeriod
+                            || null,
+
       entry_url: null,
       league_url: null,
       fantasycast_url: null,
       scoreboard_url: null,
       signup_url: null,
+
       scoring_json: null,
       draft_json: null,
       source_payload: payload,
       reaction_counts: null,
       source_hash,
       source_etag: null,
+
       visibility: 'public',
-      status: 'ok'
+      status: 'ok',
+
+      first_seen_at: now,
+      last_seen_at: now,
+      updated_at: now,
+      last_synced_at: now
     };
   });
 
-  if (!rows.length) return { table, inserted: 0, updated: 0 };
+  if (!rows.length) {
+    // Write a league header row anyway? If you want that behavior, add it here.
+    return { table, inserted: 0, updated: 0 };
+  }
 
-  // INSERT … ON CONFLICT (platform, season, league_id, team_id)
+  // Column order for INSERT
   const cols = [
     'char_code','season','num_code','sport','competition_type',
     'total_count','unique_sid_count','unique_member_count','table_name',
@@ -861,6 +899,7 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
     'visibility','status','first_seen_at','last_seen_at','updated_at','last_synced_at'
   ];
   const per = cols.length;
+
   const placeholders = rows.map((_, i) => {
     const base = i*per;
     const list = Array.from({length: per}, (_, j) => `$${base + j + 1}`).join(', ');
@@ -872,23 +911,25 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       ${cols.join(', ')}
     )
     VALUES
-    ${placeholders}
+      ${placeholders}
     ON CONFLICT (platform, season, league_id, team_id)
     DO UPDATE SET
-      league_name = EXCLUDED.league_name,
-      league_size = EXCLUDED.league_size,
-      team_name   = EXCLUDED.team_name,
-      team_logo_url = EXCLUDED.team_logo_url,
+      league_name            = EXCLUDED.league_name,
+      league_size            = EXCLUDED.league_size,
+      team_name              = EXCLUDED.team_name,
+      team_logo_url          = EXCLUDED.team_logo_url,
       current_scoring_period = EXCLUDED.current_scoring_period,
-      source_payload = EXCLUDED.source_payload,
-      source_hash = EXCLUDED.source_hash,
-      visibility = EXCLUDED.visibility,
-      status = EXCLUDED.status,
-      updated_at = now(),
-      last_synced_at = now()
+      total_count            = EXCLUDED.total_count,
+      unique_sid_count       = EXCLUDED.unique_sid_count,
+      unique_member_count    = EXCLUDED.unique_member_count,
+      source_payload         = EXCLUDED.source_payload,
+      source_hash            = EXCLUDED.source_hash,
+      visibility             = EXCLUDED.visibility,
+      status                 = EXCLUDED.status,
+      updated_at             = now(),
+      last_synced_at         = now()
   `;
 
-  const now = new Date();
   const vals = [];
   for (const r of rows) {
     vals.push(
@@ -898,13 +939,14 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       r.team_logo_url, r.in_season, r.is_live, r.current_scoring_period,
       r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
       r.scoring_json, r.draft_json, r.source_payload, r.reaction_counts, r.source_hash, r.source_etag,
-      r.visibility, r.status, now, now, now, now
+      r.visibility, r.status, r.first_seen_at, r.last_seen_at, r.updated_at, r.last_synced_at
     );
   }
 
   await pool.query(text, vals);
   return { table, inserted: rows.length, updated: 'on_conflict' };
 }
+
 
 
 
