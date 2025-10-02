@@ -183,9 +183,9 @@ async function ensureCred(req, res, next) {
   try {
     const cred = await getCredForRequest(req);
     if (!cred.swid || !cred.espn_s2) {
-return bad(res, 401, 'Missing SWID/espn_s2', {
-  hint: 'Link via /api/platforms/espn/link or send X-ESPN-SWID/X-ESPN-S2'
-});
+      return bad(res, 401, 'Missing SWID/espn_s2', {
+        hint: 'Link via /api/platforms/espn/link or send X-ESPN-SWID/X-ESPN-S2'
+      });
     }
     req._espn = cred;
     next();
@@ -208,7 +208,7 @@ async function espnFetchJSON(url, cred, init = {}) {
 
   const res = await fetch(url, { method: 'GET', ...init, headers });
   if (!res.ok) {
-    const text = await res.text().catch(()=>'');
+    const text = await res.text().catch(()=> '');
     const err = new Error(`[${res.status}] ${url} → ${text || 'request failed'}`);
     err.status = res.status;
     throw err;
@@ -374,17 +374,17 @@ async function credProbe(req, res) {
   try {
     const c = req.cookies || {};
     const h = req.headers || {};
-    const swid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
+    theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
     const s2   = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
-    if (memberId && swid) {
-      await saveCredWithMember({ swid, s2, memberId, ref: 'cred-probe' });
-      await ensureQuickSnap(memberId, swid);
+    if (memberId && theSwid) {
+      await saveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
+      await ensureQuickSnap(memberId, theSwid);
     }
 
     res.set('Cache-Control', 'no-store');
-    return res.json({ ok: true, hasCookies: !!(swid && s2) });
+    return res.json({ ok: true, hasCookies: !!(theSwid && s2) });
   } catch (e) {
     console.error('[espn/cred]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
@@ -459,29 +459,5 @@ router.get('/roster', ensureCred, async (req, res) => {
     return bad(res, e.status || 500, e.message || 'proxy_failed');
   }
 });
-// --- add to your routes file mounted at /api/platforms/espn ---
-
-
-
-
-async function upsertCred(memberId, swid, s2) {
-  if (!pool || !memberId) return;
-  await pool.query(`
-    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, first_seen, last_seen, ref)
-    VALUES ($1, $2, $3, now(), now(), 'link')
-    ON CONFLICT (member_id) DO UPDATE
-       SET swid = EXCLUDED.swid,
-           espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
-           last_seen = now()
-  `, [memberId, swid, s2]);
-}
-
-// If you have a way to read the authed member_id from cookies/session:
-async function getMemberId(req) {
-  const c = req.cookies || {};
-  return (c.ff_member_id || '').trim() || null;
-}
-
-
 
 module.exports = router;
