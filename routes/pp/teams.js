@@ -28,8 +28,11 @@ function platformAliases(p) {
  *  - platform   optional (e.g., '018' or 'espn'); aliases handled
  *  - handle     optional
  *  - member_id  optional
- *  - visibility default: 'public'
- *  - status     default: 'active'
+ *  - visibility optional (if omitted, do NOT filter on it)
+ *  - status     optional (if omitted, do NOT filter on it)
+ *
+ * NOTE: We DO NOT hard-filter visibility/status anymore. If you want that,
+ * pass visibility=public&status=active explicitly.
  */
 router.get('/teams', async (req, res) => {
   try {
@@ -38,16 +41,18 @@ router.get('/teams', async (req, res) => {
     const platformIn = req.query.platform ? String(req.query.platform) : null;
     const handle     = req.query.handle ? String(req.query.handle) : null;
     const memberId   = req.query.member_id ? String(req.query.member_id) : null;
-    const visibility = String(req.query.visibility || 'public');
-    const status     = String(req.query.status || 'active');
+
+    // optional filters (ONLY applied if provided)
+    const visibility = req.query.visibility != null ? String(req.query.visibility) : null;
+    const status     = req.query.status     != null ? String(req.query.status)     : null;
 
     if (sport !== 'ffl') {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
 
-    const conds = ['season = $1', 'visibility = $2', 'status = $3'];
-    const params = [season, visibility, status];
-    let p = 4;
+    const conds = ['season = $1'];
+    const params = [season];
+    let p = 2;
 
     // platform aliases (e.g., 018 <-> espn)
     const plats = platformAliases(platformIn);
@@ -56,7 +61,15 @@ router.get('/teams', async (req, res) => {
     if (handle)   { conds.push(`handle = $${p++}`);     params.push(handle); }
     if (memberId) { conds.push(`member_id = $${p++}`);  params.push(memberId); }
 
-    // NOTE: team_id/league_id may be text in DB; cast to text on SELECT
+    // Only constrain on visibility/status if explicitly passed.
+    // If you prefer treating NULL as a default, uncomment the COALESCE lines below.
+    if (visibility != null) { conds.push(`visibility = $${p++}`); params.push(visibility); }
+    if (status     != null) { conds.push(`status = $${p++}`);     params.push(status); }
+
+    // Alternative (treat NULL as defaults):
+    // if (visibility != null) { conds.push(`COALESCE(visibility,'public') = $${p++}`); params.push(visibility); }
+    // if (status     != null) { conds.push(`COALESCE(status,'active')     = $${p++}`); params.push(status); }
+
     const sql = `
       SELECT
         season,
