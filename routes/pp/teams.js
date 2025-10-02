@@ -1,14 +1,8 @@
 // routes/pp/teams.js
-// Mount: app.use('/api/pp', require('./routes/pp/teams'));
-
 const express = require('express');
 let db = require('../../src/db/pool');
 let pool = db.pool || db;
-
-if (!pool || typeof pool.query !== 'function') {
-  throw new Error('[pp/teams] pg pool missing/invalid import');
-}
-
+if (!pool || typeof pool.query !== 'function') throw new Error('[pp/teams] pg pool missing/invalid import');
 const router = express.Router();
 
 function mapPlatform(p) {
@@ -30,36 +24,35 @@ router.get('/teams', async (req, res) => {
     const includeGhostsQ = String(req.query.includeGhosts || '').toLowerCase();
     const legacyExcl     = (includeGhostsQ === 'false');
 
-    const visibility  = String(req.query.visibility || 'public');
-    const status      = String(req.query.status || 'active');
-    const limit       = Math.min(Math.max(parseInt(req.query.size || '100', 10), 1), 500);
+    // IMPORTANT: do not default these — only filter if the client asks
+    const visibility = req.query.visibility ? String(req.query.visibility) : null;
+    const status     = req.query.status ? String(req.query.status) : null;
 
-    // if you have auth, replace with getAuthedMemberId(req)
-    const memberId = req.query.member_id ? String(req.query.member_id) : null;
+    const limit       = Math.min(Math.max(parseInt(req.query.size || '100', 10), 1), 500);
+    const memberId    = req.query.member_id ? String(req.query.member_id) : null;
 
     if (!['ffl','flb','fba','fhl'].includes(sport)) {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
     const table = `ff_sport_${sport}`;
 
-    // Base WHERE (cast league_id to text whenever we compare it to user input)
-    const whereParts = ['s.season = $1', 's.visibility = $2', 's.status = $3'];
-    const params = [season, visibility, status];
-    let p = 4;
+    // Base WHERE: season required; other filters optional
+    const whereParts = ['s.season = $1'];
+    const params = [season];
+    let p = 2;
 
     if (platformArg) { whereParts.push(`s.platform = $${p++}`); params.push(platformArg); }
     if (leagueId)    { whereParts.push(`s.league_id::text = $${p++}`); params.push(leagueId); }
+    if (visibility)  { whereParts.push(`s.visibility = $${p++}`); params.push(visibility); }
+    if (status)      { whereParts.push(`s.status = $${p++}`);     params.push(status); }
 
-    // Ownership filters
+    // Ownership filters (LEFT JOIN so teams with no owner row still appear)
     const ownerFilters = [];
     if (onlyMine) {
       if (!memberId) return res.json({ ok:true, season, sport, count:0, teams:[] });
-      ownerFilters.push(`o.member_id = $${p++}`);
-      params.push(memberId);
+      ownerFilters.push(`o.member_id = $${p++}`); params.push(memberId);
     }
-    if (excludeGhosts || legacyExcl) {
-      ownerFilters.push(`(o.owner_kind IS DISTINCT FROM 'ghost')`);
-    }
+    if (excludeGhosts || legacyExcl) ownerFilters.push(`(o.owner_kind IS DISTINCT FROM 'ghost')`);
     const ownerClause = ownerFilters.length ? `AND ${ownerFilters.join(' AND ')}` : '';
 
     const sql = `
@@ -75,8 +68,8 @@ router.get('/teams', async (req, res) => {
       LEFT JOIN ff_team_owner o
         ON  o.platform = s.platform
         AND o.season   = s.season
-        AND o.league_id::text = s.league_id::text   -- <<< type-safe
-        AND o.team_id::text   = s.team_id::text     -- <<< type-safe
+        AND o.league_id::text = s.league_id::text
+        AND o.team_id::text   = s.team_id::text
       WHERE ${whereParts.join(' AND ')}
       ${ownerClause}
       ORDER BY s.season DESC,
@@ -87,6 +80,7 @@ router.get('/teams', async (req, res) => {
     params.push(limit);
 
     const { rows } = await pool.query(sql, params);
+    res.set('Cache-Control','no-store');
     return res.json({ ok:true, season, sport, count: rows.length, teams: rows });
   } catch (err) {
     console.error('[pp/teams] error', err);
