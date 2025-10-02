@@ -583,10 +583,12 @@ router.get('/cred', async (req, res) => {
     const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
-    if (memberId && theSwid && !isGhost(memberId)) {
-      await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-      await ensureQuickSnap(memberId, theSwid); // now safe, no duplicate error
-    }
+// inside your /api/platforms/espn/cred handler, around ensureQuickSnap:
+if (memberId && theSwid && !isGhost(memberId)) {
+  await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
+  try { await ensureQuickSnap(memberId, theSwid); } catch { /* ignore */ }
+}
+
     res.set('Cache-Control','no-store').json({ ok:true, hasCookies: !!(theSwid && s2) });
   } catch (e) {
     console.error('[espn/cred] error:', e);
