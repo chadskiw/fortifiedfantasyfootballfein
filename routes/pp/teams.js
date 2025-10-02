@@ -1,5 +1,5 @@
 // routes/pp/teams.js
-// Mount with: app.use('/api/pp', require('./routes/pp/teams'));
+// Mount: app.use('/api/pp', require('./routes/pp/teams'));
 
 const express = require('express');
 let db = require('../../src/db/pool');
@@ -15,35 +15,18 @@ function mapPlatform(p) {
   if (!p) return null;
   const v = String(p).trim().toLowerCase();
   if (v === '018' || v === 'espn' || v === 'es') return 'espn';
-  return v; // extend later if you add more providers
+  return v;
 }
 
-/**
- * GET /api/pp/teams
- * Query params:
- *  - sport:       ffl|flb|fba|fhl   (default: ffl)
- *  - season:      number            (default: current year)
- *  - platform:    'espn' or '018'   (optional; defaults to any)
- *  - leagueId:    string            (optional)
- *  - onlyMine:    true|false        (default: false)
- *  - excludeGhosts: true|false      (default: false)
- *  - size:        int (1..500)      (default: 100)
- *  - visibility:  string            (default: 'public')
- *  - status:      string            (default: 'active')
- *
- * Response:
- *  { ok, season, sport, count, teams: [{ season, leagueId, teamId, teamName, leagueName, leagueSize, logo }] }
- */
 router.get('/teams', async (req, res) => {
   try {
     const sport       = String(req.query.sport || 'ffl').toLowerCase();
     const season      = Number(req.query.season || new Date().getUTCFullYear());
-    const platformArg = mapPlatform(req.query.platform || null); // maps 018 -> espn
+    const platformArg = mapPlatform(req.query.platform || null);
     const leagueId    = req.query.leagueId ? String(req.query.leagueId) : null;
 
     const onlyMine       = String(req.query.onlyMine || '').toLowerCase() === 'true';
     const excludeGhosts  = String(req.query.excludeGhosts || '').toLowerCase() === 'true';
-    // legacy param still honored: includeGhosts=false -> excludeGhosts=true
     const includeGhostsQ = String(req.query.includeGhosts || '').toLowerCase();
     const legacyExcl     = (includeGhostsQ === 'false');
 
@@ -51,30 +34,26 @@ router.get('/teams', async (req, res) => {
     const status      = String(req.query.status || 'active');
     const limit       = Math.min(Math.max(parseInt(req.query.size || '100', 10), 1), 500);
 
-    // For "onlyMine", we need member_id from auth cookie/session; allow pass-through via query too.
-    const memberIdQ = req.query.member_id ? String(req.query.member_id) : null;
-    const memberId  = memberIdQ; // if you have a getAuthedMemberId(req), use it here instead.
+    // if you have auth, replace with getAuthedMemberId(req)
+    const memberId = req.query.member_id ? String(req.query.member_id) : null;
 
-    // Supported tables: default to ffl; easy to extend for others.
-    const table = `ff_sport_${sport}`;
     if (!['ffl','flb','fba','fhl'].includes(sport)) {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
+    const table = `ff_sport_${sport}`;
 
-    // WHERE: base conditions
+    // Base WHERE (cast league_id to text whenever we compare it to user input)
     const whereParts = ['s.season = $1', 's.visibility = $2', 's.status = $3'];
     const params = [season, visibility, status];
     let p = 4;
 
     if (platformArg) { whereParts.push(`s.platform = $${p++}`); params.push(platformArg); }
-    if (leagueId)    { whereParts.push(`s.league_id = $${p++}`); params.push(leagueId); }
+    if (leagueId)    { whereParts.push(`s.league_id::text = $${p++}`); params.push(leagueId); }
 
-    // Ownership filters (LEFT JOIN so rows still appear if no owner record)
+    // Ownership filters
     const ownerFilters = [];
     if (onlyMine) {
-      if (!memberId) {
-        return res.json({ ok:true, season, sport, count: 0, teams: [] });
-      }
+      if (!memberId) return res.json({ ok:true, season, sport, count:0, teams:[] });
       ownerFilters.push(`o.member_id = $${p++}`);
       params.push(memberId);
     }
@@ -94,15 +73,15 @@ router.get('/teams', async (req, res) => {
         COALESCE(s.team_logo_url,'')      AS "logo"
       FROM ${table} s
       LEFT JOIN ff_team_owner o
-        ON o.platform = s.platform
-       AND o.season   = s.season
-       AND o.league_id= s.league_id
-       AND o.team_id  = s.team_id
+        ON  o.platform = s.platform
+        AND o.season   = s.season
+        AND o.league_id::text = s.league_id::text   -- <<< type-safe
+        AND o.team_id::text   = s.team_id::text     -- <<< type-safe
       WHERE ${whereParts.join(' AND ')}
       ${ownerClause}
       ORDER BY s.season DESC,
                s.league_id::text,
-               NULLIF(s.team_id,'')::int NULLS LAST, s.team_id
+               NULLIF(s.team_id::text,'')::int NULLS LAST, s.team_id::text
       LIMIT $${p}
     `;
     params.push(limit);
