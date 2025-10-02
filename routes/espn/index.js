@@ -569,7 +569,12 @@ router.get('/link', async (req, res) => {
 
 router.get('/cred', async (req, res) => {
   try {
-    // ... existing extraction ...
+    const c = req.cookies || {};
+    const h = req.headers || {};
+    const theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
+    const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
+    const memberId = await getAuthedMemberId(req);
+
     if (memberId && theSwid && !isGhost(memberId)) {
       await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
       await ensureQuickSnap(memberId, theSwid); // now safe, no duplicate error
@@ -580,7 +585,6 @@ router.get('/cred', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
-
 
 
 
