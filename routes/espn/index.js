@@ -23,6 +23,9 @@ const num = (v, d = null) => (Number.isFinite(+v) ? +v : d);
 const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest('hex');
 
 const S2_COOKIE_OPTS = Object.freeze({ httpOnly:true, secure:true, sameSite:'Lax', path:'/', maxAge:1000*60*60*24*30 });
+function isGhost(memberId){
+  return typeof memberId === 'string' && /^GHOST/i.test(memberId);
+}
 
 function safeNextURL(req, fallback = '/fein') {
   const to = (req.query.to || req.query.return || req.query.next || '').toString().trim();
@@ -296,7 +299,8 @@ router.get('/cred', async (req, res) => {
     const s2   = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
-    if (memberId && theSwid) {
+    // Only persist creds for real members; skip ghosts to avoid trigger
+    if (memberId && theSwid && !isGhost(memberId)) {
       await saveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
       await ensureQuickSnap(memberId, theSwid);
     }
@@ -304,10 +308,11 @@ router.get('/cred', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json({ ok: true, hasCookies: !!(theSwid && s2) });
   } catch (e) {
-    console.error('[espn/cred]', e);
+    console.error('[espn/cred] error:', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // ---------------- simple team proxy ----------------
 router.get('/teams', ensureCred, async (req, res) => {
@@ -771,18 +776,25 @@ async function ingestHandler(req, res) {
 
     const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
     const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
+
     if (hdrSwid && hdrS2) {
-      await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
-      await ensureQuickSnap(memberId, hdrSwid);
+      // Only persist if real member (skip ghosts to avoid immutability trigger)
+      if (!isGhost(memberId)) {
+        await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+        await ensureQuickSnap(memberId, hdrSwid);
+      }
     } else {
-      const row = await pool.query(
-        `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
-        [memberId]
-      );
-      if (row.rows[0]?.swid) {
-        await ensureQuickSnap(memberId, row.rows[0].swid);
-      } else {
-        return bad(res, 412, 'espn_not_linked', { needAuth: true });
+      // No headers; just ensure quick_snap if we already have a swid (also skip for ghosts)
+      if (!isGhost(memberId)) {
+        const row = await pool.query(
+          `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
+          [memberId]
+        );
+        if (row.rows[0]?.swid) {
+          await ensureQuickSnap(memberId, row.rows[0].swid);
+        } else {
+          return bad(res, 412, 'espn_not_linked', { needAuth: true });
+        }
       }
     }
 
@@ -798,6 +810,7 @@ async function ingestHandler(req, res) {
     return bad(res, 500, 'server_error');
   }
 }
+
 router.post('/ingest', ingestHandler);
 router.post('/ingest/espn/fan', ingestHandler);
 
