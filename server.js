@@ -81,6 +81,15 @@ async function fetchRoster({ season, leagueId, teamId, scope }) {
     teamId: String(teamId || ''),
     scope: String(scope || 'week'),
   });
+// === FEIN roster JSON alias (prevents SPA from returning HTML) ===
+// Preserves the original query string (season, leagueId, teamId, scope)
+app.get(['/fein/roster', '/api/roster'], (req, res) => {
+  const qs = req.originalUrl.includes('?')
+    ? req.originalUrl.slice(req.originalUrl.indexOf('?'))
+    : '';
+  // Forward to the canonical ESPN roster endpoint (JSON)
+  res.redirect(307, `/api/platforms/espn/roster${qs}`);
+});
 
   // Prefer the alias (/fein/roster) — _redirects maps it to /api/roster
   const res = await fetch(`/fein/roster?${params}`, { credentials: 'include' });
