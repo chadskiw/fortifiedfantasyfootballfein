@@ -346,17 +346,25 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
 }
 
 // REPLACE ensureQuickSnap with this
+// REPLACE your ensureQuickSnap with this version
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
   const snap = normalizeSwid(swid);
-  // uses your unique index: ff_quickhitter_quicksnap_lower_uq
+
+  // Constraint-agnostic UPSERT: succeeds even if there is no unique index/constraint.
+  // If you DO have a unique index on lower(quick_snap), this will be fast.
   await pool.query(
-    `INSERT INTO ff_quickhitter (member_id, quick_snap)
-     VALUES ($1, $2)
-     ON CONFLICT ON CONSTRAINT ff_quickhitter_quicksnap_lower_uq DO NOTHING`,
+    `
+    INSERT INTO ff_quickhitter (member_id, quick_snap)
+    SELECT $1, $2
+    WHERE NOT EXISTS (
+      SELECT 1 FROM ff_quickhitter WHERE lower(quick_snap) = lower($2)
+    )
+    `,
     [memberId, snap]
   );
 }
+
 async function runFanDiscoveryForCurrentOwner({ season = null, leagueId = null, mapped = [], cred }) {
   const myGuid = normalizeSwid(cred?.swid || '');
   if (!myGuid) return [];
