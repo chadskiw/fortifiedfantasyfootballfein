@@ -630,11 +630,29 @@ router.get('/cred', async (req, res) => {
     const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
-// inside your /api/platforms/espn/cred handler, around ensureQuickSnap:
-if (memberId && theSwid && !isGhost(memberId)) {
-  await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-  try { await ensureQuickSnap(memberId, theSwid); } catch { /* ignore */ }
-}
+    // Persist cred + quick snap if we have a real member + swid
+    if (memberId && theSwid && !isGhost(memberId)) {
+      await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
+      try { await ensureQuickSnap(memberId, theSwid); } catch {}
+    }
+
+    // 🔑 NEW: if we’re authenticated but FF cookies aren’t set, set them and guarantee a session row.
+    const haveFF =
+      c.ff_logged_in === '1' &&
+      typeof c.ff_member_id === 'string' &&
+      typeof c.ff_session_id === 'string' && c.ff_session_id.length > 10;
+
+    if (memberId && !haveFF) {
+      const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: 1000*60*60*24*90 };
+      const sid  = await getOrCreateSessionId(memberId, c.ff_session_id || null);
+
+      // FE-readable flags
+      res.cookie('ff_logged_in', '1', { ...base, httpOnly: false });
+      res.cookie('ff_member_id', memberId, { ...base, httpOnly: false });
+
+      // httpOnly session id
+      res.cookie('ff_session_id', sid, base);
+    }
 
     res.set('Cache-Control','no-store').json({ ok:true, hasCookies: !!(theSwid && s2) });
   } catch (e) {
@@ -642,6 +660,7 @@ if (memberId && theSwid && !isGhost(memberId)) {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
