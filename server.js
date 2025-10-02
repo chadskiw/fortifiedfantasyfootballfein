@@ -73,6 +73,25 @@ app.get('/status', (req, res) => {
 });
 
 app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
+// Complete method: fetchRoster() – front end
+async function fetchRoster({ season, leagueId, teamId, scope }) {
+  const params = new URLSearchParams({
+    season: String(season),
+    leagueId: String(leagueId),
+    teamId: String(teamId || ''),
+    scope: String(scope || 'week'),
+  });
+
+  // Prefer the alias (/fein/roster) — _redirects maps it to /api/roster
+  const res = await fetch(`/fein/roster?${params}`, { credentials: 'include' });
+
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Non-JSON from /fein/roster (${res.status}). First bytes: ${text.slice(0,80)}`);
+  }
+  return await res.json();
+}
 
 // ===== ESPN hydrate + routers (canonical + legacy) =====
 app.use(hydrateEspn());
