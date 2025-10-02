@@ -250,7 +250,7 @@ async function linkHandler(req, res) {
 }
 
 router.get('/link',  linkHandler);
-router.post('/link', linkHandler);
+//router.post('/link', linkHandler);
 
 // ---------------- core FE endpoints ----------------
 
@@ -457,5 +457,59 @@ router.get('/roster', ensureCred, async (req, res) => {
     return bad(res, e.status || 500, e.message || 'proxy_failed');
   }
 });
+// --- add to your routes file mounted at /api/platforms/espn ---
+
+const ONE_MONTH = 1000 * 60 * 60 * 24 * 30;
+
+// optional: require your pg pool if available
+try { pool = require('../../src/db/pool').pool || require('../../src/db/pool'); } catch {}
+
+
+
+
+
+async function upsertCred(memberId, swid, s2) {
+  if (!pool || !memberId) return;
+  await pool.query(`
+    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, first_seen, last_seen, ref)
+    VALUES ($1, $2, $3, now(), now(), 'link')
+    ON CONFLICT (member_id) DO UPDATE
+       SET swid = EXCLUDED.swid,
+           espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
+           last_seen = now()
+  `, [memberId, swid, s2]);
+}
+
+// If you have a way to read the authed member_id from cookies/session:
+async function getMemberId(req) {
+  const c = req.cookies || {};
+  return (c.ff_member_id || '').trim() || null;
+}
+
+// POST /api/platforms/espn/link  { swid, espn_s2 }
+router.post('/link', async (req, res) => {
+  try {
+    const swid = normalizeSwid(req.body?.swid);
+    const s2   = normalizeS2(req.body?.espn_s2 || req.body?.s2);
+    if (!swid || !s2) {
+      return res.status(400).json({ ok:false, error:'swid_and_s2_required' });
+    }
+
+    // write secure cookies (S2 is HttpOnly)
+    const base = { path:'/', sameSite:'Lax', secure:true, maxAge: ONE_MONTH };
+    res.cookie('SWID', swid, { ...base, httpOnly: true  }); // you can set httpOnly:false if FE needs to read it
+    res.cookie('espn_s2', s2,   { ...base, httpOnly: true  });
+
+    // optional: persist to DB for long-term use
+    const memberId = await getMemberId(req);
+    if (memberId) await upsertCred(memberId, swid, s2);
+
+    return res.json({ ok:true, linked:true });
+  } catch (e) {
+    console.error('[espn/link] failed', e);
+    return res.status(500).json({ ok:false, error:'link_failed' });
+  }
+});
+
 
 module.exports = router;
