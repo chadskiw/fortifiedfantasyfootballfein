@@ -502,30 +502,34 @@ async function fetchLeagueBundle(game, season, leagueId, cred) {
  * Relies on a common schema across your ff_sport_* tables (as in ff_sport_ffl).
  */
 async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
-  const table = `ff_sport_${game}`;
-  const pretty = gameToPretty(game);
+  const table = `ff_sport_${game}`;            // e.g. ff_sport_ffl
+  const char_code = game;                      // 'ffl' | 'fba' | 'flb' | 'fhl'
+
+  // get num_code from your map
+  const { rows: mapRows } = await pool.query(
+    `SELECT num_code FROM ff_sport_code_map WHERE char_code = $1 LIMIT 1`,
+    [char_code]
+  );
+  const num_code = mapRows[0]?.num_code ?? null;
 
   const leagueName  = bundle?.settings?.name || bundle?.metadata?.leagueName || bundle?.leagueName || null;
   const leagueSize  = Array.isArray(bundle?.teams) ? bundle.teams.length : null;
-  const now = new Date();
 
-  // build rows
   const rows = (bundle?.teams || []).map(t => {
     const teamName = `${t.location || ''} ${t.nickname || ''}`.trim();
-    const owners   = Array.isArray(t.owners) ? t.owners.map(o => normalizeSwid(o)) : [];
     const payload  = {
       _kind: 'espn.mTeam+mSettings',
-      pulled_at: now.toISOString(),
+      pulled_at: new Date().toISOString(),
       league: { id: String(leagueId), name: leagueName },
       team: t
     };
     const source_hash = sha256(JSON.stringify(payload));
 
     return {
-      char_code: pretty.char_code,
+      char_code,
       season,
-      num_code: pretty.num_code,
-      sport: pretty.sport,
+      num_code,
+      sport: char_code,               // keep same as char_code for now (you can rename with a join later)
       competition_type: 'league',
       total_count: leagueSize,
       unique_sid_count: null,
@@ -554,73 +558,70 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       source_hash,
       source_etag: null,
       visibility: 'public',
-      status: 'ok',
+      status: 'ok'
     };
   });
 
   if (!rows.length) return { table, inserted: 0, updated: 0 };
 
-  // Do a batched upsert. Columns reflect your ff_sport_ffl sample shape.
-  // If any column does not exist on a given ff_sport_* table, this will error.
-  // To make it bulletproof across minor mismatches, we wrap in a try/catch and surface a 'skipped' result.
-  try {
-    const text = `
-      INSERT INTO ${table} (
-        char_code, season, num_code, sport, competition_type,
-        total_count, unique_sid_count, unique_member_count, table_name,
-        first_seen_at, last_seen_at,
-        platform, league_id, team_id, league_name, league_size, team_name, handle,
-        team_logo_url, in_season, is_live, current_scoring_period,
-        entry_url, league_url, fantasycast_url, scoreboard_url, signup_url,
-        scoring_json, draft_json, source_payload, reaction_counts, source_hash, source_etag,
-        visibility, status, updated_at, last_synced_at
-      )
-      VALUES
-      ${rows.map((_,i)=>`(
-        $${i*34+1}, $${i*34+2}, $${i*34+3}, $${i*34+4}, $${i*34+5},
-        $${i*34+6}, $${i*34+7}, $${i*34+8}, $${i*34+9},
-        now(), now(),
-        $${i*34+10}, $${i*34+11}, $${i*34+12}, $${i*34+13}, $${i*34+14}, $${i*34+15}, $${i*34+16},
-        $${i*34+17}, $${i*34+18}, $${i*34+19}, $${i*34+20},
-        $${i*34+21}, $${i*34+22}, $${i*34+23}, $${i*34+24}, $${i*34+25},
-        $${i*34+26}, $${i*34+27}, $${i*34+28}, $${i*34+29}, $${i*34+30}, $${i*34+31},
-        $${i*34+32}, $${i*34+33}, now(), now()
-      )`).join(',')}
-      ON CONFLICT (platform, season, league_id, team_id)
-      DO UPDATE SET
-        league_name = EXCLUDED.league_name,
-        league_size = EXCLUDED.league_size,
-        team_name   = EXCLUDED.team_name,
-        team_logo_url = EXCLUDED.team_logo_url,
-        current_scoring_period = EXCLUDED.current_scoring_period,
-        source_payload = EXCLUDED.source_payload,
-        source_hash = EXCLUDED.source_hash,
-        visibility = EXCLUDED.visibility,
-        status = EXCLUDED.status,
-        updated_at = now(),
-        last_synced_at = now()
-    `;
+  // Build one big INSERT ... ON CONFLICT
+  const cols = [
+    'char_code','season','num_code','sport','competition_type',
+    'total_count','unique_sid_count','unique_member_count','table_name',
+    // first_seen_at, last_seen_at are NOW() in VALUES
+    'platform','league_id','team_id','league_name','league_size','team_name','handle',
+    'team_logo_url','in_season','is_live','current_scoring_period',
+    'entry_url','league_url','fantasycast_url','scoreboard_url','signup_url',
+    'scoring_json','draft_json','source_payload','reaction_counts','source_hash','source_etag',
+    'visibility','status'
+  ];
+  const per = cols.length;
+  const placeholders = rows.map((_, i) => {
+    const base = i*per;
+    const list = Array.from({length: per}, (_, j) => `$${base + j + 1}`).join(', ');
+    return `(${list}, now(), now())`; // append first_seen_at/last_seen_at
+  }).join(',\n');
 
-    const vals = [];
-    for (const r of rows) {
-      vals.push(
-        r.char_code, r.season, r.num_code, r.sport, r.competition_type,
-        r.total_count, r.unique_sid_count, r.unique_member_count, r.table_name,
-        r.platform, r.league_id, r.team_id, r.league_name, r.league_size, r.team_name, r.handle,
-        r.team_logo_url, r.in_season, r.is_live, r.current_scoring_period,
-        r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
-        r.scoring_json, r.draft_json, r.source_payload, r.reaction_counts, r.source_hash, r.source_etag,
-        r.visibility, r.status
-      );
-    }
+  const text = `
+    INSERT INTO ${table} (
+      ${cols.join(', ')},
+      first_seen_at, last_seen_at
+    )
+    VALUES
+    ${placeholders}
+    ON CONFLICT (platform, season, league_id, team_id)
+    DO UPDATE SET
+      league_name = EXCLUDED.league_name,
+      league_size = EXCLUDED.league_size,
+      team_name   = EXCLUDED.team_name,
+      team_logo_url = EXCLUDED.team_logo_url,
+      current_scoring_period = EXCLUDED.current_scoring_period,
+      source_payload = EXCLUDED.source_payload,
+      source_hash = EXCLUDED.source_hash,
+      visibility = EXCLUDED.visibility,
+      status = EXCLUDED.status,
+      updated_at = now(),
+      last_synced_at = now()
+  `;
 
-    const result = await pool.query(text, vals);
-    // pg doesn't give per-row counts on upsert; treat as "ok"
-    return { table, inserted: rows.length, updated: 'on_conflict' };
-  } catch (e) {
-    return { table, inserted: 0, updated: 0, skipped: true, reason: e.message || 'upsert_failed' };
+  const vals = [];
+  for (const r of rows) {
+    vals.push(
+      r.char_code, r.season, r.num_code, r.sport, r.competition_type,
+      r.total_count, r.unique_sid_count, r.unique_member_count, r.table_name,
+      r.platform, r.league_id, r.team_id, r.league_name, r.league_size, r.team_name, r.handle,
+      r.team_logo_url, r.in_season, r.is_live, r.current_scoring_period,
+      r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
+      r.scoring_json, r.draft_json, r.source_payload, r.reaction_counts, r.source_hash, r.source_etag,
+      r.visibility, r.status
+    );
   }
+
+  // If anything is off (missing table/columns/index), we throw so you can see it.
+  await pool.query(text, vals);
+  return { table, inserted: rows.length, updated: 'on_conflict' };
 }
+
 
 /**
  * Ingest snapshot for one membership (one league).
