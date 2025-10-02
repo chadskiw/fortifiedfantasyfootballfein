@@ -496,6 +496,38 @@ async function fetchLeagueBundle(game, season, leagueId, cred) {
   const data = await espnFetchJSON(url, cred);
   return data;
 }
+// Keep "link-status" for the index page (alias of /authcheck)
+router.get('/link-status', (req, res) => {
+  const c = req.cookies || {};
+  const h = req.headers || {};
+  const hasSwid = !!(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid']);
+  const hasS2   = !!(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2']);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ ok: true, step: (hasSwid && hasS2) ? 'logged_in' : 'link_needed' });
+});
+// Lightweight poll endpoint the homepage expects
+router.get('/poll', async (req, res) => {
+  try {
+    const size = Number(req.query.size) || 10;
+    const c = req.cookies || {};
+    const h = req.headers || {};
+    const swid = (c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || null);
+    const s2   = (c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null);
+
+    // don’t trip your immutability trigger: this is read-only status
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      size,
+      hasCreds: !!(swid && s2),
+      // keep these keys stable in case the UI reads them
+      data: [],
+      meta: { ts: Date.now() }
+    });
+  } catch (e) {
+    return res.status(200).json({ ok: true, size: Number(req.query.size)||10, hasCreds: false, data: [], meta: { ts: Date.now() } });
+  }
+});
 
 /**
  * Upsert all teams from a league into ff_sport_<game>.
