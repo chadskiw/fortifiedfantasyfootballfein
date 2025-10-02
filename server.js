@@ -82,7 +82,7 @@ app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 
 // Canonical base
 app.use('/api/platforms/espn', espnRouter);
-
+app.use('/api/espn-auth',      espnRouter);
 // Legacy/short base used by older FE and tools
 app.use('/api/espn', espnRouter);
 // server.js (or app.js) — put this AFTER body parsers and BEFORE your SPA/static/404
