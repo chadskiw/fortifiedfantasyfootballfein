@@ -405,6 +405,27 @@ async function runFanDiscoveryForCurrentOwner({ season = null, leagueId = null, 
   return results.map(({bundle, ...x})=>x);
 }
 
+async function upsertOwners({ platform='espn', season, leagueId, mapped }) {
+  if (!Array.isArray(mapped) || !mapped.length) return;
+  const text = `
+    INSERT INTO ff_team_owner
+      (platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids, created_at, updated_at)
+    VALUES
+      ${mapped.map((_,i)=>`($1,$2,$3,$${4+i*4},$${5+i*4},$${6+i*4},$${7+i*4}, now(), now())`).join(',')}
+    ON CONFLICT (platform, season, league_id, team_id)
+    DO UPDATE SET
+      member_id = EXCLUDED.member_id,
+      owner_kind = EXCLUDED.owner_kind,
+      espn_owner_guids = EXCLUDED.espn_owner_guids,
+      updated_at = now()
+  `;
+  const vals = [];
+  for (const m of mapped) {
+    vals.push(String(m.teamId), String(m.memberId), String(m.ownerKind),
+              (m.owners||[]).map(o => typeof o==='string' ? o : (o?.id||o?.swid||o?.guid||null)).filter(Boolean));
+  }
+  await pool.query(text, ['espn', season, String(leagueId), ...vals.flat()]);
+}
 
 // ---------------- ESPN cred resolution ----------------
 async function getCredForRequest(req) {

@@ -11,60 +11,103 @@ if (!pool || typeof pool.query !== 'function') {
 
 const router = express.Router();
 
+function mapPlatform(p) {
+  if (!p) return null;
+  const v = String(p).trim().toLowerCase();
+  if (v === '018' || v === 'espn' || v === 'es') return 'espn';
+  return v; // extend later if you add more providers
+}
+
 /**
  * GET /api/pp/teams
  * Query params:
- *  - sport  (default: 'ffl')
- *  - season (required-ish, defaults to current year)
- *  - platform (optional, e.g., '018' for ESPN)
- *  - handle | member_id (optional filters to "my" entries)
- *  - visibility (default 'public')
- *  - status (default 'active')
+ *  - sport:       ffl|flb|fba|fhl   (default: ffl)
+ *  - season:      number            (default: current year)
+ *  - platform:    'espn' or '018'   (optional; defaults to any)
+ *  - leagueId:    string            (optional)
+ *  - onlyMine:    true|false        (default: false)
+ *  - excludeGhosts: true|false      (default: false)
+ *  - size:        int (1..500)      (default: 100)
+ *  - visibility:  string            (default: 'public')
+ *  - status:      string            (default: 'active')
  *
- * Returns a unified array used by FEIN pools:
- *  [{season, leagueId, teamId, teamName, leagueName, leagueSize, logo}]
+ * Response:
+ *  { ok, season, sport, count, teams: [{ season, leagueId, teamId, teamName, leagueName, leagueSize, logo }] }
  */
 router.get('/teams', async (req, res) => {
   try {
-    const sport     = String(req.query.sport || 'ffl').toLowerCase();
-    const season    = Number(req.query.season || new Date().getUTCFullYear());
-    const platform  = req.query.platform ? String(req.query.platform) : null; // '018' ESPN
-    const handle    = req.query.handle ? String(req.query.handle) : null;
-    const memberId  = req.query.member_id ? String(req.query.member_id) : null;
-    const visibility= req.query.visibility ? String(req.query.visibility) : 'public';
-    const status    = req.query.status ? String(req.query.status) : 'active';
+    const sport       = String(req.query.sport || 'ffl').toLowerCase();
+    const season      = Number(req.query.season || new Date().getUTCFullYear());
+    const platformArg = mapPlatform(req.query.platform || null); // maps 018 -> espn
+    const leagueId    = req.query.leagueId ? String(req.query.leagueId) : null;
 
-    // Only ffl table for now; easy to extend later
-    if (sport !== 'ffl') {
+    const onlyMine       = String(req.query.onlyMine || '').toLowerCase() === 'true';
+    const excludeGhosts  = String(req.query.excludeGhosts || '').toLowerCase() === 'true';
+    // legacy param still honored: includeGhosts=false -> excludeGhosts=true
+    const includeGhostsQ = String(req.query.includeGhosts || '').toLowerCase();
+    const legacyExcl     = (includeGhostsQ === 'false');
+
+    const visibility  = String(req.query.visibility || 'public');
+    const status      = String(req.query.status || 'active');
+    const limit       = Math.min(Math.max(parseInt(req.query.size || '100', 10), 1), 500);
+
+    // For "onlyMine", we need member_id from auth cookie/session; allow pass-through via query too.
+    const memberIdQ = req.query.member_id ? String(req.query.member_id) : null;
+    const memberId  = memberIdQ; // if you have a getAuthedMemberId(req), use it here instead.
+
+    // Supported tables: default to ffl; easy to extend for others.
+    const table = `ff_sport_${sport}`;
+    if (!['ffl','flb','fba','fhl'].includes(sport)) {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
 
-    const conds = ['season = $1', 'visibility = $2', 'status = $3'];
+    // WHERE: base conditions
+    const whereParts = ['s.season = $1', 's.visibility = $2', 's.status = $3'];
     const params = [season, visibility, status];
     let p = 4;
 
-    if (platform) { conds.push(`platform = $${p++}`); params.push(platform); }
-    if (handle)   { conds.push(`handle = $${p++}`);   params.push(handle); }
-    if (memberId) { conds.push(`member_id = $${p++}`);params.push(memberId); }
+    if (platformArg) { whereParts.push(`s.platform = $${p++}`); params.push(platformArg); }
+    if (leagueId)    { whereParts.push(`s.league_id = $${p++}`); params.push(leagueId); }
 
-    // NOTE: ff_sport_ffl holds one row per (leagueId, teamId) we've ingested.
-    // Pull the fields needed for pools and normalize names.
+    // Ownership filters (LEFT JOIN so rows still appear if no owner record)
+    const ownerFilters = [];
+    if (onlyMine) {
+      if (!memberId) {
+        return res.json({ ok:true, season, sport, count: 0, teams: [] });
+      }
+      ownerFilters.push(`o.member_id = $${p++}`);
+      params.push(memberId);
+    }
+    if (excludeGhosts || legacyExcl) {
+      ownerFilters.push(`(o.owner_kind IS DISTINCT FROM 'ghost')`);
+    }
+    const ownerClause = ownerFilters.length ? `AND ${ownerFilters.join(' AND ')}` : '';
+
     const sql = `
       SELECT
-        season,
-        league_id::text  AS "leagueId",
-        team_id::text    AS "teamId",
-        COALESCE(team_name,'Team')      AS "teamName",
-        COALESCE(league_name,'League')  AS "leagueName",
-        COALESCE(league_size,0)         AS "leagueSize",
-        COALESCE(team_logo_url,'')      AS "logo"
-      FROM ff_sport_ffl
-      WHERE ${conds.join(' AND ')}
-      ORDER BY season DESC, league_id::text, team_id::text
+        s.season,
+        s.league_id::text  AS "leagueId",
+        s.team_id::text    AS "teamId",
+        COALESCE(s.team_name,'Team')      AS "teamName",
+        COALESCE(s.league_name,'League')  AS "leagueName",
+        COALESCE(s.league_size,0)         AS "leagueSize",
+        COALESCE(s.team_logo_url,'')      AS "logo"
+      FROM ${table} s
+      LEFT JOIN ff_team_owner o
+        ON o.platform = s.platform
+       AND o.season   = s.season
+       AND o.league_id= s.league_id
+       AND o.team_id  = s.team_id
+      WHERE ${whereParts.join(' AND ')}
+      ${ownerClause}
+      ORDER BY s.season DESC,
+               s.league_id::text,
+               NULLIF(s.team_id,'')::int NULLS LAST, s.team_id
+      LIMIT $${p}
     `;
+    params.push(limit);
 
     const { rows } = await pool.query(sql, params);
-
     return res.json({ ok:true, season, sport, count: rows.length, teams: rows });
   } catch (err) {
     console.error('[pp/teams] error', err);
