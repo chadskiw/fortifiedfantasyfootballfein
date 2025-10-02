@@ -8,40 +8,20 @@ const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
 
-const espnRouter   = require('./routes/espn');
-const hydrateEspn  = require('./routes/espn/hydrate');
+const espnRouter    = require('./routes/espn');
+const hydrateEspn   = require('./routes/espn/hydrate');
 const imagesPresign = require('./routes/images/presign-r2');
 const createImagesRouter = require('./src/routes/images');
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-// add once in server.js
-app.post('/api/fein/react', express.json(), (req, res) => {
-  // TODO: write to reactions tables later. For now, accept and no-op.
-  res.status(204).end();
-});
-
-// ===== FEIN bootstrap guard (legacy asset that some builds still request) =====
-app.get(['/fein/fein-espn-bootstrap.js'], (_req, res) => {
-  res.type('application/javascript').set('Cache-Control','no-store').send(
-`/* disabled: unified bootstrap in use */
-export {};
-(function(){ /* no-op */ })();
-`);
-});
 
 // ===== Parsers & logs =====
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-
-// ===== Early routers =====
-app.use('/api/session', require('./routes/session')); // mount early
-app.use('/api/identity', require('./routes/identity-status'));
-app.use('/api/identity/me', require('./routes/identity/me'));
-app.use('/api/images', createImagesRouter()); // presign + upload
 
 // ===== CORS (CF fronted) =====
 const allow = {
@@ -72,42 +52,23 @@ app.get('/status', (req, res) => {
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 
-app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
-// Complete method: fetchRoster() – front end
-async function fetchRoster({ season, leagueId, teamId, scope }) {
-  const params = new URLSearchParams({
-    season: String(season),
-    leagueId: String(leagueId),
-    teamId: String(teamId || ''),
-    scope: String(scope || 'week'),
-  });
+// ===== Early routers =====
+app.use('/api/session', require('./routes/session')); // mount early
+app.use('/api/identity', require('./routes/identity-status'));
+app.use('/api/identity/me', require('./routes/identity/me'));
+app.use('/api/images', createImagesRouter()); // presign + upload
 
-  // FEIN roster → ESPN JSON (preserves query string)
-app.get(['/fein/roster', '/api/roster'], (req, res) => {
-  const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
-  res.redirect(307, `/api/platforms/espn/roster${qs}`);
+// Accept reactions (no-op for now)
+app.post('/api/fein/react', express.json(), (_req, res) => res.status(204).end());
+
+// Legacy bootstrap shim that some builds still request
+app.get(['/fein/fein-espn-bootstrap.js'], (_req, res) => {
+  res.type('application/javascript').set('Cache-Control','no-store').send(
+`/* disabled: unified bootstrap in use */
+export {};
+(function(){ /* no-op */ })();
+`);
 });
-
-// === FEIN roster JSON alias (prevents SPA from returning HTML) ===
-// Preserves the original query string (season, leagueId, teamId, scope)
-app.get(['/fein/roster', '/api/roster'], (req, res) => {
-  const qs = req.originalUrl.includes('?')
-    ? req.originalUrl.slice(req.originalUrl.indexOf('?'))
-    : '';
-  // Forward to the canonical ESPN roster endpoint (JSON)
-  res.redirect(307, `/api/platforms/espn/roster${qs}`);
-});
-
-  // Prefer the alias (/fein/roster) — _redirects maps it to /api/roster
-  const res = await fetch(`/fein/roster?${params}`, { credentials: 'include' });
-
-  const ct = res.headers.get('content-type') || '';
-  if (!ct.includes('application/json')) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Non-JSON from /fein/roster (${res.status}). First bytes: ${text.slice(0,80)}`);
-  }
-  return await res.json();
-}
 
 // ===== ESPN hydrate + routers (canonical + legacy) =====
 app.use(hydrateEspn());
@@ -129,32 +90,39 @@ app.use('/api/signin', require('./routes/identity/resolve'));
 app.use('/api/session', require('./routes/session/loginFromPre'));
 app.use('/api/identity', require('./routes/identity/request-code'));
 app.use('/api/identity', require('./routes/identity/verify-code'));
-app.post('/api/verify/start', require('./routes/identity/request-code')); // legacy alias
 
 const qh = require('./routes/quickhitter');
 app.use('/api/identity', require('./src/routes/identity-signup-email'));
 app.use('/api/profile',  require('./src/routes/profile'));
-app.use('/api/session', require('./routes/session')); // /check, /exists, /lookup, /avatar, /qh-upsert
+app.use('/api/session',  require('./routes/session')); // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
 
 // ===== Compatibility shims the FE expects =====
-app.post('/api/verify/start', (req, res) => res.redirect(307, '/api/identity/request-code'));
+app.post('/api/verify/start',   (req, res) => res.redirect(307, '/api/identity/request-code'));
 app.post('/api/verify/confirm', (req, res) => res.redirect(307, '/api/identity/verify-code'));
 app.post('/api/quickhitter/upsert', (req, res) => res.redirect(307, '/api/quickhitter/qh-upsert'));
-app.post('/api/identity/upsert', (req, res) => res.redirect(307, '/api/quickhitter/qh-upsert'));
-app.get('/api/identity/whoami', (req, res) => res.redirect(307, '/api/whoami'));
+app.post('/api/identity/upsert',    (req, res) => res.redirect(307, '/api/quickhitter/qh-upsert'));
+app.get('/api/identity/whoami',     (req, res) => res.redirect(307, '/api/whoami'));
 
 // Lightweight bootstrap (never 401)
 app.get('/bootstrap', async (req, res) => {
   try {
-    const getSession = require('./routes/session/getSession'); // if you have a helper, otherwise stub false
+    const getSession = require('./routes/session/getSession');
     const sess = await getSession?.(req.cookies?.ff_sid || null);
     res.set('Cache-Control','no-store');
     res.json({ ok: true, authenticated: !!sess, member_id: sess?.member_id || null });
   } catch {
     res.status(200).json({ ok: true, authenticated: false });
   }
+});
+
+// ===== 🔧 IMPORTANT: FEIN roster JSON alias (TOP-LEVEL, before FEIN static) =====
+// Preserves the original query string (?season=&leagueId=&teamId=&week=)
+app.get(['/fein/roster', '/api/roster'], (req, res) => {
+  const i = req.originalUrl.indexOf('?');
+  const qs = i >= 0 ? req.originalUrl.slice(i) : '';
+  res.redirect(307, `/api/platforms/espn/roster${qs}`);
 });
 
 // ===== FEIN static hosting + SPA fallback =====
@@ -172,7 +140,7 @@ app.get('/fein', (req, res) => {
   res.redirect(302, `/fein/?${qs}`);
 });
 
-// Serve built FEIN assets (adjust path if your build lives elsewhere)
+// Serve built FEIN assets
 const FEIN_DIR = path.join(__dirname, 'public', 'fein');
 app.use('/fein', express.static(FEIN_DIR, {
   index: 'index.html',
