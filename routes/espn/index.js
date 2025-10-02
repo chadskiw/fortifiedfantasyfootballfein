@@ -401,6 +401,22 @@ router.get('/leagues', async (req, res) => {
     return bad(res, 500, 'server_error');
   }
 });
+// Lightweight poll (keeps UI quiet)
+router.get('/poll', async (req, res) => {
+  try {
+    const size = Math.max(1, Math.min(100, Number.isFinite(+req.query?.size) ? +req.query.size : 10));
+    const season = Number.isFinite(+req.query?.season) ? +req.query.season : new Date().getUTCFullYear();
+
+    // prevent 304 so Set-Cookie from hydrator survives
+    res.set('Cache-Control', 'no-store, private');
+    res.removeHeader && res.removeHeader('ETag');
+
+    return res.status(200).json({ ok: true, season, size, items: [] });
+  } catch (e) {
+    console.error('[espn/poll]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 /** Primary ingest handler (used by all aliases). */
 async function ingestHandler(req, res) {
@@ -448,17 +464,7 @@ async function ingestHandler(req, res) {
 router.post('/ingest', ingestHandler);
 router.post('/ingest/espn/fan', ingestHandler);
 
-// Lightweight poll (keeps UI quiet)
-router.get('/poll', async (req, res) => {
-  try {
-    const size = Math.max(1, Math.min(100, num(req.query?.size, 10)));
-    const season = num(req.query?.season, new Date().getUTCFullYear());
-    return ok(res, { season, size, items: [] });
-  } catch (e) {
-    console.error('[espn/poll]', e);
-    return bad(res, 500, 'server_error');
-  }
-});
+
 
 // ---------------- probes / aliases ----------------
 
