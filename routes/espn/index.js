@@ -52,6 +52,26 @@ function normalizeS2(raw) {
   s = s.replace(/ /g, '+').trim();
   return s || null;
 }
+const GAMES = ['ffl','fba','flb','fhl'];
+
+async function listOwnerLeagues(game, season, ownerGuid, cred) {
+  const guid = normalizeSwid(ownerGuid); // "{GUID}"
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues`;
+  const url  = `${base}?forTeamOwner=${encodeURIComponent(guid)}&view=mTeam&view=mSettings`;
+  try {
+    // returns an array of league bundles (not a single object)
+    const arr = await espnFetchJSON(url, cred);
+    if (!Array.isArray(arr)) return [];
+    return arr.map(bundle => ({
+      game,
+      season,
+      leagueId: String(bundle.id),
+      bundle
+    }));
+  } catch (_) {
+    return []; // no access or none found this season/game
+  }
+}
 
 // ---------------- auth/session helpers ----------------
 async function getAuthedMemberId(req) {
@@ -300,10 +320,11 @@ router.get('/cred', async (req, res) => {
     const memberId = await getAuthedMemberId(req);
 
     // Only persist creds for real members; skip ghosts to avoid trigger
-    if (memberId && theSwid && !isGhost(memberId)) {
-      await saveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-      await ensureQuickSnap(memberId, theSwid);
-    }
+// in /cred
+if (memberId && theSwid && !isGhost(memberId)) {
+  await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
+  await ensureQuickSnap(memberId, theSwid);
+}
 
     res.set('Cache-Control', 'no-store');
     return res.json({ ok: true, hasCookies: !!(theSwid && s2) });
@@ -619,6 +640,57 @@ async function ingestDiscoveredLeague({ game, season, leagueId }, cred) {
     return { game: g, season, leagueId: String(leagueId), queued: false, reason: e.message || 'probe_or_write_failed' };
   }
 }
+async function safeSaveCredWithMember({ swid, s2, memberId, ref }) {
+  const swidHash = sha256(swid);
+  const s2Val  = (s2 && String(s2).trim()) ? String(s2).trim() : null;
+  const s2Hash = s2Val ? sha256(s2Val) : null;
+
+  // Look up by SWID
+  const { rows } = await pool.query(
+    `SELECT cred_id, member_id FROM ff_espn_cred WHERE swid = $1 LIMIT 1`,
+    [swid]
+  );
+
+  // If it exists with a different member, DO NOT change member_id (respect your trigger)
+  if (rows[0]?.cred_id) {
+    const credId = rows[0].cred_id;
+    if (rows[0].member_id && rows[0].member_id !== memberId) {
+      // Refresh last_seen + hashes; keep owner intact
+      await pool.query(`
+        UPDATE ff_espn_cred
+           SET swid_hash=$2,
+               ${s2Val ? 'espn_s2=$3, s2_hash=$4,' : ''}
+               last_seen=now(),
+               ref=COALESCE($5, ref)
+         WHERE cred_id=$1
+      `, s2Val ? [credId, swidHash, s2Val, s2Hash, ref || null]
+               : [credId, swidHash, ref || null]);
+      return { cred_id: credId, rebound: false, keptOwner: true };
+    }
+
+    // Same (or null) member_id → it’s safe to set it
+    await pool.query(`
+      UPDATE ff_espn_cred
+         SET swid_hash=$2,
+             member_id=$3,
+             ${s2Val ? 'espn_s2=$4, s2_hash=$5,' : ''}
+             last_seen=now(),
+             ref=COALESCE($6, ref)
+       WHERE cred_id=$1
+    `, s2Val ? [credId, swidHash, memberId, s2Val, s2Hash, ref || null]
+             : [credId, swidHash, memberId, ref || null]);
+    return { cred_id: credId, rebound: false, keptOwner: false };
+  }
+
+  // Fresh insert
+  const ins = await pool.query(`
+    INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
+    VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
+    RETURNING cred_id
+  `, [swid, s2Val, swidHash, s2Hash, memberId, ref || null]);
+
+  return ins.rows[0];
+}
 
 // ============================================================================
 //                       GHOST INGEST (UPGRADED)
@@ -699,41 +771,50 @@ router.post('/ghost/ingest', ensureCred, async (req, res) => {
     }
 
     // ---------- Step 2: Fan API for each owner; ingest ALL memberships ----------
-    const uniqueOwners = Array.from(ownerGuidSet);
-    const fanIngestResults = [];
+// ---------- Step 2: For each unique owner GUID → enumerate all leagues across games/seasons ----------
+const uniqueOwners = Array.from(ownerGuidSet);
+const fanIngestResults = [];
+const thisYear = new Date().getUTCFullYear();
+const seasonsToCheck = [];
+for (let yr = thisYear; yr >= thisYear - 6; yr--) seasonsToCheck.push(yr); // 7-year sweep
 
-    for (const ownerGuid of uniqueOwners) {
-      const memberships = await fetchFanMemberships(ownerGuid, req._espn);
-
-      // De-dup memberships by (game, season, leagueId)
-      const keyset = new Set();
-      const deduped = [];
-      for (const m of memberships) {
-        const key = `${m.game}|${m.season}|${m.leagueId}`;
-        if (!keyset.has(key)) { keyset.add(key); deduped.push(m); }
+for (const ownerGuid of uniqueOwners) {
+  const discovered = [];
+  for (const game of GAMES) {
+    for (const season of seasonsToCheck) {
+      const leagues = await listOwnerLeagues(game, season, ownerGuid, req._espn);
+      for (const L of leagues) {
+        // If caller season was specified and game is ffl, we still include other seasons/sports.
+        discovered.push({ game: L.game, season: L.season, leagueId: L.leagueId, bundle: L.bundle || null });
       }
-
-      const results = [];
-      for (const m of deduped) {
-        const r = await ingestDiscoveredLeague(m, req._espn);
-        results.push(r);
-      }
-
-      fanIngestResults.push({
-        ownerGuid,
-        discovered: deduped,
-        results
-      });
     }
+  }
 
-    return ok(res, {
-      platform: 'espn',
-      season,
-      leagueId,
-      count: mapped.length,
-      mapped,
-      fanIngest: fanIngestResults
-    });
+  // Dedup by (game, season, leagueId)
+  const seen = new Set();
+  const deduped = [];
+  for (const d of discovered) {
+    const k = `${d.game}|${d.season}|${d.leagueId}`;
+    if (!seen.has(k)) { seen.add(k); deduped.push(d); }
+  }
+
+  // Write snapshots for each discovered league
+  const results = [];
+  for (const d of deduped) {
+    try {
+      const bundle = d.bundle || await fetchLeagueBundle(d.game, d.season, d.leagueId, req._espn);
+      const write  = await upsertLeagueIntoSportTable(d.game, d.season, d.leagueId, bundle);
+      results.push({ game: d.game, season: d.season, leagueId: d.leagueId, queued: true, write });
+    } catch (e) {
+      results.push({ game: d.game, season: d.season, leagueId: d.leagueId, queued: false, reason: e.message || 'probe_or_write_failed' });
+    }
+  }
+
+  fanIngestResults.push({ ownerGuid, discovered: deduped.map(({bundle, ...x})=>x), results });
+}
+
+return ok(res, { platform:'espn', season, leagueId, count: mapped.length, mapped, fanIngest: fanIngestResults });
+
   } catch (e) {
     console.error('[espn/ghost/ingest]', e);
     return bad(res, e.status || 500, e.message || 'ghost_ingest_failed');
@@ -779,10 +860,11 @@ async function ingestHandler(req, res) {
 
     if (hdrSwid && hdrS2) {
       // Only persist if real member (skip ghosts to avoid immutability trigger)
-      if (!isGhost(memberId)) {
-        await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
-        await ensureQuickSnap(memberId, hdrSwid);
-      }
+// in ingestHandler header path
+if (hdrSwid && hdrS2 && !isGhost(memberId)) {
+  await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+  await ensureQuickSnap(memberId, hdrSwid);
+}
     } else {
       // No headers; just ensure quick_snap if we already have a swid (also skip for ghosts)
       if (!isGhost(memberId)) {
