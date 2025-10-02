@@ -79,6 +79,144 @@ function hasInlineCreds(req){
   const s2   = (c.espn_s2 || c.ESPN_S2 || h['x-espn-s2'] || '').trim();
   return !!(swid && s2);
 }
+// Maps game key -> display label (fallback will Title Case)
+const GAME_LABELS = {
+  ffl: 'Fantasy Football',
+  flb: 'Fantasy Baseball',
+  fba: 'Fantasy Basketball',
+  fhl: 'Fantasy Hockey'
+};
+
+function titleCase(s){ return String(s||'').replace(/[_-]+/g,' ').replace(/\b\w/g, c=>c.toUpperCase()); }
+
+/**
+ * Ensure the sport is present in ff_sport_code_map.
+ * If missing, assign next num_code (max+1).
+ */
+async function ensureSportCodeMap(char_code) {
+  const cc = String(char_code).toLowerCase();
+  const label = GAME_LABELS[cc] || `Fantasy ${titleCase(cc)}`;
+
+  const { rows: exists } = await pool.query(
+    `SELECT 1 FROM ff_sport_code_map WHERE char_code=$1 LIMIT 1`,
+    [cc]
+  );
+  if (exists.length) return;
+
+  const { rows: mx } = await pool.query(`SELECT COALESCE(MAX(num_code),0) AS mx FROM ff_sport_code_map`);
+  const nextNum = Number(mx[0].mx || 0) + 1;
+
+  await pool.query(
+    `INSERT INTO ff_sport_code_map (char_code, num_code, label)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (char_code) DO NOTHING`,
+    [cc, nextNum, label]
+  );
+}
+
+/**
+ * Ensure a UNIQUE index for upsert.
+ */
+async function ensureSportUniqueIndex(table) {
+  const idx = `${table}_uq`;
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${idx}
+       ON ${table} (platform, season, league_id, team_id)`
+  );
+}
+
+/**
+ * Create ff_sport_<game> table if missing.
+ * Strategy:
+ *   1) Try to clone the richest schema: LIKE ff_sport_ffl INCLUDING ALL
+ *   2) Else clone ff_sport (rollup) and add the team-level columns we need
+ */
+async function ensureSportTable(game) {
+  const table = `ff_sport_${game}`;
+
+  // does it already exist?
+  const { rows: exists } = await pool.query(
+    `SELECT 1
+       FROM information_schema.tables
+      WHERE table_schema='public' AND table_name=$1
+      LIMIT 1`,
+    [table]
+  );
+  if (exists.length) {
+    await ensureSportUniqueIndex(table);
+    return table;
+  }
+
+  // within a transaction for safety
+  await pool.query('BEGIN');
+
+  try {
+    // Prefer cloning the full football schema if present
+    const { rows: fflExists } = await pool.query(
+      `SELECT 1 FROM information_schema.tables
+        WHERE table_schema='public' AND table_name='ff_sport_ffl' LIMIT 1`
+    );
+
+    if (fflExists.length) {
+      await pool.query(`CREATE TABLE ${table} (LIKE ff_sport_ffl INCLUDING ALL INCLUDING INDEXES)`);
+      // re-create our canonical upsert index name on the new table
+      await ensureSportUniqueIndex(table);
+      await pool.query('COMMIT');
+      return table;
+    }
+
+    // Fallback: base schema from ff_sport (rollup), then add columns we need
+    await pool.query(`CREATE TABLE ${table} (LIKE ff_sport INCLUDING ALL INCLUDING INDEXES)`);
+    // add team-level columns commonly used by our writer
+    await pool.query(`
+      ALTER TABLE ${table}
+        ADD COLUMN IF NOT EXISTS platform                text,
+        ADD COLUMN IF NOT EXISTS league_id               text,
+        ADD COLUMN IF NOT EXISTS team_id                 text,
+        ADD COLUMN IF NOT EXISTS league_name             text,
+        ADD COLUMN IF NOT EXISTS league_size             int,
+        ADD COLUMN IF NOT EXISTS team_name               text,
+        ADD COLUMN IF NOT EXISTS handle                  text,
+        ADD COLUMN IF NOT EXISTS team_logo_url           text,
+        ADD COLUMN IF NOT EXISTS in_season               boolean,
+        ADD COLUMN IF NOT EXISTS is_live                 boolean,
+        ADD COLUMN IF NOT EXISTS current_scoring_period  int,
+        ADD COLUMN IF NOT EXISTS entry_url               text,
+        ADD COLUMN IF NOT EXISTS league_url              text,
+        ADD COLUMN IF NOT EXISTS fantasycast_url         text,
+        ADD COLUMN IF NOT EXISTS scoreboard_url          text,
+        ADD COLUMN IF NOT EXISTS signup_url              text,
+        ADD COLUMN IF NOT EXISTS scoring_json            jsonb,
+        ADD COLUMN IF NOT EXISTS draft_json              jsonb,
+        ADD COLUMN IF NOT EXISTS source_payload          jsonb,
+        ADD COLUMN IF NOT EXISTS reaction_counts         jsonb,
+        ADD COLUMN IF NOT EXISTS source_hash             text,
+        ADD COLUMN IF NOT EXISTS source_etag             text,
+        ADD COLUMN IF NOT EXISTS visibility              text,
+        ADD COLUMN IF NOT EXISTS status                  text,
+        ADD COLUMN IF NOT EXISTS updated_at              timestamptz DEFAULT now(),
+        ADD COLUMN IF NOT EXISTS last_synced_at          timestamptz DEFAULT now()
+    `);
+
+    await ensureSportUniqueIndex(table);
+    await pool.query('COMMIT');
+    return table;
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    throw e;
+  }
+}
+
+/**
+ * Ensure both: code map row + table existence for a given game key.
+ * Returns the table name (ff_sport_<game>).
+ */
+async function ensureSportArtifacts(game) {
+  const cc = String(game).toLowerCase();
+  await ensureSportCodeMap(cc);
+  const table = await ensureSportTable(cc);
+  return table;
+}
 
 // ---------------- auth/session helpers ----------------
 async function getAuthedMemberId(req) {
@@ -540,10 +678,10 @@ router.get('/poll', async (req, res) => {
  * Relies on a common schema across your ff_sport_* tables (as in ff_sport_ffl).
  */
 async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
-  const table = `ff_sport_${game}`;            // e.g. ff_sport_ffl
-  const char_code = game;                      // 'ffl' | 'fba' | 'flb' | 'fhl'
+  const char_code = String(game).toLowerCase();         // 'ffl' | 'fba' | 'flb' | 'fhl' | etc.
+  const table = await ensureSportArtifacts(char_code);  // ← auto-creates table + code_map + index
 
-  // get num_code from your map
+  // get num_code from your map (after ensureSportArtifacts, it must exist)
   const { rows: mapRows } = await pool.query(
     `SELECT num_code FROM ff_sport_code_map WHERE char_code = $1 LIMIT 1`,
     [char_code]
@@ -553,6 +691,7 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
   const leagueName  = bundle?.settings?.name || bundle?.metadata?.leagueName || bundle?.leagueName || null;
   const leagueSize  = Array.isArray(bundle?.teams) ? bundle.teams.length : null;
 
+  // Build up rows (one per team)
   const rows = (bundle?.teams || []).map(t => {
     const teamName = `${t.location || ''} ${t.nickname || ''}`.trim();
     const payload  = {
@@ -567,7 +706,7 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       char_code,
       season,
       num_code,
-      sport: char_code,               // keep same as char_code for now (you can rename with a join later)
+      sport: char_code,               // keep same as char_code
       competition_type: 'league',
       total_count: leagueSize,
       unique_sid_count: null,
@@ -602,28 +741,26 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
 
   if (!rows.length) return { table, inserted: 0, updated: 0 };
 
-  // Build one big INSERT ... ON CONFLICT
+  // INSERT … ON CONFLICT (platform, season, league_id, team_id)
   const cols = [
     'char_code','season','num_code','sport','competition_type',
     'total_count','unique_sid_count','unique_member_count','table_name',
-    // first_seen_at, last_seen_at are NOW() in VALUES
     'platform','league_id','team_id','league_name','league_size','team_name','handle',
     'team_logo_url','in_season','is_live','current_scoring_period',
     'entry_url','league_url','fantasycast_url','scoreboard_url','signup_url',
     'scoring_json','draft_json','source_payload','reaction_counts','source_hash','source_etag',
-    'visibility','status'
+    'visibility','status','first_seen_at','last_seen_at','updated_at','last_synced_at'
   ];
   const per = cols.length;
   const placeholders = rows.map((_, i) => {
     const base = i*per;
     const list = Array.from({length: per}, (_, j) => `$${base + j + 1}`).join(', ');
-    return `(${list}, now(), now())`; // append first_seen_at/last_seen_at
+    return `(${list})`;
   }).join(',\n');
 
   const text = `
     INSERT INTO ${table} (
-      ${cols.join(', ')},
-      first_seen_at, last_seen_at
+      ${cols.join(', ')}
     )
     VALUES
     ${placeholders}
@@ -642,6 +779,7 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       last_synced_at = now()
   `;
 
+  const now = new Date();
   const vals = [];
   for (const r of rows) {
     vals.push(
@@ -651,14 +789,14 @@ async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
       r.team_logo_url, r.in_season, r.is_live, r.current_scoring_period,
       r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
       r.scoring_json, r.draft_json, r.source_payload, r.reaction_counts, r.source_hash, r.source_etag,
-      r.visibility, r.status
+      r.visibility, r.status, now, now, now, now
     );
   }
 
-  // If anything is off (missing table/columns/index), we throw so you can see it.
   await pool.query(text, vals);
   return { table, inserted: rows.length, updated: 'on_conflict' };
 }
+
 
 
 /**
