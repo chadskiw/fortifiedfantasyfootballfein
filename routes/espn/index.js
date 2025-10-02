@@ -316,15 +316,13 @@ router.get('/cred', async (req, res) => {
     const c = req.cookies || {};
     const h = req.headers || {};
     const theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
-    const s2   = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
+    const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
-    // Only persist creds for real members; skip ghosts to avoid trigger
-// in /cred
-if (memberId && theSwid && !isGhost(memberId)) {
-  await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-  await ensureQuickSnap(memberId, theSwid);
-}
+    if (memberId && theSwid && !isGhost(memberId)) {
+      await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
+      await ensureQuickSnap(memberId, theSwid);
+    }
 
     res.set('Cache-Control', 'no-store');
     return res.json({ ok: true, hasCookies: !!(theSwid && s2) });
@@ -333,6 +331,7 @@ if (memberId && theSwid && !isGhost(memberId)) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 // ---------------- simple team proxy ----------------
@@ -673,55 +672,81 @@ async function ingestDiscoveredLeague({ game, season, leagueId }, cred) {
     return { game: g, season, leagueId: String(leagueId), queued: false, reason: e.message || 'probe_or_write_failed' };
   }
 }
+// REPLACE the whole function with this version
 async function safeSaveCredWithMember({ swid, s2, memberId, ref }) {
   const swidHash = sha256(swid);
   const s2Val  = (s2 && String(s2).trim()) ? String(s2).trim() : null;
   const s2Hash = s2Val ? sha256(s2Val) : null;
 
-  // Look up by SWID
+  // Look up by SWID first
   const { rows } = await pool.query(
     `SELECT cred_id, member_id FROM ff_espn_cred WHERE swid = $1 LIMIT 1`,
     [swid]
   );
 
-  // If it exists with a different member, DO NOT change member_id (respect your trigger)
   if (rows[0]?.cred_id) {
     const credId = rows[0].cred_id;
+
+    // If row already belongs to a different member, DO NOT rebind (respect the trigger).
     if (rows[0].member_id && rows[0].member_id !== memberId) {
-      // Refresh last_seen + hashes; keep owner intact
-      await pool.query(`
-        UPDATE ff_espn_cred
-           SET swid_hash=$2,
-               ${s2Val ? 'espn_s2=$3, s2_hash=$4,' : ''}
-               last_seen=now(),
-               ref=COALESCE($5, ref)
-         WHERE cred_id=$1
-      `, s2Val ? [credId, swidHash, s2Val, s2Hash, ref || null]
-               : [credId, swidHash, ref || null]);
+      if (s2Val) {
+        await pool.query(
+          `UPDATE ff_espn_cred
+              SET swid_hash = $2,
+                  espn_s2   = $3,
+                  s2_hash   = $4,
+                  last_seen = now(),
+                  ref       = COALESCE($5, ref)
+            WHERE cred_id   = $1`,
+          [credId, swidHash, s2Val, s2Hash, ref || null]
+        );
+      } else {
+        await pool.query(
+          `UPDATE ff_espn_cred
+              SET swid_hash = $2,
+                  last_seen = now(),
+                  ref       = COALESCE($3, ref)
+            WHERE cred_id   = $1`,
+          [credId, swidHash, ref || null]
+        );
+      }
       return { cred_id: credId, rebound: false, keptOwner: true };
     }
 
-    // Same (or null) member_id → it’s safe to set it
-    await pool.query(`
-      UPDATE ff_espn_cred
-         SET swid_hash=$2,
-             member_id=$3,
-             ${s2Val ? 'espn_s2=$4, s2_hash=$5,' : ''}
-             last_seen=now(),
-             ref=COALESCE($6, ref)
-       WHERE cred_id=$1
-    `, s2Val ? [credId, swidHash, memberId, s2Val, s2Hash, ref || null]
-             : [credId, swidHash, memberId, ref || null]);
+    // Same owner (or empty) → safe to set member_id and optionally s2
+    if (s2Val) {
+      await pool.query(
+        `UPDATE ff_espn_cred
+            SET swid_hash = $2,
+                member_id = $3,
+                espn_s2   = $4,
+                s2_hash   = $5,
+                last_seen = now(),
+                ref       = COALESCE($6, ref)
+         WHERE cred_id   = $1`,
+        [credId, swidHash, memberId, s2Val, s2Hash, ref || null]
+      );
+    } else {
+      await pool.query(
+        `UPDATE ff_espn_cred
+            SET swid_hash = $2,
+                member_id = $3,
+                last_seen = now(),
+                ref       = COALESCE($4, ref)
+         WHERE cred_id   = $1`,
+        [credId, swidHash, memberId, ref || null]
+      );
+    }
     return { cred_id: credId, rebound: false, keptOwner: false };
   }
 
   // Fresh insert
-  const ins = await pool.query(`
-    INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-    VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
-    RETURNING cred_id
-  `, [swid, s2Val, swidHash, s2Hash, memberId, ref || null]);
-
+  const ins = await pool.query(
+    `INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
+     VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
+     RETURNING cred_id`,
+    [swid, s2Val, swidHash, s2Hash, memberId, ref || null]
+  );
   return ins.rows[0];
 }
 
