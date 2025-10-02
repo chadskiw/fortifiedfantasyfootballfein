@@ -1,13 +1,7 @@
 // routes/espn/index.js
-// Mount in server.js like:
+// Mount:
 //   const espnRouter = require('./routes/espn');
-//   app.use('/api/platforms/espn', espnRouter);   // canonical
-//   app.use('/api/espn', espnRouter);             // legacy short base (bookmarklet)
-//   app.use('/api/espn-auth', espnRouter);        // to satisfy /api/espn-auth/creds (alias)
-//   app.get('/link', (req, res) => {
-//     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
-//     res.redirect(302, `/api/espn/link${qs}`);
-//   });
+//   app.use('/api/platforms/espn', espnRouter);
 
 const express = require('express');
 const crypto  = require('crypto');
@@ -19,22 +13,16 @@ const pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool missing');
 
 const fetch = global.fetch || require('node-fetch');
+
 const DEBUG = process.env.FF_DEBUG_ESPN === '1';
 
-// --- AUTO-HYDRATE ESPN S2 WHEN USER IS LOGGED IN ---
-const S2_COOKIE_OPTS = Object.freeze({
-  httpOnly: true,
-  secure: true,
-  sameSite: 'Lax',
-  path: '/',
-  maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-});
-
-// -------------- small utils --------------
+// ---------------- utils ----------------
 const ok  = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error, extra = {}) => res.status(code).json({ ok: false, error, ...extra });
 const num = (v, d = null) => (Number.isFinite(+v) ? +v : d);
 const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest('hex');
+
+const S2_COOKIE_OPTS = Object.freeze({ httpOnly:true, secure:true, sameSite:'Lax', path:'/', maxAge:1000*60*60*24*30 });
 
 function safeNextURL(req, fallback = '/fein') {
   const to = (req.query.to || req.query.return || req.query.next || '').toString().trim();
@@ -44,9 +32,7 @@ function safeNextURL(req, fallback = '/fein') {
     const sameHost  = u.host === req.get('host');
     const isRel     = !/^[a-z]+:/i.test(to);
     return (sameHost || isRel) ? (u.pathname + (u.search || '') + (u.hash || '')) : fallback;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 
 function normalizeSwid(raw) {
@@ -56,7 +42,6 @@ function normalizeSwid(raw) {
   s = s.trim().replace(/^\{|\}$/g, '').toUpperCase();
   return `{${s}}`;
 }
-
 function normalizeS2(raw) {
   if (!raw) return null;
   let s = String(raw);
@@ -65,7 +50,7 @@ function normalizeS2(raw) {
   return s || null;
 }
 
-// ---------------- session helpers ----------------
+// ---------------- auth/session helpers ----------------
 async function getAuthedMemberId(req) {
   const c = req.cookies || {};
   const memberId  = (c.ff_member_id || '').trim();
@@ -79,7 +64,6 @@ async function getAuthedMemberId(req) {
   return rows.length ? memberId : null;
 }
 
-// ---------------- DB helpers (existing) ----------------
 async function getS2ForMember(memberId) {
   if (!memberId) return null;
   const { rows } = await pool.query(`
@@ -211,9 +195,7 @@ async function getCredForRequest(req) {
   const swidCookieRaw = cookies.SWID || cookies.swid || '';
   const swidCookie    = normalizeSwid(swidCookieRaw);
   const s2Cookie      = normalizeS2(cookies.espn_s2 || cookies.ff_espn_s2 || '');
-  if (swidCookie && s2Cookie) {
-    return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
-  }
+  if (swidCookie && s2Cookie) return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
 
   if (swidCookie) {
     const swidHash = sha256(swidCookie);
@@ -256,12 +238,12 @@ async function ensureCred(req, res, next) {
   }
 }
 
-// Attach both Cookie + X- headers
+// Attach both Cookie + X- headers to ESPN fetch
 async function espnFetchJSON(url, cred, init = {}) {
   const headers = Object.assign({}, init.headers || {});
   headers['X-ESPN-SWID'] = encodeURIComponent(cred.swid || '');
   headers['X-ESPN-S2']   = cred.espn_s2 || '';
-  const swidRaw = decodeURIComponent(cred.swid || ''); // ESPN cookie expects raw {GUID}
+  const swidRaw = decodeURIComponent(cred.swid || ''); // cookie needs raw {GUID}
   headers.cookie = `SWID=${swidRaw}; espn_s2=${cred.espn_s2}`;
 
   const res = await fetch(url, { method: 'GET', ...init, headers });
@@ -274,7 +256,7 @@ async function espnFetchJSON(url, cred, init = {}) {
   return res.json();
 }
 
-// ---------------- link endpoints ----------------
+// ---------------- link & probes ----------------
 async function linkHandler(req, res) {
   try {
     const swid = normalizeSwid(req.body?.swid ?? req.query?.swid);
@@ -306,8 +288,7 @@ router.use(maybeHydrateS2Cookie);
 router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
 
-// ---------------- probes / aliases ----------------
-async function credProbe(req, res) {
+router.get('/cred', async (req, res) => {
   try {
     const c = req.cookies || {};
     const h = req.headers || {};
@@ -326,26 +307,17 @@ async function credProbe(req, res) {
     console.error('[espn/cred]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
-}
-router.get('/cred', credProbe);
-router.get('/creds', credProbe);
-router.get('/authcheck', (req, res) => {
-  const c = req.cookies || {};
-  const h = req.headers || {};
-  const swid = c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || null;
-  const s2   = c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null;
-  res.set('Cache-Control','no-store');
-  ok(res, { step: (swid && s2) ? 'logged_in' : 'link_needed' });
 });
 
-// ---------------- server-side ESPN proxies ----------------
+// ---------------- simple team proxy ----------------
 router.get('/teams', ensureCred, async (req, res) => {
   try {
-    const season = num(req.query.season, new Date().getUTCFullYear());
+    const game    = (req.query.game || 'ffl').toString().toLowerCase();
+    const season  = num(req.query.season, new Date().getUTCFullYear());
     const leagueId = String(req.query.leagueId || '').trim();
     if (!season || !leagueId) return bad(res, 400, 'season and leagueId required');
 
-    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
+    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
     const data = await espnFetchJSON(url, req._espn);
 
     const teams = (data.teams || []).map(t => ({
@@ -353,52 +325,23 @@ router.get('/teams', ensureCred, async (req, res) => {
       location: t.location,
       nickname: t.nickname,
       logo: t.logo || null,
-      owners: t.owners || []   // often ESPN account {GUID}s
+      owners: t.owners || []
     }));
 
-    return ok(res, { season, leagueId, teams });
+    return ok(res, { game, season, leagueId, teams });
   } catch (e) {
     console.error('[espn/teams]', e);
     return bad(res, e.status || 500, e.message || 'proxy_failed');
   }
 });
 
-router.get('/roster', ensureCred, async (req, res) => {
-  try {
-    const season = num(req.query.season, new Date().getUTCFullYear());
-    const leagueId = String(req.query.leagueId || '').trim();
-    const teamId   = String(req.query.teamId   || '').trim();
-    const week     = req.query.week ? Number(req.query.week) : undefined;
-    if (!season || !leagueId || !teamId) {
-      return bad(res, 400, 'season, leagueId, teamId required');
-    }
-
-    const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-    const view = week ? `mRoster&scoringPeriodId=${week}` : 'mRoster';
-    const url  = `${base}?forTeamId=${teamId}&view=${view}`;
-
-    const data = await espnFetchJSON(url, req._espn);
-    const team = (data.teams || []).find(t => String(t.id) === String(teamId)) || {};
-    const entries = (team.roster && team.roster.entries) || [];
-
-    return ok(res, { season, leagueId, teamId, entries });
-  } catch (e) {
-    console.error('[espn/roster]', e);
-    return bad(res, e.status || 500, e.message || 'proxy_failed');
-  }
-});
-
 // ============================================================================
-//                           GHOST OWNERSHIP INGEST
+//                       OWNER → MEMBER MAPPING + GHOSTS
 // ============================================================================
 
-/**
- * Try to resolve a real FEIN member_id from an ESPN owner GUID ('{GUID}').
- * We treat the owner GUID as a SWID and look for any ff_espn_cred rows that match.
- */
 async function lookupMemberByOwnerGuid(ownerGuid) {
   if (!ownerGuid) return null;
-  const normalized = normalizeSwid(ownerGuid); // ensure {GUID} form
+  const normalized = normalizeSwid(ownerGuid);
   const { rows } = await pool.query(
     `SELECT member_id
        FROM ff_espn_cred
@@ -410,10 +353,6 @@ async function lookupMemberByOwnerGuid(ownerGuid) {
   return rows[0]?.member_id || null;
 }
 
-/**
- * Allocate the next GHOST id for this (platform, season, leagueId).
- * Pattern: GHOST001, GHOST002, ...
- */
 async function nextGhostIdForLeague(platform, season, leagueId) {
   const { rows } = await pool.query(
     `SELECT member_id
@@ -433,9 +372,6 @@ async function nextGhostIdForLeague(platform, season, leagueId) {
   return `GHOST${next}`;
 }
 
-/**
- * Upsert team-owner mapping.
- */
 async function upsertTeamOwner({ platform, season, leagueId, teamId, memberId, ownerKind, espnOwnerGuids }) {
   await pool.query(
     `INSERT INTO ff_team_owner
@@ -448,15 +384,247 @@ async function upsertTeamOwner({ platform, season, leagueId, teamId, memberId, o
        owner_kind = EXCLUDED.owner_kind,
        espn_owner_guids = EXCLUDED.espn_owner_guids,
        updated_at = now()`,
-    [platform, season, String(leagueId), String(teamId), String(memberId), ownerKind, espnOwnerGuids || null]
+    ['espn', season, String(leagueId), String(teamId), String(memberId), ownerKind, espnOwnerGuids || null]
   );
 }
 
+// ============================================================================
+//                 FAN API → MEMBERSHIPS (all games/seasons/leagues)
+// ============================================================================
+
+/**
+ * Returns array of: { game:'ffl'|'fba'|'flb'|'fhl', season:2025, leagueId:'...', teamId:'7'|null }
+ */
+async function fetchFanMemberships(ownerGuid, cred) {
+  const guid = normalizeSwid(ownerGuid);
+  const tries = [
+    `https://fantasy.espn.com/apis/v2/fans/${encodeURIComponent(guid)}`,
+    `https://site.api.espn.com/apis/fantasy/v2/fans/${encodeURIComponent(guid)}`,
+  ];
+
+  for (const url of tries) {
+    try {
+      const data = await espnFetchJSON(url, cred);
+
+      if (Array.isArray(data?.memberships)) {
+        return data.memberships
+          .map(m => ({
+            game: (m.gameId || m.game || '').toLowerCase(),
+            season: Number(m.seasonId || m.season),
+            leagueId: String(m.leagueId || m.leagueID || m.lid || ''),
+            teamId: m.teamId != null ? String(m.teamId) : null
+          }))
+          .filter(x => x.game && x.season && x.leagueId);
+      }
+
+      if (data?.games && typeof data.games === 'object') {
+        const out = [];
+        for (const [game, gval] of Object.entries(data.games)) {
+          const seasonsObj = gval?.seasons || {};
+          for (const [seasonStr, arr] of Object.entries(seasonsObj)) {
+            const season = Number(seasonStr);
+            if (!Array.isArray(arr)) continue;
+            for (const row of arr) {
+              const leagueId = String(row.leagueId || row.leagueID || row.lid || '');
+              if (!leagueId) continue;
+              out.push({
+                game: game.toLowerCase(),
+                season,
+                leagueId,
+                teamId: row.teamId != null ? String(row.teamId) : null
+              });
+            }
+          }
+        }
+        if (out.length) return out;
+      }
+    } catch (e) {
+      // try next
+    }
+  }
+  return [];
+}
+
+// ============================================================================
+//               SNAPSHOT WRITERS → ff_sport_[ffl|fba|flb|fhl]
+// ============================================================================
+
+const SUPPORTED_GAMES = new Set(['ffl','fba','flb','fhl']);
+
+function gameToPretty(game){
+  switch (game) {
+    case 'ffl': return { char_code: 'F', num_code: 1, sport: 'football'  };
+    case 'fba': return { char_code: 'B', num_code: 2, sport: 'basketball'};
+    case 'flb': return { char_code: 'L', num_code: 3, sport: 'baseball'  };
+    case 'fhl': return { char_code: 'H', num_code: 4, sport: 'hockey'    };
+    default:     return { char_code: '?', num_code: 0, sport: game };
+  }
+}
+
+/**
+ * Pull league bundle from ESPN (mTeam + mSettings) for any game.
+ */
+async function fetchLeagueBundle(game, season, leagueId, cred) {
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const url  = `${base}?view=mTeam&view=mSettings`;
+  const data = await espnFetchJSON(url, cred);
+  return data;
+}
+
+/**
+ * Upsert all teams from a league into ff_sport_<game>.
+ * Relies on a common schema across your ff_sport_* tables (as in ff_sport_ffl).
+ */
+async function upsertLeagueIntoSportTable(game, season, leagueId, bundle) {
+  const table = `ff_sport_${game}`;
+  const pretty = gameToPretty(game);
+
+  const leagueName  = bundle?.settings?.name || bundle?.metadata?.leagueName || bundle?.leagueName || null;
+  const leagueSize  = Array.isArray(bundle?.teams) ? bundle.teams.length : null;
+  const now = new Date();
+
+  // build rows
+  const rows = (bundle?.teams || []).map(t => {
+    const teamName = `${t.location || ''} ${t.nickname || ''}`.trim();
+    const owners   = Array.isArray(t.owners) ? t.owners.map(o => normalizeSwid(o)) : [];
+    const payload  = {
+      _kind: 'espn.mTeam+mSettings',
+      pulled_at: now.toISOString(),
+      league: { id: String(leagueId), name: leagueName },
+      team: t
+    };
+    const source_hash = sha256(JSON.stringify(payload));
+
+    return {
+      char_code: pretty.char_code,
+      season,
+      num_code: pretty.num_code,
+      sport: pretty.sport,
+      competition_type: 'league',
+      total_count: leagueSize,
+      unique_sid_count: null,
+      unique_member_count: null,
+      table_name: table,
+      platform: 'espn',
+      league_id: String(leagueId),
+      team_id: String(t.id),
+      league_name: leagueName,
+      league_size: leagueSize,
+      team_name: teamName || '',
+      handle: null,
+      team_logo_url: t.logo || null,
+      in_season: true,
+      is_live: null,
+      current_scoring_period: bundle?.scoringPeriodId || bundle?.status?.currentMatchupPeriod || null,
+      entry_url: null,
+      league_url: null,
+      fantasycast_url: null,
+      scoreboard_url: null,
+      signup_url: null,
+      scoring_json: null,
+      draft_json: null,
+      source_payload: payload,
+      reaction_counts: null,
+      source_hash,
+      source_etag: null,
+      visibility: 'public',
+      status: 'ok',
+    };
+  });
+
+  if (!rows.length) return { table, inserted: 0, updated: 0 };
+
+  // Do a batched upsert. Columns reflect your ff_sport_ffl sample shape.
+  // If any column does not exist on a given ff_sport_* table, this will error.
+  // To make it bulletproof across minor mismatches, we wrap in a try/catch and surface a 'skipped' result.
+  try {
+    const text = `
+      INSERT INTO ${table} (
+        char_code, season, num_code, sport, competition_type,
+        total_count, unique_sid_count, unique_member_count, table_name,
+        first_seen_at, last_seen_at,
+        platform, league_id, team_id, league_name, league_size, team_name, handle,
+        team_logo_url, in_season, is_live, current_scoring_period,
+        entry_url, league_url, fantasycast_url, scoreboard_url, signup_url,
+        scoring_json, draft_json, source_payload, reaction_counts, source_hash, source_etag,
+        visibility, status, updated_at, last_synced_at
+      )
+      VALUES
+      ${rows.map((_,i)=>`(
+        $${i*34+1}, $${i*34+2}, $${i*34+3}, $${i*34+4}, $${i*34+5},
+        $${i*34+6}, $${i*34+7}, $${i*34+8}, $${i*34+9},
+        now(), now(),
+        $${i*34+10}, $${i*34+11}, $${i*34+12}, $${i*34+13}, $${i*34+14}, $${i*34+15}, $${i*34+16},
+        $${i*34+17}, $${i*34+18}, $${i*34+19}, $${i*34+20},
+        $${i*34+21}, $${i*34+22}, $${i*34+23}, $${i*34+24}, $${i*34+25},
+        $${i*34+26}, $${i*34+27}, $${i*34+28}, $${i*34+29}, $${i*34+30}, $${i*34+31},
+        $${i*34+32}, $${i*34+33}, now(), now()
+      )`).join(',')}
+      ON CONFLICT (platform, season, league_id, team_id)
+      DO UPDATE SET
+        league_name = EXCLUDED.league_name,
+        league_size = EXCLUDED.league_size,
+        team_name   = EXCLUDED.team_name,
+        team_logo_url = EXCLUDED.team_logo_url,
+        current_scoring_period = EXCLUDED.current_scoring_period,
+        source_payload = EXCLUDED.source_payload,
+        source_hash = EXCLUDED.source_hash,
+        visibility = EXCLUDED.visibility,
+        status = EXCLUDED.status,
+        updated_at = now(),
+        last_synced_at = now()
+    `;
+
+    const vals = [];
+    for (const r of rows) {
+      vals.push(
+        r.char_code, r.season, r.num_code, r.sport, r.competition_type,
+        r.total_count, r.unique_sid_count, r.unique_member_count, r.table_name,
+        r.platform, r.league_id, r.team_id, r.league_name, r.league_size, r.team_name, r.handle,
+        r.team_logo_url, r.in_season, r.is_live, r.current_scoring_period,
+        r.entry_url, r.league_url, r.fantasycast_url, r.scoreboard_url, r.signup_url,
+        r.scoring_json, r.draft_json, r.source_payload, r.reaction_counts, r.source_hash, r.source_etag,
+        r.visibility, r.status
+      );
+    }
+
+    const result = await pool.query(text, vals);
+    // pg doesn't give per-row counts on upsert; treat as "ok"
+    return { table, inserted: rows.length, updated: 'on_conflict' };
+  } catch (e) {
+    return { table, inserted: 0, updated: 0, skipped: true, reason: e.message || 'upsert_failed' };
+  }
+}
+
+/**
+ * Ingest snapshot for one membership (one league).
+ * Returns a per-league result describing what happened.
+ */
+async function ingestDiscoveredLeague({ game, season, leagueId }, cred) {
+  const g = String(game).toLowerCase();
+  if (!SUPPORTED_GAMES.has(g)) {
+    return { game: g, season, leagueId: String(leagueId), queued: false, reason: 'unsupported_game' };
+  }
+
+  try {
+    const bundle = await fetchLeagueBundle(g, season, leagueId, cred);
+    const write = await upsertLeagueIntoSportTable(g, season, leagueId, bundle);
+    return { game: g, season, leagueId: String(leagueId), queued: true, write };
+  } catch (e) {
+    return { game: g, season, leagueId: String(leagueId), queued: false, reason: e.message || 'probe_or_write_failed' };
+  }
+}
+
+// ============================================================================
+//                       GHOST INGEST (UPGRADED)
+// ============================================================================
+
 /**
  * POST /ghost/ingest
- * Body or query: { season, leagueId }
- * Uses caller’s SWID/S2 to pull league teams, then maps owners → member_id.
- * Any team with no resolvable member gets a GHOST### id (per league).
+ * Body/query: { season, leagueId }  (game implied 'ffl' entry point)
+ * 1) Map owners → member_id (real/ghost)
+ * 2) For each unique owner GUID → Fan API → ingest ALL leagues across FFL/FBA/FLB/FHL
+ * 3) Write snapshots into ff_sport_[ffl|fba|flb|fhl]
  */
 router.post('/ghost/ingest', ensureCred, async (req, res) => {
   try {
@@ -465,29 +633,30 @@ router.post('/ghost/ingest', ensureCred, async (req, res) => {
     if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
     if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
 
-    // Pull league teams with owners[]
+    // Step 0: Read the seed league (football) to discover owners
     const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
     const data = await espnFetchJSON(url, req._espn);
 
     const teams = (data.teams || []);
-    if (!teams.length) return ok(res, { season, leagueId, platform: 'espn', mapped: [], note: 'no_teams_found' });
+    if (!teams.length) return ok(res, { season, leagueId, platform: 'espn', mapped: [], fanIngest: [], note: 'no_teams_found' });
 
+    // ---------- Step 1: owners → member_id ----------
     const mapped = [];
+    const ownerGuidSet = new Set();
+
     for (const t of teams) {
       const teamId = String(t.id);
-      const ownerGuids = (t.owners || []).map(o => normalizeSwid(o)); // array of '{GUID}'
+      const ownerGuids = (t.owners || []).map(o => normalizeSwid(o));
+      ownerGuids.forEach(g => ownerGuidSet.add(g));
+
       let memberId = null;
       let ownerKind = 'ghost';
-
-      // Try to find a real member via any owner GUID
       for (const guid of ownerGuids) {
         const mid = await lookupMemberByOwnerGuid(guid);
         if (mid) { memberId = mid; ownerKind = 'real'; break; }
       }
 
-      // If still not found, allocate/keep a ghost
       if (!memberId) {
-        // If there is already a mapping, keep it (don’t churn ghost IDs)
         const existing = await pool.query(
           `SELECT member_id, owner_kind
              FROM ff_team_owner
@@ -524,12 +693,41 @@ router.post('/ghost/ingest', ensureCred, async (req, res) => {
       });
     }
 
+    // ---------- Step 2: Fan API for each owner; ingest ALL memberships ----------
+    const uniqueOwners = Array.from(ownerGuidSet);
+    const fanIngestResults = [];
+
+    for (const ownerGuid of uniqueOwners) {
+      const memberships = await fetchFanMemberships(ownerGuid, req._espn);
+
+      // De-dup memberships by (game, season, leagueId)
+      const keyset = new Set();
+      const deduped = [];
+      for (const m of memberships) {
+        const key = `${m.game}|${m.season}|${m.leagueId}`;
+        if (!keyset.has(key)) { keyset.add(key); deduped.push(m); }
+      }
+
+      const results = [];
+      for (const m of deduped) {
+        const r = await ingestDiscoveredLeague(m, req._espn);
+        results.push(r);
+      }
+
+      fanIngestResults.push({
+        ownerGuid,
+        discovered: deduped,
+        results
+      });
+    }
+
     return ok(res, {
       platform: 'espn',
       season,
       leagueId,
       count: mapped.length,
-      mapped
+      mapped,
+      fanIngest: fanIngestResults
     });
   } catch (e) {
     console.error('[espn/ghost/ingest]', e);
@@ -537,10 +735,7 @@ router.post('/ghost/ingest', ensureCred, async (req, res) => {
   }
 });
 
-/**
- * GET /owners?season=&leagueId=
- * Quick viewer for current mappings
- */
+// ---------------- owners viewer ----------------
 router.get('/owners', async (req, res) => {
   try {
     const season   = num(req.query?.season);
@@ -562,7 +757,7 @@ router.get('/owners', async (req, res) => {
   }
 });
 
-// ---------------- primary ingest handler (existing alias kept) ----------------
+// ---------------- legacy ingest acceptor (kept) ----------------
 async function ingestHandler(req, res) {
   try {
     const memberId = await getAuthedMemberId(req);
