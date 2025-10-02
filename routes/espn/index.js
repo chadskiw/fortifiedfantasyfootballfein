@@ -4,7 +4,6 @@
 //   app.use('/api/platforms/espn', espnRouter);   // canonical
 //   app.use('/api/espn', espnRouter);             // legacy short base (bookmarklet)
 //   app.use('/api/espn-auth', espnRouter);        // to satisfy /api/espn-auth/creds (alias)
-//   // shim for public /link endpoint:
 //   app.get('/link', (req, res) => {
 //     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
 //     res.redirect(302, `/api/espn/link${qs}`);
@@ -20,6 +19,7 @@ const pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool missing');
 
 const fetch = global.fetch || require('node-fetch');
+const DEBUG = process.env.FF_DEBUG_ESPN === '1';
 
 // ---------------- helpers ----------------
 const ok  = (res, body = {}) => res.json({ ok: true, ...body });
@@ -145,14 +145,18 @@ async function ensureQuickSnap(memberId, swid) {
 
 /**
  * Pull the current member's ESPN creds from DB or cookies or headers.
- * Order: DB (latest for member) → cookies (SWID/espn_s2) → headers (X-ESPN-*).
+ * Order:
+ *   1) DB row for member_id
+ *   2) Cookies (SWID + espn_s2)
+ *   3) DB row by SWID hash (fallback when member cookies are missing)
+ *   4) Headers X-ESPN-*
  */
 async function getCredForRequest(req) {
   const cookies = req.cookies || {};
   const hdrs = req.headers || {};
   const memberId = await getAuthedMemberId(req);
 
-  // 1) DB
+  // 1) DB by member
   if (memberId) {
     const { rows } = await pool.query(`
       SELECT swid, espn_s2
@@ -162,20 +166,46 @@ async function getCredForRequest(req) {
        LIMIT 1
     `, [memberId]);
     if (rows[0]?.swid && rows[0]?.espn_s2) {
-      return { swid: normalizeSwid(rows[0].swid), espn_s2: normalizeS2(rows[0].espn_s2), memberId };
+      const cred = { swid: normalizeSwid(rows[0].swid), espn_s2: normalizeS2(rows[0].espn_s2), memberId };
+      if (DEBUG) console.log('[espn] cred source: db(member)', { memberId, hasS2: !!cred.espn_s2 });
+      return cred;
     }
   }
 
-  // 2) Cookies (HttpOnly espn_s2 is OK here because we’re on the server)
-  const swidCookie = normalizeSwid(cookies.SWID || cookies.swid || '');
-  const s2Cookie   = normalizeS2(cookies.espn_s2 || cookies.ff_espn_s2 || '');
-  if (swidCookie && s2Cookie) return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
+  // 2) Cookies (HttpOnly S2 is available server-side)
+  const swidCookieRaw = cookies.SWID || cookies.swid || '';
+  const swidCookie    = normalizeSwid(swidCookieRaw);
+  const s2Cookie      = normalizeS2(cookies.espn_s2 || cookies.ff_espn_s2 || '');
+  if (swidCookie && s2Cookie) {
+    if (DEBUG) console.log('[espn] cred source: cookies');
+    return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
+  }
 
-  // 3) Headers (legacy)
+  // 3) DB by SWID hash (fallback if user has SWID cookie but no member session cookie)
+  if (swidCookie) {
+    const swidHash = sha256(swidCookie);
+    const { rows } = await pool.query(`
+      SELECT swid, espn_s2
+        FROM ff_espn_cred
+       WHERE swid_hash = $1
+       ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+       LIMIT 1
+    `, [swidHash]);
+    if (rows[0]?.espn_s2) {
+      if (DEBUG) console.log('[espn] cred source: db(swid_hash)');
+      return { swid: normalizeSwid(rows[0].swid || swidCookie), espn_s2: normalizeS2(rows[0].espn_s2), memberId: memberId || null };
+    }
+  }
+
+  // 4) Legacy headers
   const swidHdr = normalizeSwid(hdrs['x-espn-swid'] || hdrs['x-swid'] || '');
   const s2Hdr   = normalizeS2(hdrs['x-espn-s2']   || hdrs['x-s2']   || '');
-  if (swidHdr && s2Hdr) return { swid: swidHdr, espn_s2: s2Hdr, memberId: memberId || null };
+  if (swidHdr && s2Hdr) {
+    if (DEBUG) console.log('[espn] cred source: headers');
+    return { swid: swidHdr, espn_s2: s2Hdr, memberId: memberId || null };
+  }
 
+  if (DEBUG) console.log('[espn] cred source: none');
   return { swid: null, espn_s2: null, memberId: memberId || null };
 }
 
@@ -198,12 +228,9 @@ async function ensureCred(req, res, next) {
 // Attach both Cookie + X- headers (ESPN accepts either; Cookie is canonical)
 async function espnFetchJSON(url, cred, init = {}) {
   const headers = Object.assign({}, init.headers || {});
-  // Headers are optional but harmless
   headers['X-ESPN-SWID'] = encodeURIComponent(cred.swid || '');
   headers['X-ESPN-S2']   = cred.espn_s2 || '';
-
-  // Cookies are what ESPN actually uses
-  const swidRaw = decodeURIComponent(cred.swid || ''); // cookie expects raw {GUID}
+  const swidRaw = decodeURIComponent(cred.swid || ''); // ESPN cookie expects raw {GUID}
   headers.cookie = `SWID=${swidRaw}; espn_s2=${cred.espn_s2}`;
 
   const res = await fetch(url, { method: 'GET', ...init, headers });
@@ -256,10 +283,6 @@ router.post('/link', linkHandler);
 
 // ---------------- core FE endpoints ----------------
 
-/**
- * “Am I linked?” — true if we have SWID (quick_snap or cred) or S2.
- * This is what the FE should drive its state off of.
- */
 router.get('/link-status', async (req, res) => {
   try {
     const memberId = await getAuthedMemberId(req);
@@ -293,7 +316,6 @@ router.get('/link-status', async (req, res) => {
   }
 });
 
-// (placeholder; you can flesh out when ready)
 router.get('/leagues', async (req, res) => {
   try {
     const memberId = await getAuthedMemberId(req);
@@ -374,7 +396,7 @@ async function credProbe(req, res) {
   try {
     const c = req.cookies || {};
     const h = req.headers || {};
-    theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
+    const theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
     const s2   = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
     const memberId = await getAuthedMemberId(req);
 
@@ -403,11 +425,8 @@ router.get('/authcheck', (req, res) => {
   ok(res, { step: (swid && s2) ? 'logged_in' : 'link_needed' });
 });
 
-// ---------------- NEW: server-side ESPN proxies ----------------
+// ---------------- server-side ESPN proxies ----------------
 
-/**
- * GET /api/platforms/espn/teams?season=2025&leagueId=1634950747
- */
 router.get('/teams', ensureCred, async (req, res) => {
   try {
     const season = num(req.query.season, new Date().getUTCFullYear());
@@ -432,9 +451,6 @@ router.get('/teams', ensureCred, async (req, res) => {
   }
 });
 
-/**
- * GET /api/platforms/espn/roster?season=2025&leagueId=...&teamId=7&week=2
- */
 router.get('/roster', ensureCred, async (req, res) => {
   try {
     const season = num(req.query.season, new Date().getUTCFullYear());
