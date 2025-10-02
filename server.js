@@ -8,6 +8,7 @@ const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
 const espnRouter = require('./routes/espn');
+const hydrateEspn  = require('./routes/espn/hydrate');
 
 // const imagesPresign = require('./routes/images/presign');
 const imagesPresign = require('./routes/images/presign-r2');
@@ -79,7 +80,7 @@ app.use('/api/session/bootstrap', require('./routes/session/bootstrap'));
 // in your main server file (e.g., index.js/app.js)
 //app.use('/api/platforms/espn', require('./routes/espn-ingest', './routes/session/bootstrap', pool));
 // server.js (or app.js)
-
+app.use(hydrateEspn());
 // Canonical base
 app.use('/api/platforms/espn', espnRouter);
 app.use('/api/espn-auth',      espnRouter);
