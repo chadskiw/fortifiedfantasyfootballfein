@@ -19,6 +19,8 @@ try { db = require('../../src/db/pool'); } catch { db = require('../../src/db/po
 const pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool missing');
 
+const fetch = global.fetch || require('node-fetch');
+
 // ---------------- helpers ----------------
 const ok  = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error, extra = {}) => res.status(code).json({ ok: false, error, ...extra });
@@ -139,6 +141,79 @@ async function ensureQuickSnap(memberId, swid) {
   );
 }
 
+// ---------------- server-side ESPN cred fetch/proxy helpers ----------------
+
+/**
+ * Pull the current member's ESPN creds from DB or cookies or headers.
+ * Order: DB (latest for member) → cookies (SWID/espn_s2) → headers (X-ESPN-*).
+ */
+async function getCredForRequest(req) {
+  const cookies = req.cookies || {};
+  const hdrs = req.headers || {};
+  const memberId = await getAuthedMemberId(req);
+
+  // 1) DB
+  if (memberId) {
+    const { rows } = await pool.query(`
+      SELECT swid, espn_s2
+        FROM ff_espn_cred
+       WHERE member_id = $1
+       ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+       LIMIT 1
+    `, [memberId]);
+    if (rows[0]?.swid && rows[0]?.espn_s2) {
+      return { swid: normalizeSwid(rows[0].swid), espn_s2: normalizeS2(rows[0].espn_s2), memberId };
+    }
+  }
+
+  // 2) Cookies (HttpOnly espn_s2 is OK here because we’re on the server)
+  const swidCookie = normalizeSwid(cookies.SWID || cookies.swid || '');
+  const s2Cookie   = normalizeS2(cookies.espn_s2 || cookies.ff_espn_s2 || '');
+  if (swidCookie && s2Cookie) return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
+
+  // 3) Headers (legacy)
+  const swidHdr = normalizeSwid(hdrs['x-espn-swid'] || hdrs['x-swid'] || '');
+  const s2Hdr   = normalizeS2(hdrs['x-espn-s2']   || hdrs['x-s2']   || '');
+  if (swidHdr && s2Hdr) return { swid: swidHdr, espn_s2: s2Hdr, memberId: memberId || null };
+
+  return { swid: null, espn_s2: null, memberId: memberId || null };
+}
+
+async function ensureCred(req, res, next) {
+  try {
+    const cred = await getCredForRequest(req);
+    if (!cred.swid || !cred.espn_s2) {
+      return bad(res, 401, 'Missing SWID/espn_s2', { hint: 'Link via /api/espn/link or send X-ESPN-SWID/X-ESPN-S2' });
+    }
+    req._espn = cred;
+    next();
+  } catch (e) {
+    console.error('[espn ensureCred]', e);
+    return bad(res, 500, 'cred_lookup_failed');
+  }
+}
+
+// Attach both Cookie + X- headers (ESPN accepts either; Cookie is canonical)
+async function espnFetchJSON(url, cred, init = {}) {
+  const headers = Object.assign({}, init.headers || {});
+  // Headers are optional but harmless
+  headers['X-ESPN-SWID'] = encodeURIComponent(cred.swid || '');
+  headers['X-ESPN-S2']   = cred.espn_s2 || '';
+
+  // Cookies are what ESPN actually uses
+  const swidRaw = decodeURIComponent(cred.swid || ''); // cookie expects raw {GUID}
+  headers.cookie = `SWID=${swidRaw}; espn_s2=${cred.espn_s2}`;
+
+  const res = await fetch(url, { method: 'GET', ...init, headers });
+  if (!res.ok) {
+    const text = await res.text().catch(()=>'');
+    const err = new Error(`[${res.status}] ${url} → ${text || 'request failed'}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 // ---------------- link endpoints ----------------
 
 /**
@@ -159,7 +234,7 @@ async function linkHandler(req, res) {
       await ensureQuickSnap(memberId, swid);
     }
 
-    // Cookies for FE convenience
+    // Cookies for FE convenience; S2 stays HttpOnly
     const maxYear = 1000 * 60 * 60 * 24 * 365;
     const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: maxYear };
     res.cookie('SWID', swid, base);
@@ -216,14 +291,12 @@ router.get('/link-status', async (req, res) => {
   }
 });
 
+// (placeholder; you can flesh out when ready)
 router.get('/leagues', async (req, res) => {
   try {
     const memberId = await getAuthedMemberId(req);
     if (!memberId) return bad(res, 401, 'unauthorized');
-
     const season = num(req.query?.season, new Date().getUTCFullYear());
-
-    // TODO: replace with real ESPN fetch using stored creds
     return ok(res, { season, leagues: [] });
   } catch (e) {
     console.error('[espn/leagues]', e);
@@ -243,14 +316,13 @@ async function ingestHandler(req, res) {
     if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
     if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
 
-    // Creds may be forwarded via headers; if present, save & attach + backfill quick_snap.
+    // If creds were forwarded via headers, save them; otherwise rely on stored ones.
     const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
     const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
     if (hdrSwid && hdrS2) {
       await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
       await ensureQuickSnap(memberId, hdrSwid);
     } else {
-      // Fall back to stored creds; ensure quick_snap exists if we have a swid.
       const row = await pool.query(
         `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
         [memberId]
@@ -262,7 +334,6 @@ async function ingestHandler(req, res) {
       }
     }
 
-    // TODO: trigger actual ingestion
     return res.status(202).json({
       ok: true,
       accepted: true,
@@ -276,7 +347,6 @@ async function ingestHandler(req, res) {
   }
 }
 
-// Primary route + alias seen in logs
 router.post('/ingest', ingestHandler);
 router.post('/ingest/espn/fan', ingestHandler);
 
@@ -329,6 +399,63 @@ router.get('/authcheck', (req, res) => {
   const s2   = c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || null;
   res.set('Cache-Control','no-store');
   ok(res, { step: (swid && s2) ? 'logged_in' : 'link_needed' });
+});
+
+// ---------------- NEW: server-side ESPN proxies ----------------
+
+/**
+ * GET /api/platforms/espn/teams?season=2025&leagueId=1634950747
+ */
+router.get('/teams', ensureCred, async (req, res) => {
+  try {
+    const season = num(req.query.season, new Date().getUTCFullYear());
+    const leagueId = String(req.query.leagueId || '').trim();
+    if (!season || !leagueId) return bad(res, 400, 'season and leagueId required');
+
+    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
+    const data = await espnFetchJSON(url, req._espn);
+
+    const teams = (data.teams || []).map(t => ({
+      id: t.id,
+      location: t.location,
+      nickname: t.nickname,
+      logo: t.logo || null,
+      owners: t.owners || []
+    }));
+
+    return ok(res, { season, leagueId, teams });
+  } catch (e) {
+    console.error('[espn/teams]', e);
+    return bad(res, e.status || 500, e.message || 'proxy_failed');
+  }
+});
+
+/**
+ * GET /api/platforms/espn/roster?season=2025&leagueId=...&teamId=7&week=2
+ */
+router.get('/roster', ensureCred, async (req, res) => {
+  try {
+    const season = num(req.query.season, new Date().getUTCFullYear());
+    const leagueId = String(req.query.leagueId || '').trim();
+    const teamId   = String(req.query.teamId   || '').trim();
+    const week     = req.query.week ? Number(req.query.week) : undefined;
+    if (!season || !leagueId || !teamId) {
+      return bad(res, 400, 'season, leagueId, teamId required');
+    }
+
+    const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+    const view = week ? `mRoster&scoringPeriodId=${week}` : 'mRoster';
+    const url  = `${base}?forTeamId=${teamId}&view=${view}`;
+
+    const data = await espnFetchJSON(url, req._espn);
+    const team = (data.teams || []).find(t => String(t.id) === String(teamId)) || {};
+    const entries = (team.roster && team.roster.entries) || [];
+
+    return ok(res, { season, leagueId, teamId, entries });
+  } catch (e) {
+    console.error('[espn/roster]', e);
+    return bad(res, e.status || 500, e.message || 'proxy_failed');
+  }
 });
 
 module.exports = router;
