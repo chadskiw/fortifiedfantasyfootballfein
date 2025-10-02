@@ -20,8 +20,8 @@ if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool m
 
 const fetch = global.fetch || require('node-fetch');
 const DEBUG = process.env.FF_DEBUG_ESPN === '1';
-// --- AUTO-HYDRATE ESPNs2 WHEN USER IS LOGGED IN ---
 
+// --- AUTO-HYDRATE ESPN S2 WHEN USER IS LOGGED IN ---
 const S2_COOKIE_OPTS = Object.freeze({
   httpOnly: true,
   secure: true,
@@ -30,73 +30,10 @@ const S2_COOKIE_OPTS = Object.freeze({
   maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
 });
 
-async function getS2ForMember(memberId) {
-  if (!memberId) return null;
-  const { rows } = await pool.query(`
-    SELECT espn_s2
-      FROM ff_espn_cred
-     WHERE member_id = $1
-     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-     LIMIT 1
-  `, [memberId]);
-  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
-}
-
-async function getS2BySwidCookie(swidCookie) {
-  if (!swidCookie) return null;
-  // swidCookie is already brace-form; hash it the same way we store it
-  const swidHash = sha256(swidCookie);
-  const { rows } = await pool.query(`
-    SELECT espn_s2
-      FROM ff_espn_cred
-     WHERE swid_hash = $1
-     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-     LIMIT 1
-  `, [swidHash]);
-  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
-}
-
-/**
- * If user is fully authenticated to FEIN (ff_member_id + ff_session_id + ff_logged_in=1),
- * and the HttpOnly `espn_s2` cookie is missing, but DB has a value, set it.
- * This does NOT expose S2 to JS; it’s HttpOnly and same-origin only.
- */
-async function maybeHydrateS2Cookie(req, res, next) {
-  try {
-    // Only do this for idempotent GETs (avoid interfering with POST bodies)
-    if (req.method !== 'GET') return next();
-
-    // Already have S2 cookie? done.
-    if (req.cookies?.espn_s2) return next();
-
-    // Must be a valid signed-in FEIN session
-    const memberId = await getAuthedMemberId(req);
-    if (!memberId) return next();
-
-    // Try member row first
-    let s2 = await getS2ForMember(memberId);
-
-    // Fallback: if they carry SWID cookie, try swid_hash lookup
-    if (!s2) {
-      const swidCookie = normalizeSwid(req.cookies?.SWID || req.cookies?.swid || '');
-      if (swidCookie) s2 = await getS2BySwidCookie(swidCookie);
-    }
-
-    if (s2) {
-      res.cookie('espn_s2', s2, S2_COOKIE_OPTS);
-      if (DEBUG) console.log('[espn] hydrated espn_s2 cookie for member', memberId);
-    }
-    return next();
-  } catch (e) {
-    if (DEBUG) console.warn('[espn] hydrate s2 skipped:', e.message);
-    return next();
-  }
-}
-
-// ---------------- helpers ----------------
+// -------------- small utils --------------
 const ok  = (res, body = {}) => res.json({ ok: true, ...body });
 const bad = (res, code, error, extra = {}) => res.status(code).json({ ok: false, error, ...extra });
-const num = (v, d=null) => (Number.isFinite(+v) ? +v : d);
+const num = (v, d = null) => (Number.isFinite(+v) ? +v : d);
 const sha256 = (s) => crypto.createHash('sha256').update(String(s || '')).digest('hex');
 
 function safeNextURL(req, fallback = '/fein') {
@@ -128,6 +65,7 @@ function normalizeS2(raw) {
   return s || null;
 }
 
+// ---------------- session helpers ----------------
 async function getAuthedMemberId(req) {
   const c = req.cookies || {};
   const memberId  = (c.ff_member_id || '').trim();
@@ -141,12 +79,53 @@ async function getAuthedMemberId(req) {
   return rows.length ? memberId : null;
 }
 
-// ---------------- DB helpers ----------------
+// ---------------- DB helpers (existing) ----------------
+async function getS2ForMember(memberId) {
+  if (!memberId) return null;
+  const { rows } = await pool.query(`
+    SELECT espn_s2
+      FROM ff_espn_cred
+     WHERE member_id = $1
+     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+     LIMIT 1
+  `, [memberId]);
+  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
+}
 
-/**
- * Upsert creds and attach member_id.
- * If s2 is null/empty, we DO NOT overwrite an existing s2.
- */
+async function getS2BySwidCookie(swidCookie) {
+  if (!swidCookie) return null;
+  const swidHash = sha256(swidCookie);
+  const { rows } = await pool.query(`
+    SELECT espn_s2
+      FROM ff_espn_cred
+     WHERE swid_hash = $1
+     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+     LIMIT 1
+  `, [swidHash]);
+  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
+}
+
+async function maybeHydrateS2Cookie(req, res, next) {
+  try {
+    if (req.method !== 'GET') return next();
+    if (req.cookies?.espn_s2) return next();
+    const memberId = await getAuthedMemberId(req);
+    if (!memberId) return next();
+
+    let s2 = await getS2ForMember(memberId);
+    if (!s2) {
+      const swidCookie = normalizeSwid(req.cookies?.SWID || req.cookies?.swid || '');
+      if (swidCookie) s2 = await getS2BySwidCookie(swidCookie);
+    }
+
+    if (s2) res.cookie('espn_s2', s2, S2_COOKIE_OPTS);
+    return next();
+  } catch (e) {
+    if (DEBUG) console.warn('[espn] hydrate s2 skipped:', e.message);
+    return next();
+  }
+}
+
 async function saveCredWithMember({ swid, s2, memberId, ref }) {
   const swidHash = sha256(swid);
   const s2Val    = (s2 && String(s2).trim()) ? String(s2).trim() : null;
@@ -166,7 +145,6 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
 
   if (upd.rowCount > 0) return upd.rows[0];
 
-  // Insert new row; espn_s2 may be null here (that’s OK)
   const ins = await pool.query(`
     INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
     VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
@@ -176,7 +154,6 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
   return ins.rows[0];
 }
 
-/** Ensure quick_snap exists; update if row exists, else insert a minimal one. */
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
   const normalized = normalizeSwid(swid);
@@ -201,7 +178,6 @@ async function ensureQuickSnap(memberId, swid) {
     return;
   }
 
-  // No row yet – create a minimal one with quick_snap
   await pool.query(
     `INSERT INTO ff_quickhitter
        (member_id, handle, quick_snap, color_hex, created_at, updated_at, is_member)
@@ -213,22 +189,12 @@ async function ensureQuickSnap(memberId, swid) {
   );
 }
 
-// ---------------- server-side ESPN cred fetch/proxy helpers ----------------
-
-/**
- * Pull the current member's ESPN creds from DB or cookies or headers.
- * Order:
- *   1) DB row for member_id
- *   2) Cookies (SWID + espn_s2)
- *   3) DB row by SWID hash (fallback when member cookies are missing)
- *   4) Headers X-ESPN-*
- */
+// ---------------- ESPN cred resolution ----------------
 async function getCredForRequest(req) {
   const cookies = req.cookies || {};
   const hdrs = req.headers || {};
   const memberId = await getAuthedMemberId(req);
 
-  // 1) DB by member
   if (memberId) {
     const { rows } = await pool.query(`
       SELECT swid, espn_s2
@@ -238,22 +204,17 @@ async function getCredForRequest(req) {
        LIMIT 1
     `, [memberId]);
     if (rows[0]?.swid && rows[0]?.espn_s2) {
-      const cred = { swid: normalizeSwid(rows[0].swid), espn_s2: normalizeS2(rows[0].espn_s2), memberId };
-      if (DEBUG) console.log('[espn] cred source: db(member)', { memberId, hasS2: !!cred.espn_s2 });
-      return cred;
+      return { swid: normalizeSwid(rows[0].swid), espn_s2: normalizeS2(rows[0].espn_s2), memberId };
     }
   }
 
-  // 2) Cookies (HttpOnly S2 is available server-side)
   const swidCookieRaw = cookies.SWID || cookies.swid || '';
   const swidCookie    = normalizeSwid(swidCookieRaw);
   const s2Cookie      = normalizeS2(cookies.espn_s2 || cookies.ff_espn_s2 || '');
   if (swidCookie && s2Cookie) {
-    if (DEBUG) console.log('[espn] cred source: cookies');
     return { swid: swidCookie, espn_s2: s2Cookie, memberId: memberId || null };
   }
 
-  // 3) DB by SWID hash (fallback if user has SWID cookie but no member session cookie)
   if (swidCookie) {
     const swidHash = sha256(swidCookie);
     const { rows } = await pool.query(`
@@ -264,20 +225,18 @@ async function getCredForRequest(req) {
        LIMIT 1
     `, [swidHash]);
     if (rows[0]?.espn_s2) {
-      if (DEBUG) console.log('[espn] cred source: db(swid_hash)');
-      return { swid: normalizeSwid(rows[0].swid || swidCookie), espn_s2: normalizeS2(rows[0].espn_s2), memberId: memberId || null };
+      return {
+        swid: normalizeSwid(rows[0].swid || swidCookie),
+        espn_s2: normalizeS2(rows[0].espn_s2),
+        memberId: memberId || null
+      };
     }
   }
 
-  // 4) Legacy headers
   const swidHdr = normalizeSwid(hdrs['x-espn-swid'] || hdrs['x-swid'] || '');
   const s2Hdr   = normalizeS2(hdrs['x-espn-s2']   || hdrs['x-s2']   || '');
-  if (swidHdr && s2Hdr) {
-    if (DEBUG) console.log('[espn] cred source: headers');
-    return { swid: swidHdr, espn_s2: s2Hdr, memberId: memberId || null };
-  }
+  if (swidHdr && s2Hdr) return { swid: swidHdr, espn_s2: s2Hdr, memberId: memberId || null };
 
-  if (DEBUG) console.log('[espn] cred source: none');
   return { swid: null, espn_s2: null, memberId: memberId || null };
 }
 
@@ -297,7 +256,7 @@ async function ensureCred(req, res, next) {
   }
 }
 
-// Attach both Cookie + X- headers (ESPN accepts either; Cookie is canonical)
+// Attach both Cookie + X- headers
 async function espnFetchJSON(url, cred, init = {}) {
   const headers = Object.assign({}, init.headers || {});
   headers['X-ESPN-SWID'] = encodeURIComponent(cred.swid || '');
@@ -316,11 +275,6 @@ async function espnFetchJSON(url, cred, init = {}) {
 }
 
 // ---------------- link endpoints ----------------
-
-/**
- * Accepts swid (required) and s2 (optional).
- * Writes creds + quick_snap; sets cookies; redirects to ?to= or /fein.
- */
 async function linkHandler(req, res) {
   try {
     const swid = normalizeSwid(req.body?.swid ?? req.query?.swid);
@@ -335,7 +289,6 @@ async function linkHandler(req, res) {
       await ensureQuickSnap(memberId, swid);
     }
 
-    // Cookies for FE convenience; S2 stays HttpOnly
     const maxYear = 1000 * 60 * 60 * 24 * 365;
     const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: maxYear };
     res.cookie('SWID', swid, base);
@@ -349,129 +302,11 @@ async function linkHandler(req, res) {
     return bad(res, 500, 'link_failed');
   }
 }
-// hydrate espn_s2 automatically on GETs for logged-in users
 router.use(maybeHydrateS2Cookie);
-
 router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
 
-// ---------------- core FE endpoints ----------------
-
-router.get('/link-status', async (req, res) => {
-  try {
-    const memberId = await getAuthedMemberId(req);
-    if (!memberId) return ok(res, { linked: false, reason: 'no_session' });
-
-    const { rows } = await pool.query(`
-      WITH q AS (
-        SELECT quick_snap FROM ff_quickhitter WHERE member_id = $1 LIMIT 1
-      ),
-      c AS (
-        SELECT swid, espn_s2
-          FROM ff_espn_cred
-         WHERE member_id = $1
-         ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-         LIMIT 1
-      )
-      SELECT
-        (SELECT quick_snap FROM q) AS quick_snap,
-        (SELECT swid FROM c)       AS swid,
-        (SELECT espn_s2 FROM c)    AS espn_s2
-    `, [memberId]);
-
-    const r = rows[0] || {};
-    const swid = r.swid || r.quick_snap || null;
-    const linked = !!(swid || r.espn_s2);
-
-    return ok(res, { linked, swid: swid || null, hasS2: !!r.espn_s2 });
-  } catch (e) {
-    console.error('[espn/link-status]', e);
-    return bad(res, 500, 'server_error');
-  }
-});
-
-router.get('/leagues', async (req, res) => {
-  try {
-    const memberId = await getAuthedMemberId(req);
-    if (!memberId) return bad(res, 401, 'unauthorized');
-    const season = num(req.query?.season, new Date().getUTCFullYear());
-    return ok(res, { season, leagues: [] });
-  } catch (e) {
-    console.error('[espn/leagues]', e);
-    return bad(res, 500, 'server_error');
-  }
-});
-// Lightweight poll (keeps UI quiet)
-router.get('/poll', async (req, res) => {
-  try {
-    const size = Math.max(1, Math.min(100, Number.isFinite(+req.query?.size) ? +req.query.size : 10));
-    const season = Number.isFinite(+req.query?.season) ? +req.query.season : new Date().getUTCFullYear();
-
-    // prevent 304 so Set-Cookie from hydrator survives
-    res.set('Cache-Control', 'no-store, private');
-    res.removeHeader && res.removeHeader('ETag');
-
-    return res.status(200).json({ ok: true, season, size, items: [] });
-  } catch (e) {
-    console.error('[espn/poll]', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-/** Primary ingest handler (used by all aliases). */
-async function ingestHandler(req, res) {
-  try {
-    const memberId = await getAuthedMemberId(req);
-    if (!memberId) return bad(res, 401, 'unauthorized');
-
-    const season   = num(req.query?.season ?? req.body?.season);
-    const leagueId = (req.query?.leagueId ?? req.body?.leagueId ?? '').toString().trim();
-    const teamId   = (req.query?.teamId   ?? req.body?.teamId   ?? '').toString().trim() || null;
-    if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
-    if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
-
-    // If creds were forwarded via headers, save them; otherwise rely on stored ones.
-    const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
-    const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
-    if (hdrSwid && hdrS2) {
-      await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
-      await ensureQuickSnap(memberId, hdrSwid);
-    } else {
-      const row = await pool.query(
-        `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
-        [memberId]
-      );
-      if (row.rows[0]?.swid) {
-        await ensureQuickSnap(memberId, row.rows[0].swid);
-      } else {
-        return bad(res, 412, 'espn_not_linked', { needAuth: true });
-      }
-    }
-
-    return res.status(202).json({
-      ok: true,
-      accepted: true,
-      season,
-      leagueId: String(leagueId),
-      teamId: teamId ? String(teamId) : null
-    });
-  } catch (e) {
-    console.error('[espn/ingest]', e);
-    return bad(res, 500, 'server_error');
-  }
-}
-
-router.post('/ingest', ingestHandler);
-router.post('/ingest/espn/fan', ingestHandler);
-
-
-
 // ---------------- probes / aliases ----------------
-
-/**
- * /cred — AND — /creds (alias)
- * If user is authenticated and SWID cookie exists, upsert/link creds and backfill quick_snap.
- */
 async function credProbe(req, res) {
   try {
     const c = req.cookies || {};
@@ -492,10 +327,8 @@ async function credProbe(req, res) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
-
 router.get('/cred', credProbe);
-router.get('/creds', credProbe); // allows /api/espn-auth/creds if you mount at /api/espn-auth
-
+router.get('/creds', credProbe);
 router.get('/authcheck', (req, res) => {
   const c = req.cookies || {};
   const h = req.headers || {};
@@ -506,7 +339,6 @@ router.get('/authcheck', (req, res) => {
 });
 
 // ---------------- server-side ESPN proxies ----------------
-
 router.get('/teams', ensureCred, async (req, res) => {
   try {
     const season = num(req.query.season, new Date().getUTCFullYear());
@@ -521,7 +353,7 @@ router.get('/teams', ensureCred, async (req, res) => {
       location: t.location,
       nickname: t.nickname,
       logo: t.logo || null,
-      owners: t.owners || []
+      owners: t.owners || []   // often ESPN account {GUID}s
     }));
 
     return ok(res, { season, leagueId, teams });
@@ -555,5 +387,223 @@ router.get('/roster', ensureCred, async (req, res) => {
     return bad(res, e.status || 500, e.message || 'proxy_failed');
   }
 });
+
+// ============================================================================
+//                           GHOST OWNERSHIP INGEST
+// ============================================================================
+
+/**
+ * Try to resolve a real FEIN member_id from an ESPN owner GUID ('{GUID}').
+ * We treat the owner GUID as a SWID and look for any ff_espn_cred rows that match.
+ */
+async function lookupMemberByOwnerGuid(ownerGuid) {
+  if (!ownerGuid) return null;
+  const normalized = normalizeSwid(ownerGuid); // ensure {GUID} form
+  const { rows } = await pool.query(
+    `SELECT member_id
+       FROM ff_espn_cred
+      WHERE swid = $1
+      ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+      LIMIT 1`,
+    [normalized]
+  );
+  return rows[0]?.member_id || null;
+}
+
+/**
+ * Allocate the next GHOST id for this (platform, season, leagueId).
+ * Pattern: GHOST001, GHOST002, ...
+ */
+async function nextGhostIdForLeague(platform, season, leagueId) {
+  const { rows } = await pool.query(
+    `SELECT member_id
+       FROM ff_team_owner
+      WHERE platform=$1 AND season=$2 AND league_id=$3
+        AND owner_kind='ghost' AND member_id ~ '^GHOST[0-9]{3,}$'
+      ORDER BY member_id DESC
+      LIMIT 1`,
+    [platform, season, String(leagueId)]
+  );
+  let n = 0;
+  if (rows[0]?.member_id) {
+    const m = rows[0].member_id.match(/^GHOST(\d+)$/);
+    if (m) n = parseInt(m[1], 10);
+  }
+  const next = String(n + 1).padStart(3, '0');
+  return `GHOST${next}`;
+}
+
+/**
+ * Upsert team-owner mapping.
+ */
+async function upsertTeamOwner({ platform, season, leagueId, teamId, memberId, ownerKind, espnOwnerGuids }) {
+  await pool.query(
+    `INSERT INTO ff_team_owner
+       (platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids, created_at, updated_at)
+     VALUES
+       ($1, $2, $3, $4, $5, $6, $7, now(), now())
+     ON CONFLICT (platform, season, league_id, team_id)
+     DO UPDATE SET
+       member_id = EXCLUDED.member_id,
+       owner_kind = EXCLUDED.owner_kind,
+       espn_owner_guids = EXCLUDED.espn_owner_guids,
+       updated_at = now()`,
+    [platform, season, String(leagueId), String(teamId), String(memberId), ownerKind, espnOwnerGuids || null]
+  );
+}
+
+/**
+ * POST /ghost/ingest
+ * Body or query: { season, leagueId }
+ * Uses caller’s SWID/S2 to pull league teams, then maps owners → member_id.
+ * Any team with no resolvable member gets a GHOST### id (per league).
+ */
+router.post('/ghost/ingest', ensureCred, async (req, res) => {
+  try {
+    const season   = num(req.body?.season ?? req.query?.season);
+    const leagueId = (req.body?.leagueId ?? req.query?.leagueId ?? '').toString().trim();
+    if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
+    if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
+
+    // Pull league teams with owners[]
+    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
+    const data = await espnFetchJSON(url, req._espn);
+
+    const teams = (data.teams || []);
+    if (!teams.length) return ok(res, { season, leagueId, platform: 'espn', mapped: [], note: 'no_teams_found' });
+
+    const mapped = [];
+    for (const t of teams) {
+      const teamId = String(t.id);
+      const ownerGuids = (t.owners || []).map(o => normalizeSwid(o)); // array of '{GUID}'
+      let memberId = null;
+      let ownerKind = 'ghost';
+
+      // Try to find a real member via any owner GUID
+      for (const guid of ownerGuids) {
+        const mid = await lookupMemberByOwnerGuid(guid);
+        if (mid) { memberId = mid; ownerKind = 'real'; break; }
+      }
+
+      // If still not found, allocate/keep a ghost
+      if (!memberId) {
+        // If there is already a mapping, keep it (don’t churn ghost IDs)
+        const existing = await pool.query(
+          `SELECT member_id, owner_kind
+             FROM ff_team_owner
+            WHERE platform='espn' AND season=$1 AND league_id=$2 AND team_id=$3
+            LIMIT 1`,
+          [season, leagueId, teamId]
+        );
+        if (existing.rows[0]?.member_id) {
+          memberId = existing.rows[0].member_id;
+          ownerKind = existing.rows[0].owner_kind || 'ghost';
+        } else {
+          memberId = await nextGhostIdForLeague('espn', season, leagueId);
+          ownerKind = 'ghost';
+        }
+      }
+
+      await upsertTeamOwner({
+        platform: 'espn',
+        season,
+        leagueId,
+        teamId,
+        memberId,
+        ownerKind,
+        espnOwnerGuids: ownerGuids.length ? ownerGuids : null
+      });
+
+      mapped.push({
+        teamId,
+        teamName: `${t.location || ''} ${t.nickname || ''}`.trim(),
+        logo: t.logo || null,
+        owners: ownerGuids,
+        memberId,
+        ownerKind
+      });
+    }
+
+    return ok(res, {
+      platform: 'espn',
+      season,
+      leagueId,
+      count: mapped.length,
+      mapped
+    });
+  } catch (e) {
+    console.error('[espn/ghost/ingest]', e);
+    return bad(res, e.status || 500, e.message || 'ghost_ingest_failed');
+  }
+});
+
+/**
+ * GET /owners?season=&leagueId=
+ * Quick viewer for current mappings
+ */
+router.get('/owners', async (req, res) => {
+  try {
+    const season   = num(req.query?.season);
+    const leagueId = (req.query?.leagueId ?? '').toString().trim();
+    if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
+    if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
+
+    const { rows } = await pool.query(
+      `SELECT platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids, created_at, updated_at
+         FROM ff_team_owner
+        WHERE platform='espn' AND season=$1 AND league_id=$2
+        ORDER BY team_id::int NULLS LAST, team_id ASC`,
+      [season, leagueId]
+    );
+    return ok(res, { platform: 'espn', season, leagueId, owners: rows });
+  } catch (e) {
+    console.error('[espn/owners]', e);
+    return bad(res, 500, 'server_error');
+  }
+});
+
+// ---------------- primary ingest handler (existing alias kept) ----------------
+async function ingestHandler(req, res) {
+  try {
+    const memberId = await getAuthedMemberId(req);
+    if (!memberId) return bad(res, 401, 'unauthorized');
+
+    const season   = num(req.query?.season ?? req.body?.season);
+    const leagueId = (req.query?.leagueId ?? req.body?.leagueId ?? '').toString().trim();
+    const teamId   = (req.query?.teamId   ?? req.body?.teamId   ?? '').toString().trim() || null;
+    if (!season)   return bad(res, 400, 'missing_param', { field: 'season' });
+    if (!leagueId) return bad(res, 400, 'missing_param', { field: 'leagueId' });
+
+    const hdrSwid = normalizeSwid(req.headers['x-espn-swid'] || req.headers['x-swid'] || '');
+    const hdrS2   = normalizeS2(req.headers['x-espn-s2']   || req.headers['x-s2']   || '');
+    if (hdrSwid && hdrS2) {
+      await saveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+      await ensureQuickSnap(memberId, hdrSwid);
+    } else {
+      const row = await pool.query(
+        `SELECT swid FROM ff_espn_cred WHERE member_id=$1 AND swid IS NOT NULL ORDER BY last_seen DESC NULLS LAST LIMIT 1`,
+        [memberId]
+      );
+      if (row.rows[0]?.swid) {
+        await ensureQuickSnap(memberId, row.rows[0].swid);
+      } else {
+        return bad(res, 412, 'espn_not_linked', { needAuth: true });
+      }
+    }
+
+    return res.status(202).json({
+      ok: true,
+      accepted: true,
+      season,
+      leagueId: String(leagueId),
+      teamId: teamId ? String(teamId) : null
+    });
+  } catch (e) {
+    console.error('[espn/ingest]', e);
+    return bad(res, 500, 'server_error');
+  }
+}
+router.post('/ingest', ingestHandler);
+router.post('/ingest/espn/fan', ingestHandler);
 
 module.exports = router;
