@@ -20,6 +20,78 @@ if (!pool || typeof pool.query !== 'function') throw new Error('[espn] pg pool m
 
 const fetch = global.fetch || require('node-fetch');
 const DEBUG = process.env.FF_DEBUG_ESPN === '1';
+// --- AUTO-HYDRATE ESPNs2 WHEN USER IS LOGGED IN ---
+
+const S2_COOKIE_OPTS = Object.freeze({
+  httpOnly: true,
+  secure: true,
+  sameSite: 'Lax',
+  path: '/',
+  maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+});
+
+async function getS2ForMember(memberId) {
+  if (!memberId) return null;
+  const { rows } = await pool.query(`
+    SELECT espn_s2
+      FROM ff_espn_cred
+     WHERE member_id = $1
+     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+     LIMIT 1
+  `, [memberId]);
+  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
+}
+
+async function getS2BySwidCookie(swidCookie) {
+  if (!swidCookie) return null;
+  // swidCookie is already brace-form; hash it the same way we store it
+  const swidHash = sha256(swidCookie);
+  const { rows } = await pool.query(`
+    SELECT espn_s2
+      FROM ff_espn_cred
+     WHERE swid_hash = $1
+     ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+     LIMIT 1
+  `, [swidHash]);
+  return (rows[0]?.espn_s2 && String(rows[0].espn_s2).trim()) || null;
+}
+
+/**
+ * If user is fully authenticated to FEIN (ff_member_id + ff_session_id + ff_logged_in=1),
+ * and the HttpOnly `espn_s2` cookie is missing, but DB has a value, set it.
+ * This does NOT expose S2 to JS; it’s HttpOnly and same-origin only.
+ */
+async function maybeHydrateS2Cookie(req, res, next) {
+  try {
+    // Only do this for idempotent GETs (avoid interfering with POST bodies)
+    if (req.method !== 'GET') return next();
+
+    // Already have S2 cookie? done.
+    if (req.cookies?.espn_s2) return next();
+
+    // Must be a valid signed-in FEIN session
+    const memberId = await getAuthedMemberId(req);
+    if (!memberId) return next();
+
+    // Try member row first
+    let s2 = await getS2ForMember(memberId);
+
+    // Fallback: if they carry SWID cookie, try swid_hash lookup
+    if (!s2) {
+      const swidCookie = normalizeSwid(req.cookies?.SWID || req.cookies?.swid || '');
+      if (swidCookie) s2 = await getS2BySwidCookie(swidCookie);
+    }
+
+    if (s2) {
+      res.cookie('espn_s2', s2, S2_COOKIE_OPTS);
+      if (DEBUG) console.log('[espn] hydrated espn_s2 cookie for member', memberId);
+    }
+    return next();
+  } catch (e) {
+    if (DEBUG) console.warn('[espn] hydrate s2 skipped:', e.message);
+    return next();
+  }
+}
 
 // ---------------- helpers ----------------
 const ok  = (res, body = {}) => res.json({ ok: true, ...body });
@@ -277,6 +349,8 @@ async function linkHandler(req, res) {
     return bad(res, 500, 'link_failed');
   }
 }
+// hydrate espn_s2 automatically on GETs for logged-in users
+router.use(maybeHydrateS2Cookie);
 
 router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
