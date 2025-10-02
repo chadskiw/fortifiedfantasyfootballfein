@@ -345,40 +345,58 @@ async function saveCredWithMember({ swid, s2, memberId, ref }) {
   return ins.rows[0];
 }
 
+// REPLACE ensureQuickSnap with this
 async function ensureQuickSnap(memberId, swid) {
   if (!memberId || !swid) return;
-  const normalized = normalizeSwid(swid);
-
-  const sel = await pool.query(
-    `SELECT id, quick_snap FROM ff_quickhitter WHERE member_id = $1 LIMIT 1`,
-    [memberId]
-  );
-  const row = sel.rows[0];
-
-  if (row) {
-    const current = String(row.quick_snap || '').trim();
-    if (!current) {
-      await pool.query(
-        `UPDATE ff_quickhitter
-            SET quick_snap = $2,
-                updated_at = now()
-          WHERE id = $1`,
-        [row.id, normalized]
-      );
-    }
-    return;
-  }
-
+  const snap = normalizeSwid(swid);
+  // uses your unique index: ff_quickhitter_quicksnap_lower_uq
   await pool.query(
-    `INSERT INTO ff_quickhitter
-       (member_id, handle, quick_snap, color_hex, created_at, updated_at, is_member)
-     VALUES
-       ($1, NULL, $2,
-        COALESCE((SELECT color_hex FROM ff_member WHERE member_id = $1 LIMIT 1), '#77E0FF'),
-        now(), now(), FALSE)`,
-    [memberId, normalized]
+    `INSERT INTO ff_quickhitter (member_id, quick_snap)
+     VALUES ($1, $2)
+     ON CONFLICT ON CONSTRAINT ff_quickhitter_quicksnap_lower_uq DO NOTHING`,
+    [memberId, snap]
   );
 }
+async function runFanDiscoveryForCurrentOwner({ season = null, leagueId = null, mapped = [], cred }) {
+  const myGuid = normalizeSwid(cred?.swid || '');
+  if (!myGuid) return [];
+
+  const thisYear = new Date().getUTCFullYear();
+  const seasons = season ? [season] : Array.from({length:7}, (_,i)=>thisYear-i);
+  const games = ['ffl','flb','fba','fhl'];
+
+  const discovered = [];
+  for (const g of games) {
+    for (const y of seasons) {
+      const leagues = await listOwnerLeagues(g, y, myGuid, cred);
+      for (const L of leagues) {
+        discovered.push({ game: L.game, season: L.season, leagueId: L.leagueId, bundle: L.bundle || null });
+      }
+    }
+  }
+
+  // dedupe
+  const seen = new Set();
+  const todo = [];
+  for (const d of discovered) {
+    const k = `${d.game}|${d.season}|${d.leagueId}`;
+    if (!seen.has(k)) { seen.add(k); todo.push(d); }
+  }
+
+  // write
+  const results = [];
+  for (const d of todo) {
+    try {
+      const bundle = d.bundle || await fetchLeagueBundle(d.game, d.season, d.leagueId, cred);
+      const write  = await upsertLeagueIntoSportTable(d.game, d.season, d.leagueId, bundle);
+      results.push({ ...d, queued:true, write });
+    } catch (e) {
+      results.push({ ...d, queued:false, reason: e.message || 'probe_or_write_failed' });
+    }
+  }
+  return results.map(({bundle, ...x})=>x);
+}
+
 
 // ---------------- ESPN cred resolution ----------------
 async function getCredForRequest(req) {
@@ -492,29 +510,77 @@ async function linkHandler(req, res) {
   }
 }
 router.use(maybeHydrateS2Cookie);
-router.get('/link',  linkHandler);
+//router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
+// REPLACE your /api/espn/link (or wherever you set SWID/S2 cookies) with this
+router.get('/link', async (req, res) => {
+  try {
+    const swid = normalizeSwid(req.query.swid || '');
+    const s2   = normalizeS2(req.query.s2 || '');
+    const to   = String(req.query.to || '/fein/');
+    const memberId = await getAuthedMemberId(req); // may be null/GHOST
+
+    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_params' });
+
+    // see if SWID already belongs to someone else
+    const { rows } = await pool.query(
+      `SELECT c.member_id, f.display_name, f.avatar_url
+         FROM ff_espn_cred c
+         LEFT JOIN ff_espn_fan f ON f.swid = c.swid
+        WHERE c.swid = $1
+        ORDER BY c.last_seen DESC NULLS LAST
+        LIMIT 1`,
+      [swid]
+    );
+
+    if (rows[0]?.member_id && memberId && rows[0].member_id !== memberId) {
+      // ❌ different owner — do NOT rebind; show who owns it
+      res.status(409).json({
+        ok: false,
+        error: 'espn_account_owned',
+        owner: {
+          member_id: rows[0].member_id,
+          display_name: rows[0].display_name || 'ESPN user',
+          avatar_url: rows[0].avatar_url || null,
+          ring: '#7f5af0' // hex ring; pick any brand color
+        },
+        actions: { changeAccount: true, verifyOptions: ['email','sms'] }
+      });
+      return;
+    }
+
+    // set cookies for this browser
+    res.cookie('SWID', swid, { httpOnly:true, sameSite:'lax', secure:true, domain:'fortifiedfantasy.com', path:'/' });
+    res.cookie('espn_s2', s2,   { httpOnly:true, sameSite:'lax', secure:true, domain:'fortifiedfantasy.com', path:'/' });
+
+    // persist only for real (non-ghost) users
+    if (memberId && !/^GHOST/i.test(memberId)) {
+      await safeSaveCredWithMember({ swid, s2, memberId, ref: 'link' });
+      await ensureQuickSnap(memberId, swid);
+    }
+
+    // redirect back to FEIN
+    res.redirect(302, to);
+  } catch (e) {
+    console.error('[espn/link]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
 
 router.get('/cred', async (req, res) => {
   try {
-    const c = req.cookies || {};
-    const h = req.headers || {};
-    const theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
-    const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
-    const memberId = await getAuthedMemberId(req);
-
+    // ... existing extraction ...
     if (memberId && theSwid && !isGhost(memberId)) {
       await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-      await ensureQuickSnap(memberId, theSwid);
+      await ensureQuickSnap(memberId, theSwid); // now safe, no duplicate error
     }
-
-    res.set('Cache-Control', 'no-store');
-    return res.json({ ok: true, hasCookies: !!(theSwid && s2) });
+    res.set('Cache-Control','no-store').json({ ok:true, hasCookies: !!(theSwid && s2) });
   } catch (e) {
     console.error('[espn/cred] error:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 

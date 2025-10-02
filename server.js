@@ -16,6 +16,11 @@ const createImagesRouter = require('./src/routes/images');
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+// add once in server.js
+app.post('/api/fein/react', express.json(), (req, res) => {
+  // TODO: write to reactions tables later. For now, accept and no-op.
+  res.status(204).end();
+});
 
 // ===== FEIN bootstrap guard (legacy asset that some builds still request) =====
 app.get(['/fein/fein-espn-bootstrap.js'], (_req, res) => {
