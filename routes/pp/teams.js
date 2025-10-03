@@ -11,7 +11,7 @@ if (!pool || typeof pool.query !== 'function') {
 
 const router = express.Router();
 
-// map any platform input to the set of equivalent codes we store
+// Normalize platform inputs to the set of codes we store
 function platformAliases(p) {
   if (!p) return null;
   const v = String(p).toLowerCase().trim();
@@ -30,6 +30,8 @@ function platformAliases(p) {
  *  - member_id  optional
  *  - visibility optional (if omitted, do NOT filter on it)
  *  - status     optional (if omitted, do NOT filter on it)
+ *  - week       optional (number). If provided, returns a roster snapshot
+ *               from ff_sport_ffl.scoring_json for that scoring period.
  *
  * NOTE: We DO NOT hard-filter visibility/status anymore. If you want that,
  * pass visibility=public&status=active explicitly.
@@ -46,6 +48,10 @@ router.get('/teams', async (req, res) => {
     const visibility = req.query.visibility != null ? String(req.query.visibility) : null;
     const status     = req.query.status     != null ? String(req.query.status)     : null;
 
+    // optional week (for roster snapshot)
+    const week = req.query.week != null ? Number(req.query.week) : null;
+    const hasWeek = Number.isFinite(week) && week > 0;
+
     if (sport !== 'ffl') {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
@@ -61,24 +67,27 @@ router.get('/teams', async (req, res) => {
     if (handle)   { conds.push(`handle = $${p++}`);     params.push(handle); }
     if (memberId) { conds.push(`member_id = $${p++}`);  params.push(memberId); }
 
-    // Only constrain on visibility/status if explicitly passed.
-    // If you prefer treating NULL as a default, uncomment the COALESCE lines below.
+    // Only constrain on visibility/status if explicitly passed
     if (visibility != null) { conds.push(`visibility = $${p++}`); params.push(visibility); }
-    if (status     != null) { conds.push(`status = $${p++}`);     params.push(status); }
+    if (status     != null) { conds.push(`status     = $${p++}`); params.push(status); }
 
-    // Alternative (treat NULL as defaults):
-    // if (visibility != null) { conds.push(`COALESCE(visibility,'public') = $${p++}`); params.push(visibility); }
-    // if (status     != null) { conds.push(`COALESCE(status,'active')     = $${p++}`); params.push(status); }
+    // Dynamic select list: include roster_json when week is requested
+    const selectRoster =
+      hasWeek
+        ? `, scoring_json -> $${p++} AS roster_json`
+        : `, NULL::jsonb AS roster_json`;
+    if (hasWeek) params.push(String(week)); // JSONB key is text
 
     const sql = `
       SELECT
         season,
-        league_id::text  AS "leagueId",
-        team_id::text    AS "teamId",
-        NULLIF(team_name,'')                    AS "teamNameRaw",
-        COALESCE(league_name,'League')          AS "leagueName",
-        COALESCE(league_size,0)                 AS "leagueSize",
-        COALESCE(team_logo_url,'')              AS "logo"
+        league_id::text                       AS "leagueId",
+        team_id::text                         AS "teamId",
+        NULLIF(team_name,'')                  AS "teamNameRaw",
+        COALESCE(league_name,'League')        AS "leagueName",
+        COALESCE(league_size,0)               AS "leagueSize",
+        COALESCE(team_logo_url,'')            AS "logo"
+        ${selectRoster}
       FROM ff_sport_ffl
       WHERE ${conds.join(' AND ')}
       ORDER BY league_id::text, team_id::text
@@ -86,18 +95,35 @@ router.get('/teams', async (req, res) => {
 
     const { rows } = await pool.query(sql, params);
 
-    // better fallback for empty names
-    const teams = rows.map(r => ({
-      season,
-      leagueId: r.leagueId,
-      teamId:   r.teamId,
-      teamName: r.teamNameRaw || `Team ${r.teamId}`,
-      leagueName: r.leagueName,
-      leagueSize: r.leagueSize,
-      logo: r.logo,
-    }));
+    const teams = rows.map(r => {
+      const base = {
+        season,
+        leagueId: r.leagueId,
+        teamId:   r.teamId,
+        teamName: r.teamNameRaw || `Team ${r.teamId}`,
+        leagueName: r.leagueName,
+        leagueSize: r.leagueSize,
+        logo: r.logo,
+      };
 
-    return res.json({ ok:true, season, sport, count: teams.length, teams });
+      // If a week was requested and we have roster_json, pass it along
+      // (shape depends on how you store scoring_json; we just forward it)
+      if (hasWeek && r.roster_json != null) {
+        // pg returns JSONB as native JS; no parse needed
+        base.roster = r.roster_json;
+      }
+
+      return base;
+    });
+
+    return res.json({
+      ok: true,
+      sport,
+      season,
+      ...(hasWeek ? { week } : {}),
+      count: teams.length,
+      teams
+    });
   } catch (err) {
     console.error('[pp/teams] error', err);
     res.status(500).json({ ok:false, error:'internal_error' });
