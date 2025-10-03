@@ -436,9 +436,19 @@ router.post('/upsert', async (req, res) => {
     const oldKey = cur.rows[0]?.image_key || null;
 
     // ---- normalize profile fields ----
-    const handle = b.handle ? normHandle(b.handle) : null;
-    let color    = b.color_hex ? normHex(b.color_hex) : null;   // '#RRGGBB' or null
-    const image_key = stripCdn(b.image_key || b.image_url || '') || null;
+   // ---- normalize profile fields ----
+const handle = b.handle ? normHandle(b.handle) : null;
+let color    = b.color_hex ? normHex(b.color_hex) : null;   // '#RRGGBB' or null
+
+let image_key = stripCdn(b.image_key || b.image_url || '') || null;
+
+// ✅ force anon folder
+if (image_key && /^avatars\//.test(image_key)) {
+  // grab just the filename after the last slash
+  const filename = image_key.split('/').pop();
+  image_key = `avatars/anon/${filename}`;
+}
+
 
     if (handle && !isHandleShape(handle)) {
       return res.status(400).json({ ok:false, error:'bad_handle' });
