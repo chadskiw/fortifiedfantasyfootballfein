@@ -226,24 +226,30 @@ router.get('/teams', ensureCredFromDB, async (req,res)=>{
 /**
  * GET /api/platforms/espn/roster?season=2025&leagueId=...&teamId=7&week=2
  */
-router.get('/roster', ensureCredFromDB, async (req,res)=>{
-  try{
+router.get('/roster', ensureCredFromDB, async (req, res) => {
+  try {
     const { season, leagueId, teamId } = req.query;
-    const week = req.query.week ? Number(req.query.week) : undefined;
+    const weekNum = req.query.week != null ? Number(req.query.week) : undefined;
+
     if (!season || !leagueId || !teamId) {
-      return res.status(400).json({ ok:false, error:'season, leagueId, teamId required' });
+      return res.status(400).json({ ok: false, error: 'season, leagueId, teamId required' });
     }
 
     const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-    const view = week ? `mRoster&scoringPeriodId=${week}` : 'mRoster';
-    const url  = `${base}?forTeamId=${teamId}&view=${view}`;
+    const url = new URL(base);
+    url.searchParams.set('view', 'mRoster');          // <-- always a separate param
+    url.searchParams.set('forTeamId', String(teamId));
+    if (Number.isFinite(weekNum) && weekNum > 0) {
+      url.searchParams.set('scoringPeriodId', String(weekNum)); // <-- separate param
+    }
 
-    const data = await espnFetchJSON(url, req._espn);
+    const data = await espnFetchJSON(url.toString(), req._espn); // req._espn should contain { swid, s2 }
     const team = (data.teams || []).find(t => String(t.id) === String(teamId)) || {};
-    const entries = (team.roster && team.roster.entries) || [];
-    res.json({ ok:true, entries });
-  }catch(e){
-    res.status(e.status || 500).json({ ok:false, error:e.message });
+    const entries = team?.roster?.entries || [];
+
+    res.json({ ok: true, entries });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
 

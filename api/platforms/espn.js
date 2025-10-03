@@ -58,9 +58,10 @@ router.get('/teams', async (req, res) => {
 router.get('/roster', async (req, res) => {
   try {
     const season = Number(req.query.season);
+    const week =  Number(req.query.week);
     const leagueId = String(req.query.leagueId || '');
     const teamId = String(req.query.teamId || '');
-    const week = req.query.week != null ? Number(req.query.week) : undefined;
+    //const week = req.query.week != null ? Number(req.query.week) : undefined;
     if (!season || !leagueId || !teamId) return res.status(400).json({ ok:false, error:'season, leagueId, teamId required' });
 
     const { swid, s2 } = readEspnCreds(req);
