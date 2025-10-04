@@ -2,10 +2,11 @@
 // Mount:
 //   const espnRouter = require('./routes/espn');
 //   app.use('/api/platforms/espn', espnRouter);
-import images from "./images.js";
 
 const express = require('express');
 const crypto  = require('crypto');
+const images  = require('./images'); // <- use require instead of import
+
 const router  = express.Router();
 
 let db;
