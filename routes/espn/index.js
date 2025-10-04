@@ -2,6 +2,7 @@
 // Mount:
 //   const espnRouter = require('./routes/espn');
 //   app.use('/api/platforms/espn', espnRouter);
+import images from "./images.js";
 
 const express = require('express');
 const crypto  = require('crypto');
@@ -579,7 +580,7 @@ async function linkHandler(req, res) {
     return bad(res, 500, 'link_failed');
   }
 }
-
+router.use(images);
 router.use(maybeHydrateS2Cookie);
 //router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
