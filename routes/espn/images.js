@@ -1,7 +1,10 @@
-import express from "express";
-import fetch from "node-fetch";
+const express = require('express');
+const fetch   = require('node-fetch');
+const crypto  = require('crypto');
+const images  = require('./images');
 
-const router = express.Router();
+const router  = express.Router();
+
 
 // GET /api/platforms/espn/image/:id   → streams an authenticated mystique image
 router.get("/image/:id", async (req, res) => {
