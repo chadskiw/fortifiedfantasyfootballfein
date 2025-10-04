@@ -1,65 +1,74 @@
+// /src/routes/platforms/espn/images.js (CommonJS)
+
 const express = require('express');
-const fetch   = require('node-fetch');
-const crypto  = require('crypto');
-const images  = require('./images');
+const { Readable } = require('stream');
 
 const router  = express.Router();
 
-
-// GET /api/platforms/espn/image/:id   → streams an authenticated mystique image
-router.get("/image/:id", async (req, res) => {
+// GET /api/platforms/espn/image/:id → streams an authenticated Mystique image
+router.get('/image/:id', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // accept bare GUIDs like 583c0de0-878b-11f0-b6e4-9dd13c0fbbe2
     if (!id || !/^[0-9a-f-]{32,}$/i.test(id)) {
-      return res.status(400).json({ ok:false, error:"bad id" });
+      return res.status(400).json({ ok: false, error: 'bad id' });
     }
 
-    // Pull creds from headers (you already CORS-allow x-espn-swid/x-espn-s2)
-    const swid = (req.get("x-espn-swid") || req.cookies?.swid || "").trim();
-    const s2   = (req.get("x-espn-s2")   || req.cookies?.espn_s2 || "").trim();
+    // ESPN creds (prefer your own session store; headers are okay too)
+    const swid = (req.get('x-espn-swid') || req.cookies?.swid || '').trim();
+    const s2   = (req.get('x-espn-s2')   || req.cookies?.espn_s2 || '').trim();
 
     if (!swid || !s2) {
-      // Don’t leak: just 401 (client can fall back to default logo)
-      return res.status(401).json({ ok:false, error:"missing espn auth" });
+      // Not authenticated → let client fall back to a default
+      return res.status(401).json({ ok: false, error: 'missing espn auth' });
     }
 
     const url = `https://mystique-api.fantasy.espn.com/apis/v1/domains/lm/images/${encodeURIComponent(id)}`;
 
     const upstream = await fetch(url, {
       headers: {
-        "Cookie": `SWID=${swid}; espn_s2=${s2}`,
-        // UA helps some ESPNi edges
-        "User-Agent": "FortifiedFantasy/1.0 (+https://fortifiedfantasy.com)",
-        "Accept": "image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5",
+        Cookie: `SWID=${swid}; espn_s2=${s2}`,
+        'User-Agent': 'FortifiedFantasy/1.0 (+https://fortifiedfantasy.com)',
+        Accept: 'image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5',
       },
-      redirect: "follow",
+      redirect: 'follow',
     });
 
     if (!upstream.ok) {
-      // 404/401 → generic helmet
-      res.status(200)
-        .set("Cache-Control", "public, max-age=600") // 10m
-        .set("Content-Type", "image/svg+xml")
+      // Fallback SVG (cache a little to avoid hammering)
+      return res
+        .status(200)
+        .set('Cache-Control', 'public, max-age=600')
+        .set('Content-Type', 'image/svg+xml')
         .send(DEFAULT_SVG);
-      return;
     }
 
-    // Pass through content-type & caching
+    // Pass through headers
+    const ct = upstream.headers.get('content-type') || 'image/png';
+    const et = upstream.headers.get('etag');
+    const cc = upstream.headers.get('cache-control') || 'public, max-age=3600';
+
     res.status(200);
-    const ct = upstream.headers.get("content-type") || "image/png";
-    const et = upstream.headers.get("etag");
-    const cc = upstream.headers.get("cache-control") || "public, max-age=3600";
+    res.set('Content-Type', ct);
+    if (et) res.set('ETag', et);
+    res.set('Cache-Control', cc);
 
-    res.set("Content-Type", ct);
-    if (et) res.set("ETag", et);
-    res.set("Cache-Control", cc);
-
-    // Stream body
-    upstream.body.pipe(res);
+    // Stream body (WHATWG → Node)
+    if (upstream.body) {
+      // Node 18+: convert Web stream to Node stream
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      // Fallback: buffer then send
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.end(buf);
+    }
   } catch (err) {
-    res.status(200)
-      .set("Cache-Control", "public, max-age=600")
-      .set("Content-Type", "image/svg+xml")
+    // Safe default
+    res
+      .status(200)
+      .set('Cache-Control', 'public, max-age=600')
+      .set('Content-Type', 'image/svg+xml')
       .send(DEFAULT_SVG);
   }
 });
@@ -72,4 +81,4 @@ const DEFAULT_SVG = `
         font-family="system-ui, -apple-system, Segoe UI, Roboto" font-size="28" fill="#9fb2c9">FF</text>
 </svg>`.trim();
 
-export default router;
+module.exports = router;
