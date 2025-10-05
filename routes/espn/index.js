@@ -292,18 +292,41 @@ async function ensureSportArtifacts(game) {
 }
 
 // ---------------- auth/session helpers ----------------
+// ---------------- auth/session helpers ----------------
 async function getAuthedMemberId(req) {
   const c = req.cookies || {};
+  const h = req.headers || {};
+
+  // 1) Normal cookie-based auth
   const memberId  = (c.ff_member_id || '').trim();
   const sessionId = (c.ff_session_id || '').trim();
   const logged    = (c.ff_logged_in || '') === '1';
-  if (!memberId || !sessionId || !logged) return null;
-  const { rows } = await pool.query(
-    `SELECT 1 FROM ff_session WHERE session_id = $1 AND member_id = $2 LIMIT 1`,
-    [sessionId, memberId]
-  );
-  return rows.length ? memberId : null;
+  if (memberId && sessionId && logged) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ff_session WHERE session_id = $1 AND member_id = $2 LIMIT 1`,
+      [sessionId, memberId]
+    );
+    if (rows.length) return memberId;
+  }
+
+  // 2) Backend-trusted header (from your linker on CF Pages)
+  //    Only accept if the member actually exists.
+  const headerMember = (h['x-fein-key'] || h['x-member-id'] || '').toString().trim();
+  if (headerMember) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ff_member WHERE member_id = $1 LIMIT 1`,
+      [headerMember]
+    );
+    if (rows.length) {
+      // Optionally: guarantee a session row so subsequent cookie hydration works
+      await getOrCreateSessionId(headerMember, c.ff_session_id || null);
+      return headerMember;
+    }
+  }
+
+  return null;
 }
+
 
 async function getS2ForMember(memberId) {
   if (!memberId) return null;
@@ -1175,31 +1198,36 @@ async function safeSaveCredWithMember({ swid, s2, memberId, ref }) {
 // Accepts either a specific seed league OR runs a fan-wide ingest if no params are given.
 router.post('/ingest/espn/fan', ensureCred, async (req, res) => {
   try {
-    const memberId = await getAuthedMemberId(req); // may be null/GHOST
+    const memberId      = await getAuthedMemberId(req); // may be null/GHOST
     const seasonParam   = req.query?.season ?? req.body?.season ?? null;
     const leagueIdParam = req.query?.leagueId ?? req.body?.leagueId ?? null;
-    const season   = Number.isFinite(+seasonParam) ? +seasonParam : null;
-    const leagueId = (leagueIdParam ?? '').toString().trim() || null;
+    const season        = Number.isFinite(+seasonParam) ? +seasonParam : null;
+    const leagueId      = (leagueIdParam ?? '').toString().trim() || null;
 
     const c = req.cookies || {};
     const h = req.headers || {};
-    const hasInlineCreds = !!((c.SWID || c.swid || h['x-espn-swid']) && (c.espn_s2 || c.ESPN_S2 || h['x-espn-s2']));
-    if (!hasInlineCreds && !memberId) return res.status(401).json({ ok:false, error:'unauthorized' });
+
+    const hdrSwid = normalizeSwid(h['x-espn-swid'] || h['x-swid'] || '');
+    const hdrS2   = normalizeS2(h['x-espn-s2']   || h['x-s2']   || '');
+
+    const allowAnonViaCookies = !!((c.SWID || c.swid || h['x-espn-swid']) && (c.espn_s2 || c.ESPN_S2 || h['x-espn-s2']));
+    if (!allowAnonViaCookies && !memberId) {
+      return res.status(401).json({ ok:false, error:'unauthorized' });
+    }
+
+    // 🔐 NEW: persist creds for real members in ALL modes (seed or fan-wide)
+    if (hdrSwid && hdrS2 && memberId && !isGhost(memberId)) {
+      await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
+      try { await ensureQuickSnap(memberId, hdrSwid); } catch {}
+    }
 
     // If caller supplied both season & leagueId → seed ALL games first
     if (season && leagueId) {
       const seedAll = await seedWriteAllGames(season, leagueId, req._espn);
-      // Persist creds only for non-ghost members
-      const hdrSwid = normalizeSwid(h['x-espn-swid'] || h['x-swid'] || '');
-      const hdrS2   = normalizeS2(h['x-espn-s2']   || h['x-s2']   || '');
-      if (hdrSwid && hdrS2 && memberId && !isGhost(memberId)) {
-        await safeSaveCredWithMember({ swid: hdrSwid, s2: hdrS2, memberId, ref: 'ingest' });
-        await ensureQuickSnap(memberId, hdrSwid);
-      }
       return res.status(202).json({ ok:true, accepted:true, season, leagueId:String(leagueId), seedSnapshot: seedAll });
     }
 
-    // Fan-wide mode (no params) — keep your existing discovery logic here
+    // Fan-wide mode (no params)
     const fanWide = await runFanDiscoveryForCurrentOwner({ season: null, leagueId: null, mapped: [], cred: req._espn });
     return res.json({ ok:true, mode:'fan-wide', discovered: fanWide });
   } catch (e) {
