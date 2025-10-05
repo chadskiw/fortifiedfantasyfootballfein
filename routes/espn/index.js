@@ -636,7 +636,13 @@ router.get('/link', async (req, res) => {
     const to   = String(req.query.to || '/fein/');
     const memberId = await getAuthedMemberId(req); // may be null/GHOST
 
-    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_params', need:{ swid:!swid, espn_s2:!s2 } });
+    if (!swid || !s2) {
+      return res.status(400).json({
+        ok: false,
+        error: 'missing_params',
+        need: { swid: !swid, espn_s2: !s2 }
+      });
+    }
 
     // Optional owner check (leave as-is if you like)
     const { rows } = await pool.query(
@@ -663,49 +669,50 @@ router.get('/link', async (req, res) => {
     }
 
     // Cookie base
-    const cookieBase = { httpOnly:true, sameSite:'Lax', secure:true, path:'/' };
+    const cookieBase = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/' };
 
-    // Set BOTH cookies for s2
+    // Set BOTH cases for S2 + SWID
     res.cookie('SWID', swid, { ...cookieBase });
     res.cookie('espn_s2', s2, { ...cookieBase });
     res.cookie('ESPN_S2', s2, { ...cookieBase });
 
-try {
-  // background kick: discover & write all leagues for this owner
-  const origin = `${req.protocol}://${req.get('host')}`;
-  const headers = {
-    'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
-    'x-espn-s2': s2,
-  };
-  if (memberId && !/^GHOST/i.test(memberId)) headers['x-fein-key'] = String(memberId);
+    // Persist creds for real (non-ghost) users
+    if (memberId && !/^GHOST/i.test(memberId)) {
+      try {
+        await safeSaveCredWithMember({ swid, s2, memberId, ref: 'link', source: 'link' });
+        await ensureQuickSnap(memberId, swid);
+      } catch (e) {
+        console.warn('[espn/link:GET] cred save skipped', e.message);
+      }
+    }
 
-  // don’t await; we just nudge it
-  fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
-    method: 'POST',
-    headers,
-  }).catch(()=>{ /* ignore */ });
-} catch {}
-// kick off fan-wide ingest in the background; do not await
-try {
-  const origin = `${req.protocol}://${req.get('host')}`;
-  const hdrs = {
-    'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
-    'x-espn-s2': s2,
-  };
-  if (memberId && !/^GHOST/i.test(memberId)) hdrs['x-fein-key'] = String(memberId);
+    // Fire-and-forget fan-wide ingest (single kick, no duplicate tries)
+    try {
+      const origin = `${req.protocol}://${req.get('host')}`;
+      const headers = {
+        'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
+        'x-espn-s2': s2,
+      };
+      if (memberId && !/^GHOST/i.test(memberId)) headers['x-fein-key'] = String(memberId);
 
-  fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
-    method: 'POST',
-    headers: hdrs,
-  }).catch(() => {});
-} catch {}
+      console.log('[link→ingest kick]', { origin, hasSwid: !!swid, hasS2: !!s2, memberId });
+      fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
+        method: 'POST',
+        headers,
+        keepalive: true, // don’t hold up the redirect
+      }).catch(err => console.warn('[link→ingest kick] fetch failed', err.message));
+    } catch (e) {
+      console.warn('[link→ingest kick] init failed', e.message);
+    }
 
+    // Done — bounce to target
     res.redirect(302, to);
   } catch (e) {
     console.error('[espn/link:GET]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
+    res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
 
 
 
