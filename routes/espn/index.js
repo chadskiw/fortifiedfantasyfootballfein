@@ -1114,12 +1114,12 @@ async function safeSaveCredWithMember({ swid, s2, memberId, ref = null, source =
     // 1) Upsert core fields (do NOT touch ref here)
     await client.query(
       `
-      INSERT INTO ff_espn_cred (member_id, swid, s2, source, updated_at)
+      INSERT INTO ff_espn_cred (member_id, swid, espn_s2, source, updated_at)
       VALUES ($1, $2, $3, $4, NOW())
       ON CONFLICT (member_id)
       DO UPDATE SET
         swid       = EXCLUDED.swid,
-        s2         = EXCLUDED.s2,
+        espn_s2         = EXCLUDED.espn_s2,
         source     = EXCLUDED.source,
         updated_at = NOW()
       `,
