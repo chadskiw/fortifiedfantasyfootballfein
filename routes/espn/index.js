@@ -670,17 +670,21 @@ router.get('/link', async (req, res) => {
     res.cookie('espn_s2', s2, { ...cookieBase });
     res.cookie('ESPN_S2', s2, { ...cookieBase });
 
-    // Persist for real (non-ghost) users
-    if (memberId && !/^GHOST/i.test(memberId)) {
-      await safeSaveCredWithMember({ swid, s2, memberId, ref: 'link' });
-      await ensureQuickSnap(memberId, swid);
-    }
+try {
+  // background kick: discover & write all leagues for this owner
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const headers = {
+    'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
+    'x-espn-s2': s2,
+  };
+  if (memberId && !/^GHOST/i.test(memberId)) headers['x-fein-key'] = String(memberId);
 
-    // Ensure FF session cookies + row
-    const sessId = await getOrCreateSessionId(memberId || 'GHOST', req.cookies?.ff_session_id || null);
-    res.cookie('ff_logged_in', '1', { ...cookieBase, httpOnly: false });
-    res.cookie('ff_member_id', memberId || 'GHOST', { ...cookieBase, httpOnly:false });
-    res.cookie('ff_session_id', sessId, cookieBase);
+  // don’t await; we just nudge it
+  fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
+    method: 'POST',
+    headers,
+  }).catch(()=>{ /* ignore */ });
+} catch {}
 
     res.redirect(302, to);
   } catch (e) {
