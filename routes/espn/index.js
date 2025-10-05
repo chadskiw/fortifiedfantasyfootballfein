@@ -40,12 +40,12 @@ function safeNextURL(req, fallback = '/fein') {
   } catch { return fallback; }
 }
 // FILE: src/routes/espn/cred-helpers.js (or inline where you build req._espn)
-export function pickSwid(req) {
+function pickSwid(req) {
   const h = req.headers || {};
   const c = req.cookies || {};
   return (h['x-espn-swid'] || h['x-swid'] || c.SWID || c.swid || '').toString();
 }
-export function pickS2(req) {
+function pickS2(req) {
   const h = req.headers || {};
   const c = req.cookies || {};
   // NOTE: espn_s2 is primary cookie/param name in your system.
@@ -62,10 +62,11 @@ function normalizeSwid(raw) {
 function normalizeS2(raw) {
   if (!raw) return null;
   let s = String(raw);
-  try { s = decodeURIComponent(s); } catch {}
-  s = s.replace(/ /g, '+').trim();
+  try { s = decodeURIComponent(s); } catch {}       // handle %2B, %2F, etc
+  s = s.replace(/ /g, '+').trim();                  // guard against space-vs-plus mangling
   return s || null;
 }
+
 const GAMES = ['ffl','fba','flb','fhl'];
 
 // Try to list leagues for the given owner (works only for the owner whose S2 we have)
@@ -583,8 +584,10 @@ async function espnFetchJSON(url, cred, init = {}) {
 async function linkHandler(req, res) {
   try {
     const swid = normalizeSwid(req.body?.swid ?? req.query?.swid);
-    const s2   = normalizeS2(req.body?.s2   ?? req.query?.s2);
+    // PRIMARY: espn_s2, FALLBACK: s2 (legacy)
+    const s2   = normalizeS2(req.body?.espn_s2 ?? req.query?.espn_s2 ?? req.body?.s2 ?? req.query?.s2);
     if (!swid) return bad(res, 400, 'missing_swid');
+    if (!s2)   return bad(res, 400, 'missing_espn_s2');
 
     const memberId = await getAuthedMemberId(req);
     const ref = (req.query?.ref || req.body?.ref || '').toString().slice(0, 64) || null;
@@ -594,19 +597,22 @@ async function linkHandler(req, res) {
       await ensureQuickSnap(memberId, swid);
     }
 
-    // ESPN cookies
+    // Cookies (1 year, secure)
     const maxYear = 1000 * 60 * 60 * 24 * 365;
     const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: maxYear };
+
+    // Set BOTH cases for compatibility across older/newer code paths
     res.cookie('SWID', swid, base);
-    if (s2) res.cookie('espn_s2', s2, base);
+    res.cookie('espn_s2', s2, base);
+    res.cookie('ESPN_S2', s2, base);
+
+    // Frontend flags
     res.cookie('fein_has_espn', '1', { ...base, httpOnly: false, maxAge: 1000 * 60 * 60 * 24 * 90 });
 
-    // 🔑 Ensure FF session cookies + row
+    // Ensure FF session cookies + row
     const sessId = await getOrCreateSessionId(memberId || 'GHOST', req.cookies?.ff_session_id || null);
-    // visible-to-JS flags
     res.cookie('ff_logged_in', '1', { ...base, httpOnly: false });
     res.cookie('ff_member_id', memberId || 'GHOST', { ...base, httpOnly: false });
-    // httpOnly for the session id
     res.cookie('ff_session_id', sessId, base);
 
     const next = safeNextURL(req, '/fein');
@@ -616,6 +622,7 @@ async function linkHandler(req, res) {
     return bad(res, 500, 'link_failed');
   }
 }
+
 router.use(images);
 router.use(maybeHydrateS2Cookie);
 //router.get('/link',  linkHandler);
@@ -624,13 +631,14 @@ router.post('/link', linkHandler);
 router.get('/link', async (req, res) => {
   try {
     const swid = normalizeSwid(req.query.swid || '');
-    const s2   = normalizeS2(req.query.s2 || '');
+    // PRIMARY: espn_s2, FALLBACK: s2 (legacy)
+    const s2   = normalizeS2(req.query.espn_s2 || req.query.ESPN_S2 || req.query.s2 || '');
     const to   = String(req.query.to || '/fein/');
     const memberId = await getAuthedMemberId(req); // may be null/GHOST
 
-    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_params' });
+    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_params', need:{ swid:!swid, espn_s2:!s2 } });
 
-    // Check if SWID already bound to a different member (if both present)
+    // Optional owner check (leave as-is if you like)
     const { rows } = await pool.query(
       `SELECT c.member_id, f.display_name, f.avatar_url
          FROM ff_espn_cred c
@@ -640,7 +648,6 @@ router.get('/link', async (req, res) => {
         LIMIT 1`,
       [swid]
     );
-
     if (rows[0]?.member_id && memberId && rows[0].member_id !== memberId) {
       return res.status(409).json({
         ok: false,
@@ -655,10 +662,13 @@ router.get('/link', async (req, res) => {
       });
     }
 
-    // ESPN cookies
+    // Cookie base
     const cookieBase = { httpOnly:true, sameSite:'Lax', secure:true, path:'/' };
+
+    // Set BOTH cookies for s2
     res.cookie('SWID', swid, { ...cookieBase });
     res.cookie('espn_s2', s2, { ...cookieBase });
+    res.cookie('ESPN_S2', s2, { ...cookieBase });
 
     // Persist for real (non-ghost) users
     if (memberId && !/^GHOST/i.test(memberId)) {
@@ -666,11 +676,11 @@ router.get('/link', async (req, res) => {
       await ensureQuickSnap(memberId, swid);
     }
 
-    // 🔑 Ensure FF session cookies + row
+    // Ensure FF session cookies + row
     const sessId = await getOrCreateSessionId(memberId || 'GHOST', req.cookies?.ff_session_id || null);
-    res.cookie('ff_logged_in', '1', { ...cookieBase, httpOnly: false });          // readable by FE
+    res.cookie('ff_logged_in', '1', { ...cookieBase, httpOnly: false });
     res.cookie('ff_member_id', memberId || 'GHOST', { ...cookieBase, httpOnly:false });
-    res.cookie('ff_session_id', sessId, cookieBase);                               // httpOnly
+    res.cookie('ff_session_id', sessId, cookieBase);
 
     res.redirect(302, to);
   } catch (e) {
@@ -678,6 +688,7 @@ router.get('/link', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
