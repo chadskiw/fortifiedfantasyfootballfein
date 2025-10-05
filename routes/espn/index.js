@@ -39,6 +39,18 @@ function safeNextURL(req, fallback = '/fein') {
     return (sameHost || isRel) ? (u.pathname + (u.search || '') + (u.hash || '')) : fallback;
   } catch { return fallback; }
 }
+// FILE: src/routes/espn/cred-helpers.js (or inline where you build req._espn)
+export function pickSwid(req) {
+  const h = req.headers || {};
+  const c = req.cookies || {};
+  return (h['x-espn-swid'] || h['x-swid'] || c.SWID || c.swid || '').toString();
+}
+export function pickS2(req) {
+  const h = req.headers || {};
+  const c = req.cookies || {};
+  // NOTE: espn_s2 is primary cookie/param name in your system.
+  return (h['x-espn-s2'] || h['x-s2'] || c.ESPN_S2 || c.espn_s2 || '').toString();
+}
 
 function normalizeSwid(raw) {
   if (!raw) return null;
