@@ -76,12 +76,12 @@ app.use('/api/platforms/espn', espnRouter);
 app.use('/api/espn-auth',      espnRouter); // alias
 app.use('/api/espn',           espnRouter); // legacy short base
 
-// Direct link alias → /api/espn/link (preserves query)
+/* Direct link alias → /api/espn/link (preserves query)
 app.get('/link', (req, res) => {
   const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
   res.redirect(302, `/api/espn/link${qs}`);
 });
-
+*/
 // ===== PP & identity/session routes =====
 app.use('/api/pp', require('./routes/pp/teams'));
 app.use('/api/whoami', require('./routes/whoami'));
