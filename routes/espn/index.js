@@ -669,44 +669,26 @@ router.get('/link', async (req, res) => {
 
 
 
-router.get('/cred', async (req, res) => {
+router.get('/cred', ensureCred, async (req, res) => {
   try {
-    const c = req.cookies || {};
-    const h = req.headers || {};
-    const theSwid = normalizeSwid(c.SWID || c.swid || c.ff_espn_swid || h['x-espn-swid'] || '');
-    const s2      = normalizeS2(c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || h['x-espn-s2'] || '');
-    const memberId = await getAuthedMemberId(req);
+    const memberId = await getAuthedMemberId(req); // may be null/ghost
+    const swid = pickSwid(req); // from headers/cookies (helper from previous msg)
+    const s2   = pickS2(req);
 
-    // Persist cred + quick snap if we have a real member + swid
-    if (memberId && theSwid && !isGhost(memberId)) {
-      await safeSaveCredWithMember({ swid: theSwid, s2, memberId, ref: 'cred-probe' });
-      try { await ensureQuickSnap(memberId, theSwid); } catch {}
+    if (memberId && swid && s2) {
+      // Pass a stable ref here; don't bounce it every call
+      const save = await safeSaveCredWithMember({ memberId, swid, s2, ref: 'cred', source: 'cred' });
+      if (!save.ok) console.warn('[cred] save skipped', save);
     }
 
-    // 🔑 NEW: if we’re authenticated but FF cookies aren’t set, set them and guarantee a session row.
-    const haveFF =
-      c.ff_logged_in === '1' &&
-      typeof c.ff_member_id === 'string' &&
-      typeof c.ff_session_id === 'string' && c.ff_session_id.length > 10;
-
-    if (memberId && !haveFF) {
-      const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: 1000*60*60*24*90 };
-      const sid  = await getOrCreateSessionId(memberId, c.ff_session_id || null);
-
-      // FE-readable flags
-      res.cookie('ff_logged_in', '1', { ...base, httpOnly: false });
-      res.cookie('ff_member_id', memberId, { ...base, httpOnly: false });
-
-      // httpOnly session id
-      res.cookie('ff_session_id', sid, base);
-    }
-
-    res.set('Cache-Control','no-store').json({ ok:true, hasCookies: !!(theSwid && s2) });
+    // Return a minimal OK payload; don't 500 the page
+    return res.json({ ok: true, memberId: memberId || null, has: { swid: !!swid, s2: !!s2 } });
   } catch (e) {
-    console.error('[espn/cred] error:', e);
-    res.status(500).json({ ok:false, error:'server_error' });
+    console.error('[espn/cred] unexpected', e);
+    return res.status(200).json({ ok: false, error: 'nonfatal', detail: 'cred-not-saved' });
   }
 });
+
 
 
 
@@ -1119,82 +1101,69 @@ async function ingestDiscoveredLeague({ game, season, leagueId }, cred) {
   }
 }
 // REPLACE the whole function with this version
-async function safeSaveCredWithMember({ swid, s2, memberId, ref }) {
-  const swidHash = sha256(swid);
-  const s2Val  = (s2 && String(s2).trim()) ? String(s2).trim() : null;
-  const s2Hash = s2Val ? sha256(s2Val) : null;
+// IN_USE: replace your current safeSaveCredWithMember with this version
+// FILE: src/routes/espn/index.js (or wherever it lives)
 
-  // Look up by SWID first
-  const { rows } = await pool.query(
-    `SELECT cred_id, member_id FROM ff_espn_cred WHERE swid = $1 LIMIT 1`,
-    [swid]
-  );
+async function safeSaveCredWithMember({ swid, s2, memberId, ref = null, source = 'ingest' }) {
+  if (!memberId || !swid || !s2) return { ok: false, reason: 'missing_fields' };
 
-  if (rows[0]?.cred_id) {
-    const credId = rows[0].cred_id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-    // If row already belongs to a different member, DO NOT rebind (respect the trigger).
-    if (rows[0].member_id && rows[0].member_id !== memberId) {
-      if (s2Val) {
-        await pool.query(
-          `UPDATE ff_espn_cred
-              SET swid_hash = $2,
-                  espn_s2   = $3,
-                  s2_hash   = $4,
-                  last_seen = now(),
-                  ref       = COALESCE($5, ref)
-            WHERE cred_id   = $1`,
-          [credId, swidHash, s2Val, s2Hash, ref || null]
+    // 1) Upsert core fields (do NOT touch ref here)
+    await client.query(
+      `
+      INSERT INTO ff_espn_cred (member_id, swid, s2, source, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (member_id)
+      DO UPDATE SET
+        swid       = EXCLUDED.swid,
+        s2         = EXCLUDED.s2,
+        source     = EXCLUDED.source,
+        updated_at = NOW()
+      `,
+      [memberId, swid, s2, source]
+    );
+
+    // 2) Handle ref in a ref-safe way (write-once contract)
+    if (ref) {
+      const { rows } = await client.query(
+        `SELECT ref FROM ff_espn_cred WHERE member_id = $1 FOR UPDATE`,
+        [memberId]
+      );
+      const current = rows.length ? rows[0].ref : null;
+
+      if (current === null) {
+        await client.query(
+          `UPDATE ff_espn_cred SET ref = $2, updated_at = NOW() WHERE member_id = $1`,
+          [memberId, ref]
         );
-      } else {
-        await pool.query(
-          `UPDATE ff_espn_cred
-              SET swid_hash = $2,
-                  last_seen = now(),
-                  ref       = COALESCE($3, ref)
-            WHERE cred_id   = $1`,
-          [credId, swidHash, ref || null]
+      } else if (current !== ref) {
+        // Respect trigger contract: null it first, then set the new value
+        await client.query(
+          `UPDATE ff_espn_cred SET ref = NULL, updated_at = NOW() WHERE member_id = $1`,
+          [memberId]
+        );
+        await client.query(
+          `UPDATE ff_espn_cred SET ref = $2,   updated_at = NOW() WHERE member_id = $1`,
+          [memberId, ref]
         );
       }
-      return { cred_id: credId, rebound: false, keptOwner: true };
+      // if equal, no-op
     }
 
-    // Same owner (or empty) → safe to set member_id and optionally s2
-    if (s2Val) {
-      await pool.query(
-        `UPDATE ff_espn_cred
-            SET swid_hash = $2,
-                member_id = $3,
-                espn_s2   = $4,
-                s2_hash   = $5,
-                last_seen = now(),
-                ref       = COALESCE($6, ref)
-         WHERE cred_id   = $1`,
-        [credId, swidHash, memberId, s2Val, s2Hash, ref || null]
-      );
-    } else {
-      await pool.query(
-        `UPDATE ff_espn_cred
-            SET swid_hash = $2,
-                member_id = $3,
-                last_seen = now(),
-                ref       = COALESCE($4, ref)
-         WHERE cred_id   = $1`,
-        [credId, swidHash, memberId, ref || null]
-      );
-    }
-    return { cred_id: credId, rebound: false, keptOwner: false };
+    await client.query('COMMIT');
+    return { ok: true };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('[safeSaveCredWithMember] error', e);
+    return { ok: false, error: 'db_error', detail: e.message };
+  } finally {
+    client.release();
   }
-
-  // Fresh insert
-  const ins = await pool.query(
-    `INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-     VALUES ($1, $2, $3, $4, $5, now(), now(), $6)
-     RETURNING cred_id`,
-    [swid, s2Val, swidHash, s2Hash, memberId, ref || null]
-  );
-  return ins.rows[0];
 }
+
 // Accepts either a specific seed league OR runs a fan-wide ingest if no params are given.
 router.post('/ingest/espn/fan', ensureCred, async (req, res) => {
   try {
