@@ -628,88 +628,47 @@ router.use(maybeHydrateS2Cookie);
 //router.get('/link',  linkHandler);
 router.post('/link', linkHandler);
 // REPLACE your /api/espn/link (or wherever you set SWID/S2 cookies) with this
+// Replace your existing router.get('/link', ...) with this version:
 router.get('/link', async (req, res) => {
   try {
     const swid = normalizeSwid(req.query.swid || '');
-    // PRIMARY: espn_s2, FALLBACK: s2 (legacy)
-    const s2   = normalizeS2(req.query.espn_s2 || req.query.ESPN_S2 || req.query.s2 || '');
+    const s2   = normalizeS2(req.query.s2 || '');
     const to   = String(req.query.to || '/fein/');
     const memberId = await getAuthedMemberId(req); // may be null/GHOST
 
-    if (!swid || !s2) {
-      return res.status(400).json({
-        ok: false,
-        error: 'missing_params',
-        need: { swid: !swid, espn_s2: !s2 }
-      });
-    }
+    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_params' });
 
-    // Optional owner check (leave as-is if you like)
-    const { rows } = await pool.query(
-      `SELECT c.member_id, f.display_name, f.avatar_url
-         FROM ff_espn_cred c
-         LEFT JOIN ff_espn_fan f ON f.swid = c.swid
-        WHERE c.swid = $1
-        ORDER BY c.last_seen DESC NULLS LAST
-        LIMIT 1`,
-      [swid]
-    );
-    if (rows[0]?.member_id && memberId && rows[0].member_id !== memberId) {
-      return res.status(409).json({
-        ok: false,
-        error: 'espn_account_owned',
-        owner: {
-          member_id: rows[0].member_id,
-          display_name: rows[0].display_name || 'ESPN user',
-          avatar_url: rows[0].avatar_url || null,
-          ring: '#7f5af0'
-        },
-        actions: { changeAccount: true, verifyOptions: ['email','sms'] }
-      });
-    }
-
-    // Cookie base
-    const cookieBase = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/' };
-
-    // Set BOTH cases for S2 + SWID
-    res.cookie('SWID', swid, { ...cookieBase });
-    res.cookie('espn_s2', s2, { ...cookieBase });
-    res.cookie('ESPN_S2', s2, { ...cookieBase });
-
-    // Persist creds for real (non-ghost) users
+    // Persist and bind creds
     if (memberId && !/^GHOST/i.test(memberId)) {
-      try {
-        await safeSaveCredWithMember({ swid, s2, memberId, ref: 'link', source: 'link' });
-        await ensureQuickSnap(memberId, swid);
-      } catch (e) {
-        console.warn('[espn/link:GET] cred save skipped', e.message);
-      }
+      await safeSaveCredWithMember({ swid, s2, memberId, ref: 'link' });
+      await ensureQuickSnap(memberId, swid);
     }
 
-    // Fire-and-forget fan-wide ingest (single kick, no duplicate tries)
-    try {
-      const origin = `${req.protocol}://${req.get('host')}`;
-      const headers = {
-        'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
-        'x-espn-s2': s2,
-      };
-      if (memberId && !/^GHOST/i.test(memberId)) headers['x-fein-key'] = String(memberId);
+    // Set ESPN + FF cookies
+    const cookieBase = { httpOnly:true, sameSite:'Lax', secure:true, path:'/' };
+    res.cookie('SWID', swid, cookieBase);
+    res.cookie('espn_s2', s2, cookieBase);
+    const sessId = await getOrCreateSessionId(memberId || 'GHOST', req.cookies?.ff_session_id || null);
+    res.cookie('ff_logged_in', '1', { ...cookieBase, httpOnly:false });
+    res.cookie('ff_member_id', memberId || 'GHOST', { ...cookieBase, httpOnly:false });
+    res.cookie('ff_session_id', sessId, cookieBase);
 
-      console.log('[link→ingest kick]', { origin, hasSwid: !!swid, hasS2: !!s2, memberId });
-      fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
-        method: 'POST',
-        headers,
-        keepalive: true, // don’t hold up the redirect
-      }).catch(err => console.warn('[link→ingest kick] fetch failed', err.message));
-    } catch (e) {
-      console.warn('[link→ingest kick] init failed', e.message);
-    }
+    // 🔥 Trigger ingest automatically before redirect
+    const ingestURL = `https://fortifiedfantasy.com/api/platforms/espn/ingest/espn/fan`;
+    await fetch(ingestURL, {
+      method: 'POST',
+      headers: {
+        'X-ESPN-SWID': swid,
+        'X-ESPN-S2': s2,
+        'X-FEIN-KEY': memberId || 'GHOST',
+      },
+    }).catch(e => console.warn('Ingest trigger failed silently:', e.message));
 
-    // Done — bounce to target
-    res.redirect(302, to);
+    // Redirect back to FEIN
+    return res.redirect(302, to);
   } catch (e) {
     console.error('[espn/link:GET]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    res.status(500).json({ ok:false, error:'server_error', message:e.message });
   }
 });
 
