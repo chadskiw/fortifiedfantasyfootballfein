@@ -685,6 +685,20 @@ try {
     headers,
   }).catch(()=>{ /* ignore */ });
 } catch {}
+// kick off fan-wide ingest in the background; do not await
+try {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const hdrs = {
+    'x-espn-swid': decodeURIComponent(swid), // raw {GUID}
+    'x-espn-s2': s2,
+  };
+  if (memberId && !/^GHOST/i.test(memberId)) hdrs['x-fein-key'] = String(memberId);
+
+  fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
+    method: 'POST',
+    headers: hdrs,
+  }).catch(() => {});
+} catch {}
 
     res.redirect(302, to);
   } catch (e) {
