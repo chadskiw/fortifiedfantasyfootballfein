@@ -24,16 +24,18 @@ router.get('/image/:id', async (req, res) => {
       return res.status(401).json({ ok: false, error: 'missing espn auth' });
     }
 
+    /*
     const url = `https://mystique-api.fantasy.espn.com/apis/v1/domains/lm/images/${encodeURIComponent(id)}`;
 
     const upstream = await fetch(url, {
       headers: {
         Cookie: `SWID=${swid}; espn_s2=${s2}`,
         'User-Agent': 'FortifiedFantasy/1.0 (+https://fortifiedfantasy.com)',
-        Accept: 'image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5',
+        Accept: 'image/avif,image/webp,image/png,image/*;q=0.8,*/    /**;q=0.5',
       },
       redirect: 'follow',
     });
+
 
     if (!upstream.ok) {
       // Fallback SVG (cache a little to avoid hammering)
@@ -43,6 +45,9 @@ router.get('/image/:id', async (req, res) => {
         .set('Content-Type', 'image/svg+xml')
         .send(DEFAULT_SVG);
     }
+
+return              //res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
+
 
     // Pass through headers
     const ct = upstream.headers.get('content-type') || 'image/png';
@@ -63,6 +68,8 @@ router.get('/image/:id', async (req, res) => {
       const buf = Buffer.from(await upstream.arrayBuffer());
       res.end(buf);
     }
+    */
+    return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
   } catch (err) {
     // Safe default
     res
