@@ -18,7 +18,7 @@ const cookies = require('../../lib/cookies'); // your centralized cookie helpers
 // ---------------- utils ----------------
 
 const norm = v => (v == null ? '' : String(v)).trim();
-const makeSid = () => crypto.randomBytes(24).toString('base64url');
+const makeSid = () => crypto.randomUUID(); // returns RFC4122 UUID string
 const MID_RE = /^[A-Z0-9]{8}$/;
 
 function normalizeSwid(raw) {
@@ -45,12 +45,13 @@ function ensureMemberId(v) {
 async function ensureDbSession(sessionId, memberId) {
   await pool.query(
     `INSERT INTO ff_session (session_id, member_id, created_at)
-     VALUES ($1,$2,now())
+     VALUES ($1, $2, now())
      ON CONFLICT (session_id) DO NOTHING`,
     [sessionId, memberId]
   );
   return sessionId;
 }
+
 
 // Find or create a member bound to this SWID using ff_quickhitter.
 async function findOrCreateMemberFromSwid(swidBrace) {
@@ -133,7 +134,7 @@ router.get('/me', async (req, res) => {
     res.removeHeader('ETag');
 
     // If app cookies already exist, return them.
-    const sid = norm(req.cookies?.ff_sid);
+const sid = await ensureDbSession(makeSid(), memberId);
     const mid = norm(req.cookies?.ff_member);
     if (sid && mid) {
       return res.status(200).json({ ok: true, member_id: mid });
