@@ -6,77 +6,68 @@ const { Readable } = require('stream');
 const router  = express.Router();
 
 // GET /api/platforms/espn/image/:id → streams an authenticated Mystique image
+const path = require('path');
+
 router.get('/image/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // accept bare GUIDs like 583c0de0-878b-11f0-b6e4-9dd13c0fbbe2
-    if (!id || !/^[0-9a-f-]{32,}$/i.test(id)) {
-      return res.status(400).json({ ok: false, error: 'bad id' });
+    // If id is missing or malformed, just serve the fallback logo
+    const looksLikeGuid = id && /^[0-9a-f-]{32,}$/i.test(id);
+    if (!looksLikeGuid) {
+      res.set('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
     }
 
-    // ESPN creds (prefer your own session store; headers are okay too)
+    // ESPN creds (if you later re-enable upstream)
     const swid = (req.get('x-espn-swid') || req.cookies?.swid || '').trim();
     const s2   = (req.get('x-espn-s2')   || req.cookies?.espn_s2 || '').trim();
 
+    // TEMP: short-circuit to fallback to avoid Mystique flakiness
+    res.set('Cache-Control', 'public, max-age=3600');
+    return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
+
+    /*  ---------- If/when you re-enable Mystique, restore below ----------
+    const url = `https://mystique-api.fantasy.espn.com/apis/v1/domains/lm/images/${encodeURIComponent(id)}`;
     if (!swid || !s2) {
-      // Not authenticated → let client fall back to a default
-      return res.status(401).json({ ok: false, error: 'missing espn auth' });
+      res.set('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
     }
 
-    /*
-    const url = `https://mystique-api.fantasy.espn.com/apis/v1/domains/lm/images/${encodeURIComponent(id)}`;
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 2500);
 
     const upstream = await fetch(url, {
       headers: {
         Cookie: `SWID=${swid}; espn_s2=${s2}`,
         'User-Agent': 'FortifiedFantasy/1.0 (+https://fortifiedfantasy.com)',
-        Accept: 'image/avif,image/webp,image/png,image/*;q=0.8,*/    /**;q=0.5',
+        Accept: 'image/avif,image/webp,image/png,image/*;q=0.8,*/     /**;q=0.5',
       },
       redirect: 'follow',
-    });
+      signal: controller.signal,
+    }).catch(() => null);
 
+    clearTimeout(to);
 
-    if (!upstream.ok) {
-      // Fallback SVG (cache a little to avoid hammering)
-      return res
-        .status(200)
-        .set('Cache-Control', 'public, max-age=600')
-        .set('Content-Type', 'image/svg+xml')
-        .send(DEFAULT_SVG);
+    const ct = upstream?.headers?.get('content-type') || '';
+    if (!upstream?.ok || !/^image\//i.test(ct)) {
+      res.set('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
     }
 
-return              //res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
-
-
-    // Pass through headers
-    const ct = upstream.headers.get('content-type') || 'image/png';
-    const et = upstream.headers.get('etag');
-    const cc = upstream.headers.get('cache-control') || 'public, max-age=3600';
-
-    res.status(200);
     res.set('Content-Type', ct);
-    if (et) res.set('ETag', et);
-    res.set('Cache-Control', cc);
+    res.set('Cache-Control', upstream.headers.get('cache-control') || 'public, max-age=86400, immutable');
 
-    // Stream body (WHATWG → Node)
     if (upstream.body) {
-      // Node 18+: convert Web stream to Node stream
-      Readable.fromWeb(upstream.body).pipe(res);
-    } else {
-      // Fallback: buffer then send
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      res.end(buf);
+      return Readable.fromWeb(upstream.body).pipe(res);
     }
-    */
-    return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    return res.end(buf);
+    --------------------------------------------------------------------- */
   } catch (err) {
-    // Safe default
-    res
-      .status(200)
-      .set('Cache-Control', 'public, max-age=600')
-      .set('Content-Type', 'image/svg+xml')
-      .send(DEFAULT_SVG);
+    // Absolute safety: always return a valid image response
+    res.set('Cache-Control', 'public, max-age=600');
+    return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
   }
 });
 
