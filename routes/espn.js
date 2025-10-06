@@ -38,9 +38,10 @@ function ensureMemberId(v) {
 }
 
 function makeSid() {
-  // any opaque session id is fine; we store it server-side
-  return crypto.randomBytes(24).toString('base64url');
+  // ff_session.session_id is UUID → generate a real UUID
+  return crypto.randomUUID();
 }
+
 
 // ---------- DB helpers ----------
 async function upsertEspnCred({ swidBrace, s2 }) {
@@ -111,15 +112,14 @@ async function findOrCreateMemberFromSwid(swidBrace) {
 /** Insert a session row if you store sessions in DB (optional but recommended). */
 async function ensureDbSession(sessionId, memberId) {
   await pool.query(
-    `
-      INSERT INTO ff_session (session_id, member_id, created_at)
-      VALUES ($1, $2, NOW())
-      ON CONFLICT (session_id) DO NOTHING
-    `,
+    `INSERT INTO ff_session (session_id, member_id, created_at)
+     VALUES ($1,$2,now())
+     ON CONFLICT (session_id) DO NOTHING`,
     [sessionId, memberId]
   );
   return sessionId;
 }
+
 
 /** Fire-and-forget ingest */
 function fireIngest(req, { swidBrace, s2, memberId }) {
