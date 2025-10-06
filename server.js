@@ -53,10 +53,29 @@ app.get('/status', (req, res) => {
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 // Mount under your platform namespace
-app.use('/api/platforms/espn', espnAuthRouter({
-  pool,
-  cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
-}));
+ app.use('/api/platforms/espn', espnAuthRouter({
+   pool,
+   cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
+ }));
+
+// Avatar/logo fallback – always serve local logo, never call Mystique
+const sendLogo = (req, res) => {
+  try {
+    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    return res.sendFile(path.join(process.cwd(), 'public', 'logo.png'));
+  } catch {
+    res
+      .status(200)
+      .set('Cache-Control', 'public, max-age=600')
+      .set('Content-Type', 'image/svg+xml')
+      .send('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0f1422"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="system-ui" font-size="10" fill="#9fb2c9">FF</text></svg>');
+  }
+};
+
+// Mount under the routes your FE already hits
+app.get('/api/platforms/espn/image/:id', sendLogo);
+app.get('/api/espn/image/:id',           sendLogo); // legacy alias
+app.get('/api/image/:id',                sendLogo); // generic alias
 // ===== Early routers =====
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
