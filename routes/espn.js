@@ -12,7 +12,7 @@ if (!pool || typeof pool.query !== 'function') {
   throw new Error('[pg] pool.query not available — check require path/export');
 }
 
-const cookies = require('../src/lib/cookies'); // <- your cookie helpers
+const cookies = require('../lib/cookies'); // <- your cookie helpers
 
 // ---------- small utils ----------
 const norm = v => (v == null ? '' : String(v)).trim();
