@@ -10,7 +10,8 @@ const R2_BUCKET = process.env.R2_BUCKET;
 const path   = require('path');
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
-
+// --- add at top with other imports ---
+const fs = require('fs');
 router.use(express.json());
 
 // ---------- DB pool ----------
@@ -32,8 +33,16 @@ const MIME_BY_EXT = {
 // POST /api/quickhitter/upsert-avatar-r2
 // Writes to R2 key: avatars/anon/<timestamp>-<rand>.<ext> (no re-encode)
 // ===================================================================
+// ===================================================================
+// POST /api/quickhitter/upsert-avatar-r2
+// Writes to R2: avatars/anon/<timestamp>-<rand>.<ext> (no re-encode)
+// Returns { ok, image_key, url }
+// ===================================================================
 router.post('/upsert-avatar-r2', upload.single('avatar'), async (req, res) => {
   try {
+    if (!R2_BUCKET) {
+      return res.status(500).json({ ok: false, error: 'r2_not_configured' });
+    }
     if (!req.file) return res.status(400).json({ ok: false, error: 'no_file' });
 
     const ext = (path.extname(req.file.originalname) || '').toLowerCase();
@@ -42,12 +51,7 @@ router.post('/upsert-avatar-r2', upload.single('avatar'), async (req, res) => {
 
     const key = `avatars/anon/${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
 
-    await s3.send(new DeleteObjectCommand({ // no-op safety for collisions
-      Bucket: R2_BUCKET,
-      Key: key
-    })).catch(() => {});
-
-    // Use PutObjectCommand without any image transform
+    // Put object as-is (no sharp())
     const { PutObjectCommand } = require('@aws-sdk/client-s3');
     await s3.send(new PutObjectCommand({
       Bucket: R2_BUCKET,
@@ -57,9 +61,7 @@ router.post('/upsert-avatar-r2', upload.single('avatar'), async (req, res) => {
       CacheControl: 'public, max-age=31536000, immutable'
     }));
 
-    // If you front R2 with your CDN helper, return that URL
-    const cdnKey = key; // same as image_key in DB
-    return res.json({ ok: true, image_key: cdnKey, url: toCdnUrl(cdnKey) });
+    return res.json({ ok: true, image_key: key, url: toCdnUrl(key) });
   } catch (err) {
     console.error('[qh.upsert-avatar-r2]', err);
     res.status(500).json({ ok: false, error: 'upload_failed' });
@@ -280,9 +282,16 @@ async function phoneTakenByOtherMember(phone, memberId) {
 // - Backfills ff_quickhitter.swid when missing
 // - Establishes session (ff_member cookie) if found
 // ===================================================================
+// ===================================================================
+// GET /api/quickhitter/check  → { ok, complete, member, linked? }
+// - Accepts SWID from cookie or header
+// - Matches quick_snap (braced text) OR swid (uuid) correctly
+// - Backfills swid (uuid) if missing
+// - Establishes ff_member cookie
+// ===================================================================
 router.get('/check', async (req, res) => {
   try {
-    // 1) If already have a member cookie, return that (current behavior)
+    // Already have a member cookie? Return that.
     const cookieMember = norm(req.cookies?.ff_member || '');
     if (cookieMember) {
       const { rows } = await pool.query(
@@ -293,34 +302,38 @@ router.get('/check', async (req, res) => {
       return res.json({ ok: true, member: m, complete: isComplete(m), linked: true });
     }
 
-    // 2) Try ESPN SWID (cookie or header)
+    // Normalize ESPN SWID from cookie/header
     const rawSwid = req.cookies?.SWID || req.get('x-espn-swid');
-    const swid = normalizeSwid(rawSwid);
-    if (!swid) return res.json({ ok: true, complete: false, linked: false });
+    const swidBrace = normalizeSwid(rawSwid);       // "{UUID}" uppercased
+    if (!swidBrace) return res.json({ ok: true, complete: false, linked: false });
 
-    // 3) Find QH by quick_snap or stored swid
-    const match = await pool.query(
+    // Prepare uuid (no braces) for uuid column comparisons
+    const swidUuid = swidBrace.slice(1, -1).toLowerCase(); // strip {}
+
+    // Find by quick_snap (text) OR swid (uuid)
+    const { rows } = await pool.query(
       `
       SELECT *
-      FROM ff_quickhitter
-      WHERE quick_snap = $1 OR swid = $1
-      ORDER BY updated_at DESC NULLS LAST, created_at DESC
-      LIMIT 1
+        FROM ff_quickhitter
+       WHERE quick_snap = $1
+          OR swid = $2::uuid
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC
+       LIMIT 1
       `,
-      [swid]
+      [swidBrace, swidUuid]
     );
-    const row = match.rows[0];
+    const row = rows[0];
     if (!row) return res.json({ ok: true, complete: false, linked: false });
 
-    // 4) Backfill swid if empty
+    // Backfill swid if empty
     if (!row.swid) {
       await pool.query(
-        `UPDATE ff_quickhitter SET swid=$1, updated_at = NOW() WHERE id=$2`,
-        [swid, row.id]
+        `UPDATE ff_quickhitter SET swid = $1::uuid, updated_at = NOW() WHERE id = $2`,
+        [swidUuid, row.id]
       );
     }
 
-    // 5) Establish session as that member
+    // Establish session
     const memberId = ensureMemberId(row.member_id);
     res.cookie('ff_member', memberId, { httpOnly: true, sameSite: 'Lax', secure: true });
 
@@ -331,6 +344,7 @@ router.get('/check', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
 
 
 // ===================================================================
@@ -513,31 +527,40 @@ function toE164(raw){
 const readyForId = (handle, colorHex, email, phone) =>
   !!(handle && isHandleShape(handle) && normHex(colorHex) && (email || phone));
 
-// routes/quickhitter.js  (inside same file)
-// TRUE_LOCATION: routes/avatarRouter.js
-// IN_USE: /api/avatar/upsert  (saves to /anon folder)
+
+
+// ===================================================================
+// POST /api/quickhitter/upsert
+// form-data: avatar=@file.png
+// Saves to /public/avatars/anon/<timestamp>_<rand>.<ext> (no re-encode)
+// Returns { ok, image_key, url }
+// ===================================================================
 router.post('/upsert', upload.single('avatar'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'no_file' });
 
-    const ext = path.extname(req.file.originalname).toLowerCase();
-    const validExts = ['.png', '.jpg', '.jpeg', '.gif'];
-    if (!validExts.includes(ext)) {
-      return res.status(400).json({ error: 'Invalid file type' });
+    const ext = (path.extname(req.file.originalname) || '').toLowerCase();
+    const validExts = new Set(['.png', '.jpg', '.jpeg', '.gif']);
+    if (!validExts.has(ext)) {
+      return res.status(400).json({ ok: false, error: 'bad_type' });
     }
 
     const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
-    const destPath = path.join(__dirname, '..', 'public', 'avatars', 'anon', filename);
+    const rel = path.join('avatars', 'anon', filename);
+    const abs = path.join(__dirname, '..', 'public', rel);
 
-    await fs.promises.writeFile(destPath, req.file.buffer);
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    await fs.promises.writeFile(abs, req.file.buffer); // no sharp(), no webp
 
-    const publicUrl = `/avatars/anon/${filename}`;
-    return res.json({ ok: true, url: publicUrl });
+    const image_key = rel.replace(/\\/g, '/');
+    const url = `/${image_key}`;
+    return res.json({ ok: true, image_key, url });
   } catch (err) {
-    console.error('avatar upsert failed', err);
-    res.status(500).json({ error: 'Failed to upload avatar' });
+    console.error('[qh.upsert]', err);
+    res.status(500).json({ ok: false, error: 'upload_failed' });
   }
 });
+
 
 
 
