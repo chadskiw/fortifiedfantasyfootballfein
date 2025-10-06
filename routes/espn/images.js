@@ -6,7 +6,7 @@ const { Readable } = require('stream');
 const router  = express.Router();
 
 // GET /api/platforms/espn/image/:id → streams an authenticated Mystique image
-const path = require('path');
+const path = require('../../public/logo.png');
 
 router.get('/image/:id', async (req, res) => {
   try {
@@ -64,6 +64,7 @@ router.get('/image/:id', async (req, res) => {
     const buf = Buffer.from(await upstream.arrayBuffer());
     return res.end(buf);
     --------------------------------------------------------------------- */
+  
   } catch (err) {
     // Absolute safety: always return a valid image response
     res.set('Cache-Control', 'public, max-age=600');
