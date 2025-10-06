@@ -7,6 +7,7 @@ const express      = require('express');
 const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
+const espnAuthRouter = require('./routes/espnAuth');
 
 const espnRouter    = require('./routes/espn');
 const hydrateEspn   = require('./routes/espn/hydrate');
@@ -51,7 +52,11 @@ app.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
-
+// Mount under your platform namespace
+app.use('/api/platforms/espn', espnAuthRouter({
+  db,
+  cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
+}));
 // ===== Early routers =====
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
