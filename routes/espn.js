@@ -23,7 +23,7 @@ if (!pool || typeof pool.query !== 'function') {
 }
 
 // Centralized cookie helpers (you shared this as ../src/lib/cookies.js)
-const cookies = require('../src/lib/cookies');
+const cookies = require('../lib/cookies');
 
 // -----------------------------------------------------------------------------
 // Cookie options for the raw ESPN cookies we mirror onto our domain.
