@@ -57,10 +57,10 @@ async function upsertEspnCred({ swidBrace, s2 }) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
   await pool.query(
     `
-    INSERT INTO ff_espn_cred (swid, s2, updated_at)
+    INSERT INTO ff_espn_cred (swid, espn_s2, updated_at)
     VALUES ($1::uuid, NULLIF($2,'') , NOW())
     ON CONFLICT (swid)
-    DO UPDATE SET s2 = COALESCE(EXCLUDED.s2, ff_espn_cred.s2), updated_at = NOW()
+    DO UPDATE SET espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2), updated_at = NOW()
     `,
     [swidUuid, s2 || null]
   );
