@@ -13,7 +13,7 @@ if (!pool || typeof pool.query !== 'function') {
 }
 
 // >>> use your centralized cookie helpers
-const cookies = require('../src/lib/cookies');
+const cookies = require('../lib/cookies');
 
 const norm = v => (v == null ? '' : String(v)).trim();
 
