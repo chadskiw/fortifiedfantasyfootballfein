@@ -13,7 +13,7 @@ const crypto  = require('crypto');
 const poolMod = require('../../src/db/pool');
 const pool    = poolMod.pool || poolMod;
 
-const cookies = require('../../src/lib/cookies'); // your centralized cookie helpers
+const cookies = require('../../lib/cookies'); // your centralized cookie helpers
 
 // ---------------- utils ----------------
 
