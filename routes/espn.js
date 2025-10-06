@@ -62,6 +62,16 @@ async function ensureSessionRow(memberId, existing = null) {
   return sid;
 }
 
+async function setFFSessionCookies(req, res, memberId) {
+  const base = { httpOnly: true, sameSite: 'Lax', secure: true, path: '/', maxAge: 365*24*60*60*1000 };
+  const sid  = await ensureSessionRow(memberId, req.cookies?.ff_session_id || null);
+
+  // session cookies your UI checks
+  res.cookie('ff_session_id', sid, base);           // httpOnly
+  res.cookie('ff_member_id',  memberId, { ...base, httpOnly: false });
+  res.cookie('ff_logged_in',  '1',       { ...base, httpOnly: false });
+}
+
 // ---------- DB helpers ----------
 async function upsertEspnCred({ swidBrace, s2 }) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
