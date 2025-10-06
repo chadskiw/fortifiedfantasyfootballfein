@@ -80,7 +80,8 @@ app.use(hydrateEspn());
 app.use('/api/platforms/espn', espnRouter);
 app.use('/api/espn-auth',      espnRouter); // alias
 app.use('/api/espn',           espnRouter); // legacy short base
-
+// ...other routers...
+app.use('/api/espn', require('./routes/espn-login'));
 // Direct link alias → /api/espn/link (preserves query)
 app.get('/link', (req, res) => {
   const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
