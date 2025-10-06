@@ -1,26 +1,20 @@
 // routes/espn.js
-// ESPN login/link flow for Fortified Fantasy (focused version).
-// - Creates/updates member + session cookies on /login when swid/s2 are present
-// - Persists ESPN credentials
-// - Triggers ingest
-// - Provides tiny asset shims so the login page never 404s
+// End-to-end ESPN login/link flow + tiny asset shims (no 404s).
 
 const express = require('express');
 const crypto  = require('crypto');
 const router  = express.Router();
+const fetch   = global.fetch || ((...a) => import('node-fetch').then(({default:f}) => f(...a)));
 
-const fetch = global.fetch || ((...a) =>
-  import('node-fetch').then(({ default: f }) => f(...a)));
-
-const pool = require('../src/db/pool');             // ✅ your PG pool
-const cookies = require('../lib/cookies');      // ✅ the cookie helpers we added
-
+const poolMod = require('../src/db/pool');
+const pool    = poolMod.pool || poolMod;
 if (!pool || typeof pool.query !== 'function') {
-  throw new Error('[espn] pool.query not available — check ../src/db/pool export');
+  throw new Error('[pg] pool.query not available — check require path/export');
 }
 
-// -------------------- helpers --------------------
+const cookies = require('../src/lib/cookies'); // <- your cookie helpers
 
+// ---------- small utils ----------
 const norm = v => (v == null ? '' : String(v)).trim();
 
 function normalizeSwid(raw) {
@@ -39,117 +33,112 @@ const MID_RE = /^[A-Z0-9]{8}$/;
 function ensureMemberId(v) {
   const clean = String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (MID_RE.test(clean)) return clean;
-  // create an 8-char, uppercase, URL-safe id
-  const id = crypto.randomBytes(8).toString('base64url')
-    .replace(/[^A-Z0-9]/gi, '')
-    .slice(0, 8)
-    .toUpperCase();
+  const id = crypto.randomBytes(8).toString('base64').replace(/[^A-Z0-9]/gi, '').slice(0, 8).toUpperCase();
   return (id || 'ABCDEFGH').padEnd(8, 'X');
 }
 
 function makeSid() {
-  // server-trusted session id (stored in ff_session for auditing)
-  return crypto.randomUUID();
+  // any opaque session id is fine; we store it server-side
+  return crypto.randomBytes(24).toString('base64url');
 }
 
-async function ensureDbSession(sessionId, memberId) {
-  await pool.query(
-    `INSERT INTO ff_session (session_id, member_id, created_at)
-     VALUES ($1, $2, NOW())
-     ON CONFLICT (session_id) DO NOTHING`,
-    [sessionId, memberId]
-  );
-  return sessionId;
-}
-
+// ---------- DB helpers ----------
 async function upsertEspnCred({ swidBrace, s2 }) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
   await pool.query(
     `
-    INSERT INTO ff_espn_cred (swid, espn_s2, last_seen)
-    VALUES ($1::uuid, NULLIF($2,'') , NOW())
-    ON CONFLICT (swid)
-    DO UPDATE SET espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
-                  last_seen = NOW()
+      INSERT INTO ff_espn_cred (swid, espn_s2, last_seen)
+      VALUES ($1::uuid, NULLIF($2,'') , NOW())
+      ON CONFLICT (swid)
+      DO UPDATE SET espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
+                    last_seen = NOW()
     `,
     [swidUuid, s2 || null]
   );
 }
 
-// Try to find a member via prior quickhitter link; create one if needed.
+/**
+ * Return an existing member for this SWID, or create one bound in ff_quickhitter.
+ * @returns {Promise<string>} memberId
+ */
 async function findOrCreateMemberFromSwid(swidBrace) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
+
+  // try to find any quickhitter that references this swid or quick_snap = brace form
   const { rows } = await pool.query(
     `
-    SELECT id, member_id, quick_snap, swid
-      FROM ff_quickhitter
-     WHERE quick_snap = $1
-        OR swid       = $2::uuid
-     ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC
-     LIMIT 1
+      SELECT id, member_id, swid, quick_snap
+        FROM ff_quickhitter
+       WHERE swid = $1::uuid OR quick_snap = $2
+       ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC
+       LIMIT 1
     `,
-    [swidBrace, swidUuid]
+    [swidUuid, swidBrace]
   );
 
-  if (rows.length === 0) {
-    // No prior record — create a lightweight link row with a new member id
-    const memberId = ensureMemberId();
-    await pool.query(
-      `
-      INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
-      VALUES ($1, $2, $3::uuid, NOW(), NOW())
-      ON CONFLICT (member_id) DO NOTHING
-      `,
-      [memberId, swidBrace, swidUuid]
-    );
+  // found → ensure member_id present and backfill swid/last_seen_at
+  if (rows.length) {
+    let memberId = norm(rows[0].member_id);
+    if (!memberId) {
+      memberId = ensureMemberId();
+      await pool.query(
+        `UPDATE ff_quickhitter SET member_id=$1, last_seen_at=NOW() WHERE id=$2`,
+        [memberId, rows[0].id]
+      );
+    }
+    if (!rows[0].swid) {
+      await pool.query(
+        `UPDATE ff_quickhitter SET swid=$1::uuid, last_seen_at=NOW() WHERE id=$2`,
+        [swidUuid, rows[0].id]
+      );
+    }
     return memberId;
   }
 
-  const row = rows[0];
-  let memberId = norm(row.member_id);
-  if (!memberId) {
-    memberId = ensureMemberId();
-    await pool.query(
-      `UPDATE ff_quickhitter SET member_id=$1, last_seen_at=NOW() WHERE id=$2`,
-      [memberId, row.id]
-    );
-  } else {
-    await pool.query(
-      `UPDATE ff_quickhitter SET last_seen_at=NOW() WHERE id=$1`,
-      [row.id]
-    );
-  }
-
-  // Backfill uuid swid if missing
-  if (!row.swid) {
-    await pool.query(
-      `UPDATE ff_quickhitter SET swid=$1::uuid WHERE id=$2`,
-      [swidUuid, row.id]
-    );
-  }
-
+  // not found → create a new quickhitter bound to this swid with a fresh member id
+  const memberId = ensureMemberId();
+  await pool.query(
+    `
+      INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
+      VALUES ($1, $2, $3::uuid, NOW(), NOW())
+      ON CONFLICT (member_id) DO NOTHING
+    `,
+    [memberId, swidBrace, swidUuid]
+  );
   return memberId;
 }
 
-async function fireIngest(req, { swidBrace, s2, memberId }) {
+/** Insert a session row if you store sessions in DB (optional but recommended). */
+async function ensureDbSession(sessionId, memberId) {
+  await pool.query(
+    `
+      INSERT INTO ff_session (session_id, member_id, created_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (session_id) DO NOTHING
+    `,
+    [sessionId, memberId]
+  );
+  return sessionId;
+}
+
+/** Fire-and-forget ingest */
+function fireIngest(req, { swidBrace, s2, memberId }) {
   try {
     const origin = `${req.protocol}://${req.get('host')}`;
-    // We include headers so any downstream verify step sees what we saw here.
     fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
       method: 'POST',
       headers: {
+        'X-ESPN-SWID': swidBrace,
+        'X-ESPN-S2'  : s2 || '',
+        'X-FEIN-KEY' : memberId || '',
         'content-type': 'application/json',
-        'x-espn-swid': swidBrace,
-        'x-espn-s2'  : s2 || '',
-        'x-fein-key' : memberId
       },
-      // no body required right now
+      body: '{}',
     }).catch(() => {});
   } catch {}
 }
 
-// -------------------- small status endpoints (FE uses these) --------------------
-
+// ---------- Status endpoints (used by FE) ----------
 router.get('/authcheck', (req, res) => {
   const swid = normalizeSwid(req.cookies?.SWID);
   const s2   = norm(req.cookies?.espn_s2);
@@ -189,25 +178,11 @@ router.get('/login', async (req, res) => {
     })();
 
     // 1) set *ESPN* cookies on our domain (these are the attestation source)
-    res.cookie('SWID', swidBrace, {
-      path: '/',
-      sameSite: 'Lax',
-      secure: true,
-      httpOnly: true, // we don’t need JS to read this
-    });
-    res.cookie('espn_s2', s2, {
-      path: '/',
-      sameSite: 'Lax',
-      secure: true,
-      httpOnly: true,
-    });
-    // (Some clients look for this alias)
-    res.cookie('ESPN_S2', s2, {
-      path: '/',
-      sameSite: 'Lax',
-      secure: true,
-      httpOnly: true,
-    });
+    //    HttpOnly is fine; we don’t need JS to read them.
+    const shared = { path: '/', sameSite: 'Lax', secure: true, httpOnly: true };
+    res.cookie('SWID',    swidBrace, shared);
+    res.cookie('espn_s2', s2,        shared);
+    res.cookie('ESPN_S2', s2,        shared); // alias used by some clients
 
     // 2) persist / refresh creds
     await upsertEspnCred({ swidBrace, s2 });
@@ -217,9 +192,9 @@ router.get('/login', async (req, res) => {
 
     // 4) create a server session + set app cookies
     const sid = await ensureDbSession(makeSid(), memberId);
-    cookies.setSessionCookie(res, sid);          // sets HttpOnly ff_sid
-    cookies.setMemberCookie(res, memberId);      // sets readable ff_member
-    // (optional) clear espn_s2 after attestation if you don't need it anymore:
+    cookies.setSessionCookie(res, sid);     // HttpOnly ff_sid
+    cookies.setMemberCookie(res, memberId); // readable ff_member
+    // If you prefer to immediately remove espn_s2 from your domain after attestation, uncomment:
     // cookies.clearEspnS2(res);
 
     // 5) kick ingest (fire-and-forget)
@@ -233,18 +208,16 @@ router.get('/login', async (req, res) => {
   }
 });
 
-// -------------------- Link using existing cookies --------------------
-
+// ---------- Link using already-set cookies ----------
 router.post('/link-via-cookie', async (req, res) => {
   try {
     const swidBrace = normalizeSwid(req.cookies?.SWID);
     const s2        = norm(req.cookies?.espn_s2);
-    if (!swidBrace || !s2) return res.json({ ok: true, step: 'unlinked' });
+    if (!swidBrace) return res.json({ ok: true, step: 'unlinked' });
 
     await upsertEspnCred({ swidBrace, s2 });
 
     const memberId = await findOrCreateMemberFromSwid(swidBrace);
-
     const sid = await ensureDbSession(makeSid(), memberId);
     cookies.setSessionCookie(res, sid);
     cookies.setMemberCookie(res, memberId);
@@ -252,28 +225,29 @@ router.post('/link-via-cookie', async (req, res) => {
 
     return res.json({ ok: true, step: 'linked', member_id: memberId });
   } catch (e) {
-    console.error('[espn.link-via-cookie]', e);
+    console.error('[espn.link-via-cookie] error', e);
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// -------------------- Explicitly bind current SWID -> provided member --------------------
-
-router.post('/link', async (req, res) => {
+// ---------- Explicit bind current SWID -> member ----------
+router.post('/link', express.json({ limit: '256kb' }), async (req, res) => {
   try {
     const swidBrace = normalizeSwid(req.cookies?.SWID);
     if (!swidBrace) return res.status(400).json({ ok: false, error: 'no_swid' });
     const swidUuid = swidBrace.slice(1, -1).toLowerCase();
 
     const memberId = ensureMemberId(req.body?.memberId);
+    if (!memberId) return res.status(400).json({ ok: false, error: 'bad_member' });
+
     await pool.query(
       `
-      INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
-      VALUES ($1, $2, $3::uuid, NOW(), NOW())
-      ON CONFLICT (member_id)
-      DO UPDATE SET quick_snap  = EXCLUDED.quick_snap,
-                    swid        = EXCLUDED.swid,
-                    last_seen_at= NOW()
+        INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
+        VALUES ($1, $2, $3::uuid, NOW(), NOW())
+        ON CONFLICT (member_id)
+        DO UPDATE SET quick_snap = EXCLUDED.quick_snap,
+                      swid       = EXCLUDED.swid,
+                      last_seen_at = NOW()
       `,
       [memberId, swidBrace, swidUuid]
     );
@@ -285,20 +259,18 @@ router.post('/link', async (req, res) => {
 
     res.json({ ok: true, linked: true, member_id: memberId });
   } catch (e) {
-    console.error('[espn.link]', e);
+    console.error('[espn.link] error', e);
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
-// -------------------- Ingest endpoint (must NOT 404) --------------------
-
+// ---------- Ingest endpoint (must NOT 404) ----------
 router.post('/ingest/espn/fan', async (_req, res) => {
-  // If you have a worker/job, dispatch here. For now: accept quickly.
+  // If you have a background worker/job, dispatch here. For now: accept quickly.
   res.status(204).end();
 });
 
-// -------------------- Tiny asset shims (avoid 404 during login UX) --------------------
-
+// ---------- Tiny asset shims so the login view never 404s ----------
 function noStore(res) { res.set('Cache-Control', 'no-store'); }
 
 router.get(['/auth-state.js', '/js/share-card.js'], (_req, res) => {
@@ -306,7 +278,7 @@ router.get(['/auth-state.js', '/js/share-card.js'], (_req, res) => {
   res.type('application/javascript').send(`/* shim */ export const ok=true;`);
 });
 
-router.get(['/auth-prompt.css', '/styles.css', '/timeline/styles.css', '/mobile.css', '/css/player-card.css', '/css/ghostman.css'], (_req, res) => {
+router.get(['/auth-prompt.css', '/styles.css', '/timeline/styles.css', '/mobile.css'], (_req, res) => {
   noStore(res);
   res.type('text/css').send(`/* shim */ :root{--ff:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}`);
 });
