@@ -56,61 +56,84 @@ router.get('/teams', async (req, res) => {
       return res.status(400).json({ ok:false, error:'Unsupported sport for this endpoint' });
     }
 
-    const conds = ['season = $1'];
+    const conds = ['f.season = $1'];
     const params = [season];
     let p = 2;
 
     // platform aliases (e.g., 018 <-> espn)
     const plats = platformAliases(platformIn);
-    if (plats) { conds.push(`platform = ANY($${p++}::text[])`); params.push(plats); }
+    if (plats) { conds.push(`f.platform = ANY($${p++}::text[])`); params.push(plats); }
 
-    if (handle)   { conds.push(`handle = $${p++}`);     params.push(handle); }
-    if (memberId) { conds.push(`member_id = $${p++}`);  params.push(memberId); }
+    if (handle)   { conds.push(`f.handle = $${p++}`);     params.push(handle); }
+    if (memberId) { conds.push(`f.member_id = $${p++}`);  params.push(memberId); }
 
     // Only constrain on visibility/status if explicitly passed
-    if (visibility != null) { conds.push(`visibility = $${p++}`); params.push(visibility); }
-    if (status     != null) { conds.push(`status     = $${p++}`); params.push(status); }
+    if (visibility != null) { conds.push(`f.visibility = $${p++}`); params.push(visibility); }
+    if (status     != null) { conds.push(`f.status     = $${p++}`); params.push(status); }
 
     // Dynamic select list: include roster_json when week is requested
     const selectRoster =
       hasWeek
-        ? `, scoring_json -> $${p++} AS roster_json`
+        ? `, f.scoring_json -> $${p++} AS roster_json`
         : `, NULL::jsonb AS roster_json`;
     if (hasWeek) params.push(String(week)); // JSONB key is text
 
     const sql = `
       SELECT
-        season,
-        league_id::text                       AS "leagueId",
-        team_id::text                         AS "teamId",
-        NULLIF(team_name,'')                  AS "teamNameRaw",
-        COALESCE(league_name,'League')        AS "leagueName",
-        COALESCE(league_size,0)               AS "leagueSize",
-        COALESCE(team_logo_url,'')            AS "logo"
+        f.season,
+        f.platform,
+        f.league_id::text                       AS "leagueId",
+        f.team_id::text                         AS "teamId",
+        NULLIF(f.team_name,'')                  AS "teamNameRaw",
+        COALESCE(f.league_name,'League')        AS "leagueName",
+        COALESCE(f.league_size,0)               AS "leagueSize",
+        COALESCE(f.team_logo_url,'')            AS "logo",
+        -- owner badge join
+        q.handle                                AS "ownerHandle",
+        q.color_hex                             AS "ownerColorHex",
+        CASE
+          WHEN q.image_key IS NOT NULL AND q.image_key <> ''
+            THEN ('https://img.fortifiedfantasy.com/' || q.image_key)
+          ELSE NULL
+        END                                     AS "ownerBadgeUrl"
         ${selectRoster}
-      FROM ff_sport_ffl
+      FROM ff_sport_ffl f
+      LEFT JOIN ff_quickhitter q
+        ON q.member_id = f.member_id
       WHERE ${conds.join(' AND ')}
-      ORDER BY league_id::text, team_id::text
+      ORDER BY f.league_id::text, f.team_id::text
     `;
 
     const { rows } = await pool.query(sql, params);
 
     const teams = rows.map(r => {
+      // normalize team name
+      const teamName = r.teamNameRaw || `Team ${r.teamId}`;
+
+      // normalize badge URL (avoid accidental //)
+      let ownerBadgeUrl = r.ownerBadgeUrl || '';
+      if (ownerBadgeUrl.startsWith('https://img.fortifiedfantasy.com//')) {
+        ownerBadgeUrl = ownerBadgeUrl.replace('https://img.fortifiedfantasy.com//','https://img.fortifiedfantasy.com/');
+      }
+
       const base = {
         season,
         leagueId: r.leagueId,
         teamId:   r.teamId,
-        teamName: r.teamNameRaw || `Team ${r.teamId}`,
+        teamName,
         leagueName: r.leagueName,
         leagueSize: r.leagueSize,
         logo: r.logo,
+
+        // owner fields (reused by PP + Opponents + Roster)
+        ownerHandle:   r.ownerHandle || null,
+        ownerColorHex: r.ownerColorHex || null,
+        ownerBadgeUrl: ownerBadgeUrl || null,
       };
 
       // If a week was requested and we have roster_json, pass it along
-      // (shape depends on how you store scoring_json; we just forward it)
       if (hasWeek && r.roster_json != null) {
-        // pg returns JSONB as native JS; no parse needed
-        base.roster = r.roster_json;
+        base.roster = r.roster_json; // JSONB already parsed
       }
 
       return base;
