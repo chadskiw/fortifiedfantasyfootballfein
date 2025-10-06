@@ -405,125 +405,31 @@ const readyForId = (handle, colorHex, email, phone) =>
   !!(handle && isHandleShape(handle) && normHex(colorHex) && (email || phone));
 
 // routes/quickhitter.js  (inside same file)
-router.post('/upsert', async (req, res) => {
+// TRUE_LOCATION: routes/avatarRouter.js
+// IN_USE: /api/avatar/upsert  (saves to /anon folder)
+router.post('/upsert', upload.single('avatar'), async (req, res) => {
   try {
-    const b = req.body || {};
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-    // ---- normalize contact ----
-    const rawEmail = (b.email ?? '').trim();
-    const rawPhone = (b.phone ?? '').trim();
-    const email = rawEmail || null;
-    const phone = toE164(rawPhone);
-
-    if (email && !EMAIL_RE.test(email)) {
-      return res.status(422).json({ ok:false, error:'invalid_email', message:'Email looks invalid.' });
-    }
-    if (phone && !E164_RE.test(phone)) {
-      return res.status(422).json({ ok:false, error:'invalid_phone', message:'Phone must be E.164 like +15551231234.' });
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const validExts = ['.png', '.jpg', '.jpeg', '.gif'];
+    if (!validExts.includes(ext)) {
+      return res.status(400).json({ error: 'Invalid file type' });
     }
 
-    // ---- ensure member_id immediately (cookie → body → new) ----
-    let member_id = (req.cookies?.ff_member || b.member_id || '').trim();
-    member_id = ensureMemberId(member_id);
-    // persist one year
-    res.cookie('ff_member', member_id, { httpOnly:true, secure:true, sameSite:'Lax', maxAge:365*24*3600*1000 });
+    const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
+    const destPath = path.join(__dirname, '..', 'public', 'avatars', 'anon', filename);
 
-    // ---- load current row to track previous avatar ----
-    const cur = await pool.query(
-      `SELECT image_key FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
-      [member_id]
-    );
-    const oldKey = cur.rows[0]?.image_key || null;
+    await fs.promises.writeFile(destPath, req.file.buffer);
 
-    // ---- normalize profile fields ----
-   // ---- normalize profile fields ----
-const handle = b.handle ? normHandle(b.handle) : null;
-let color    = b.color_hex ? normHex(b.color_hex) : null;   // '#RRGGBB' or null
-
-let image_key = stripCdn(b.image_key || b.image_url || '') || null;
-
-// ✅ force anon folder
-if (image_key && /^avatars\//.test(image_key)) {
-  // grab just the filename after the last slash
-  const filename = image_key.split('/').pop();
-  image_key = `avatars/anon/${filename}`;
-}
-
-
-    if (handle && !isHandleShape(handle)) {
-      return res.status(400).json({ ok:false, error:'bad_handle' });
-    }
-
-    // ---- preflight: contact owned by someone else? ----
-    if (email || phone) {
-      const owner = await ownerOfContact({ email, phone });
-      if (owner && owner !== member_id) {
-        return res.status(409).json({ ok:false, error:'contact_belongs_to_other', owner:{ member_id: owner } });
-      }
-    }
-
-    // ---- (handle, color) collision guard across both tables ----
-    if (handle) {
-      const used = await usedColorsForHandle(handle);
-      if (!color || used.has(color)) {
-        const picked = await pickColorForHandleAvoidingCollisions(handle, color);
-        color = picked || color;
-      }
-    }
-
-    // ---- UPSERT (store color WITH leading '#') ----
-    const sql = `
-      INSERT INTO ff_quickhitter (
-        member_id, handle, color_hex, image_key, email, phone,
-        email_is_verified, phone_is_verified, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), now())
-      ON CONFLICT (member_id) DO UPDATE SET
-        handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
-        color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
-        image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
-        email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
-        phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-        email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
-        phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
-        updated_at = now()
-      RETURNING *;
-    `;
-    const params = [
-      member_id,
-      handle,
-      color,                // keep as '#RRGGBB' in quickhitter
-      image_key,
-      email,
-      phone,
-      !!b.email_is_verified,
-      !!b.phone_is_verified
-    ];
-
-    const { rows } = await pool.query(sql, params);
-    const m = rowToMember(rows[0]);
-    const newKey = m.image_key || null;
-
-    // ---- if avatar changed, delete old from R2 (one image per user) ----
-    try {
-      if (oldKey && newKey && oldKey !== newKey && /^avatars\//.test(oldKey)) {
-        await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: oldKey }));
-      }
-    } catch (e) {
-      console.warn('[images] delete old failed:', e?.Code || e?.message);
-    }
-
-    return res.json({
-      ok: true,
-      member_id: m.member_id,
-      handle: m.handle,
-      color_hex: m.color_hex,
-      image_key: m.image_key
-    });
-  } catch (e) {
-    console.error('[qh.upsert]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
+    const publicUrl = `/avatars/anon/${filename}`;
+    return res.json({ ok: true, url: publicUrl });
+  } catch (err) {
+    console.error('avatar upsert failed', err);
+    res.status(500).json({ error: 'Failed to upload avatar' });
   }
 });
+
 
 
 
