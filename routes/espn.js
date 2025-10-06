@@ -50,9 +50,16 @@ function ensureMemberId(v) {
 function makeSid() {
   return crypto.randomBytes(24).toString('base64url');
 }
-function setAuthCookies(res, { memberId, sid }) {
-  res.cookie('ff_member', memberId, COOKIE_OPTS);
-  res.cookie('ff_sid', sid, COOKIE_OPTS);
+// AFTER (new helper)
+async function ensureSessionRow(memberId, existing = null) {
+  const sid = existing || crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO ff_session (session_id, member_id, created_at)
+     VALUES ($1,$2,now())
+     ON CONFLICT (session_id) DO NOTHING`,
+    [sid, memberId]
+  );
+  return sid;
 }
 
 // ---------- DB helpers ----------
@@ -141,48 +148,52 @@ router.get('/link-status', (req, res) => {
 
 // ---------- Main login bounce ----------
 // GET /api/espn/login?swid={...}&s2=...&to=/fein/index.html?season=2025
+// In GET /api/espn/login
 router.get('/login', async (req, res) => {
   try {
     const swidBrace = normalizeSwid(req.query.swid);
-    if (!swidBrace) return res.status(400).json({ ok: false, error: 'bad_swid' });
+    if (!swidBrace) return res.status(400).json({ ok:false, error:'bad_swid' });
 
-    const s2 = req.query.s2 && String(req.query.s2).trim();
-    const toParam = req.query.to && String(req.query.to).trim();
-
-    // robust redirect target
+    const s2 = (req.query.s2 || '').trim();
+    const toParam = String(req.query.to || `/fein/?season=${new Date().getUTCFullYear()}`);
     const redirectTo = (() => {
-      try {
-        return new URL(
-          toParam || `/fein/?season=${new Date().getUTCFullYear()}`,
-          `${req.protocol}://${req.get('host')}`
-        ).toString();
-      } catch {
-        return `/fein/?season=${new Date().getUTCFullYear()}`;
-      }
+      try { return new URL(toParam, `${req.protocol}://${req.get('host')}`).toString(); }
+      catch { return `/fein/?season=${new Date().getUTCFullYear()}`; }
     })();
 
-    // set ESPN cookies on our domain (HttpOnly)
-    res.cookie('SWID', encodeURIComponent(swidBrace), COOKIE_OPTS);
+    // 1) set ESPN cookies (RAW values)
+    res.cookie('SWID', swidBrace, COOKIE_OPTS);
     if (s2) res.cookie('espn_s2', s2, COOKIE_OPTS);
+    if (s2) res.cookie('ESPN_S2', s2, COOKIE_OPTS);
 
-    // store creds server-side
+    // 2) persist/refresh creds
     await upsertEspnCred({ swidBrace, s2 });
 
-    // try to link to a member immediately
+    // 3) try to bind SWID → quickhitter → member
     const link = await linkFromSwid({ swidBrace });
     if (link.step === 'linked') {
-      const sid = makeSid();
-      setAuthCookies(res, { memberId: link.memberId, sid });
-      fireIngest(req);
+      await setFFSessionCookies(req, res, link.memberId);
+
+      // 4) kick ingest with explicit headers so ensureCred passes
+      const origin = `${req.protocol}://${req.get('host')}`;
+      fetch(`${origin}/api/platforms/espn/ingest/espn/fan`, {
+        method: 'POST',
+        headers: {
+          'X-ESPN-SWID': swidBrace,
+          'X-ESPN-S2'  : s2 || '',
+          'X-FEIN-KEY' : link.memberId
+        }
+      }).catch(()=>{});
     }
 
-    // bounce to requested page
+    // 5) bounce back
     return res.redirect(302, redirectTo);
   } catch (e) {
     console.error('[espn.login]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // ---------- Link using already-set cookies ----------
 router.post('/link-via-cookie', async (req, res) => {
@@ -196,8 +207,7 @@ router.post('/link-via-cookie', async (req, res) => {
     const link = await linkFromSwid({ swidBrace });
     if (link.step === 'linked') {
       const sid = makeSid();
-      setAuthCookies(res, { memberId: link.memberId, sid });
-      fireIngest(req);
+await setFFSessionCookies(req, res, link.memberId);      fireIngest(req);
       return res.json({ ok: true, step: 'linked', member_id: link.memberId });
     }
     return res.json({ ok: true, step: 'unlinked' });
@@ -230,7 +240,7 @@ router.post('/link', async (req, res) => {
     );
 
     const sid = makeSid();
-    setAuthCookies(res, { memberId, sid });
+await setFFSessionCookies(req, res, memberId);
     fireIngest(req);
 
     res.json({ ok: true, linked: true, member_id: memberId });
