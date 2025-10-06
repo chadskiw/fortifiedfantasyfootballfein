@@ -6,6 +6,10 @@ const router  = express.Router();
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { s3 } = require('../routes/images/r2');      // or wherever your configured client is
 const R2_BUCKET = process.env.R2_BUCKET;
+// --- place near top of file ---
+const path   = require('path');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 router.use(express.json());
 
@@ -15,6 +19,52 @@ let pool = db.pool || db;
 if (!pool || typeof pool.query !== 'function') {
   throw new Error('[pg] pool.query not available — check require path/export');
 }
+
+// small helper: map ext → mime
+const MIME_BY_EXT = {
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif'
+};
+
+// ===================================================================
+// POST /api/quickhitter/upsert-avatar-r2
+// Writes to R2 key: avatars/anon/<timestamp>-<rand>.<ext> (no re-encode)
+// ===================================================================
+router.post('/upsert-avatar-r2', upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok: false, error: 'no_file' });
+
+    const ext = (path.extname(req.file.originalname) || '').toLowerCase();
+    const mime = MIME_BY_EXT[ext];
+    if (!mime) return res.status(400).json({ ok: false, error: 'bad_type' });
+
+    const key = `avatars/anon/${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
+
+    await s3.send(new DeleteObjectCommand({ // no-op safety for collisions
+      Bucket: R2_BUCKET,
+      Key: key
+    })).catch(() => {});
+
+    // Use PutObjectCommand without any image transform
+    const { PutObjectCommand } = require('@aws-sdk/client-s3');
+    await s3.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: mime,
+      CacheControl: 'public, max-age=31536000, immutable'
+    }));
+
+    // If you front R2 with your CDN helper, return that URL
+    const cdnKey = key; // same as image_key in DB
+    return res.json({ ok: true, image_key: cdnKey, url: toCdnUrl(cdnKey) });
+  } catch (err) {
+    console.error('[qh.upsert-avatar-r2]', err);
+    res.status(500).json({ ok: false, error: 'upload_failed' });
+  }
+});
 
 // ---------- CDN helpers ----------
 const { toCdnUrl, stripCdn } = require('../lib/cdn');
@@ -66,6 +116,19 @@ const e164 = v => {
   return t || null;
 };
 const isEmail = v => EMAIL_RE.test(norm(v));
+// helpers/swid.js
+function normalizeSwid(raw) {
+  if (!raw) return null;
+  try {
+    const decoded = decodeURIComponent(raw);
+    // Ensure braces and uppercase UUID
+    const m = decoded.match(/\{?([0-9a-fA-F-]{36})\}?/);
+    if (!m) return null;
+    return `{${m[1].toUpperCase()}}`;
+  } catch {
+    return null;
+  }
+}
 
 function rowToMember(row) {
   if (!row) return null;
@@ -211,18 +274,64 @@ async function phoneTakenByOtherMember(phone, memberId) {
 // ===================================================================
 // GET /api/quickhitter/check  → { ok, complete, member }
 // ===================================================================
+// ===================================================================
+// GET /api/quickhitter/check  → { ok, complete, member, linked? }
+// - Accepts SWID from cookie or header and matches against quick_snap/swid
+// - Backfills ff_quickhitter.swid when missing
+// - Establishes session (ff_member cookie) if found
+// ===================================================================
 router.get('/check', async (req, res) => {
   try {
-    const memberId = norm(req.cookies?.ff_member || '');
-    if (!memberId) return res.json({ ok: true, complete: false });
-    const { rows } = await pool.query(`SELECT * FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`, [memberId]);
-    const m = rowToMember(rows[0]);
-    return res.json({ ok: true, member: m, complete: isComplete(m) });
+    // 1) If already have a member cookie, return that (current behavior)
+    const cookieMember = norm(req.cookies?.ff_member || '');
+    if (cookieMember) {
+      const { rows } = await pool.query(
+        `SELECT * FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
+        [cookieMember]
+      );
+      const m = rowToMember(rows[0]);
+      return res.json({ ok: true, member: m, complete: isComplete(m), linked: true });
+    }
+
+    // 2) Try ESPN SWID (cookie or header)
+    const rawSwid = req.cookies?.SWID || req.get('x-espn-swid');
+    const swid = normalizeSwid(rawSwid);
+    if (!swid) return res.json({ ok: true, complete: false, linked: false });
+
+    // 3) Find QH by quick_snap or stored swid
+    const match = await pool.query(
+      `
+      SELECT *
+      FROM ff_quickhitter
+      WHERE quick_snap = $1 OR swid = $1
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC
+      LIMIT 1
+      `,
+      [swid]
+    );
+    const row = match.rows[0];
+    if (!row) return res.json({ ok: true, complete: false, linked: false });
+
+    // 4) Backfill swid if empty
+    if (!row.swid) {
+      await pool.query(
+        `UPDATE ff_quickhitter SET swid=$1, updated_at = NOW() WHERE id=$2`,
+        [swid, row.id]
+      );
+    }
+
+    // 5) Establish session as that member
+    const memberId = ensureMemberId(row.member_id);
+    res.cookie('ff_member', memberId, { httpOnly: true, sameSite: 'Lax', secure: true });
+
+    const m = rowToMember({ ...row, member_id: memberId });
+    return res.json({ ok: true, member: m, complete: isComplete(m), linked: true });
   } catch (e) {
     console.error('[qh.check]', e);
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
 
 // ===================================================================
 // GET /api/quickhitter/exists?handle=|email=|phone= → { ok, exists, verified? }
