@@ -73,7 +73,7 @@ async function linkFromSwid({ swidBrace }) {
     SELECT * FROM ff_quickhitter
      WHERE quick_snap = $1
         OR swid = $2::uuid
-     ORDER BY last_seen DESC NULLS LAST, created_at DESC
+     ORDER BY last_seen_at DESC NULLS LAST, created_at DESC
      LIMIT 1
     `,
     [swidBrace, swidUuid]
@@ -83,7 +83,7 @@ async function linkFromSwid({ swidBrace }) {
 
   // backfill swid uuid
   if (!row.swid) {
-    await pool.query(`UPDATE ff_quickhitter SET swid=$1::uuid, last_seen__at=NOW() WHERE id=$2`, [swidUuid, row.id]);
+    await pool.query(`UPDATE ff_quickhitter SET swid=$1::uuid, last_seen_at=NOW() WHERE id=$2`, [swidUuid, row.id]);
   }
 
   let memberId = norm(row.member_id);
