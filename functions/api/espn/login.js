@@ -48,12 +48,15 @@ module.exports = function createEspnCredLinkRouter(pool) {
   }
   function makeSid() { return crypto.randomBytes(24).toString('base64url'); }
 
-  function setFfCookies(res, memberId) {
-    // readable flags for FE + an HttpOnly session id
-    res.cookie('ff_member_id', memberId, { ...COOKIE_BASE, httpOnly: false, maxAge: 31536000000 });
-    res.cookie('ff_logged_in', '1',      { ...COOKIE_BASE, httpOnly: false, maxAge: 31536000000 });
-    res.cookie('ff_session_id', makeSid(), COOKIE_BASE);
-  }
+// routes/espn.js  (or wherever your ESPN endpoints live)
+const { setSessionCookie, setMemberCookie, clearEspnS2 } = require('../src/lib/cookies'); // adjust path
+
+function setAuthCookies(res, memberId) {
+  // keep the same member id you compute
+  setMemberCookie(res, memberId);        // readable for FE
+  setSessionCookie(res, makeSid());      // HttpOnly server session
+}
+
 
   function getEspnCookies(req) {
     const c = (req.cookies && Object.keys(req.cookies).length) ? req.cookies : readCookiesHeader(req.headers.cookie || '');
@@ -169,8 +172,24 @@ module.exports = function createEspnCredLinkRouter(pool) {
       if (link.member_id) {
         // write member_id back to cred
         await pool.query(`UPDATE ff_espn_cred SET member_id=$2, last_seen=NOW() WHERE swid=$1`, [swidBrace, link.member_id]);
-        setFfCookies(res, link.member_id);
-        return res.json({ ok: true, step: 'logged_in', member_id: link.member_id });
+        // /api/espn/login
+// after: await upsertEspnCred({ swidBrace, s2 });
+// after you resolved `link.step === 'linked'` with `link.memberId`
+setAuthCookies(res, link.memberId);
+clearEspnS2(res);           // we only needed S2 to attest; remove it from our domain
+
+// /api/espn/link-via-cookie
+if (link.step === 'linked') {
+  setAuthCookies(res, link.memberId);
+  clearEspnS2(res);
+  return res.json({ ok: true, step: 'linked', member_id: link.memberId });
+}
+
+// /api/espn/link { memberId }
+setAuthCookies(res, memberId);
+clearEspnS2(res);
+return res.json({ ok: true, linked: true, member_id: memberId });
+
       }
 
       // 4) captured creds but no association yet
