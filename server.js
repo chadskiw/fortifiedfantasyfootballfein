@@ -54,7 +54,7 @@ app.get('/status', (req, res) => {
 });
 // Mount under your platform namespace
 app.use('/api/platforms/espn', espnAuthRouter({
-  db,
+  pool,
   cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
 }));
 // ===== Early routers =====
