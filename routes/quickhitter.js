@@ -273,44 +273,41 @@ async function phoneTakenByOtherMember(phone, memberId) {
   return owner && owner !== memberId;
 }
 
-// ===================================================================
-// GET /api/quickhitter/check  → { ok, complete, member }
-// ===================================================================
-// ===================================================================
-// GET /api/quickhitter/check  → { ok, complete, member, linked? }
-// - Accepts SWID from cookie or header and matches against quick_snap/swid
-// - Backfills ff_quickhitter.swid when missing
-// - Establishes session (ff_member cookie) if found
-// ===================================================================
-// ===================================================================
-// GET /api/quickhitter/check  → { ok, complete, member, linked? }
-// - Accepts SWID from cookie or header
-// - Matches quick_snap (braced text) OR swid (uuid) correctly
-// - Backfills swid (uuid) if missing
-// - Establishes ff_member cookie
-// ===================================================================
+// GET /api/quickhitter/check
 router.get('/check', async (req, res) => {
   try {
-    // Already have a member cookie? Return that.
-    const cookieMember = norm(req.cookies?.ff_member || '');
+    const reasons = [];
+
+    // 1) If member cookie exists, try it FIRST
+    let cookieMember = norm(req.cookies?.ff_member || '');
     if (cookieMember) {
-      const { rows } = await pool.query(
+      const byCookie = await pool.query(
         `SELECT * FROM ff_quickhitter WHERE member_id=$1 LIMIT 1`,
         [cookieMember]
       );
-      const m = rowToMember(rows[0]);
-      return res.json({ ok: true, member: m, complete: isComplete(m), linked: true });
+      const row = byCookie.rows[0];
+      if (row) {
+        reasons.push('cookie_match');
+        const m = rowToMember(row);
+        return res.json({ ok: true, member: m, complete: isComplete(m), linked: true, reasons });
+      } else {
+        // cookie is stale/bad — clear it and proceed to SWID
+        reasons.push('cookie_stale_cleared');
+        res.clearCookie('ff_member', { sameSite: 'Lax', secure: true });
+        cookieMember = '';
+      }
     }
 
-    // Normalize ESPN SWID from cookie/header
+    // 2) Try ESPN SWID (cookie or header)
     const rawSwid = req.cookies?.SWID || req.get('x-espn-swid');
-    const swidBrace = normalizeSwid(rawSwid);       // "{UUID}" uppercased
-    if (!swidBrace) return res.json({ ok: true, complete: false, linked: false });
-
-    // Prepare uuid (no braces) for uuid column comparisons
+    const swidBrace = normalizeSwid(rawSwid); // "{UUID}" uppercase
+    if (!swidBrace) {
+      reasons.push('no_swid');
+      return res.json({ ok: true, complete: false, linked: false, reasons });
+    }
     const swidUuid = swidBrace.slice(1, -1).toLowerCase(); // strip {}
 
-    // Find by quick_snap (text) OR swid (uuid)
+    // 3) Find by quick_snap (text) OR swid (uuid)
     const { rows } = await pool.query(
       `
       SELECT *
@@ -323,27 +320,50 @@ router.get('/check', async (req, res) => {
       [swidBrace, swidUuid]
     );
     const row = rows[0];
-    if (!row) return res.json({ ok: true, complete: false, linked: false });
+    if (!row) {
+      reasons.push('swid_no_match');
+      return res.json({ ok: true, complete: false, linked: false, reasons });
+    }
 
-    // Backfill swid if empty
+    // 4) Backfill swid (uuid) if missing
     if (!row.swid) {
       await pool.query(
         `UPDATE ff_quickhitter SET swid = $1::uuid, updated_at = NOW() WHERE id = $2`,
         [swidUuid, row.id]
       );
+      reasons.push('backfilled_swid');
     }
 
-    // Establish session
-    const memberId = ensureMemberId(row.member_id);
-    res.cookie('ff_member', memberId, { httpOnly: true, sameSite: 'Lax', secure: true });
+    // 5) Ensure the row has a member_id and persist it if not
+    let memberId = row.member_id && String(row.member_id).trim();
+    if (!memberId) {
+      memberId = ensureMemberId(row.member_id);
+      await pool.query(
+        `UPDATE ff_quickhitter SET member_id = $1, updated_at = NOW() WHERE id = $2`,
+        [memberId, row.id]
+      );
+      reasons.push('backfilled_member_id');
+    }
+
+    // 6) Set cookie for future requests
+    // Make sure your app has: app.set('trust proxy', 1) when behind Cloudflare/Render
+    res.cookie('ff_member', memberId, {
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure: true,     // stays true; 'trust proxy' ensures it works behind TLS terminator
+      path: '/',
+      // domain: '.fortifiedfantasy.com', // uncomment if you need to share across subdomains
+    });
 
     const m = rowToMember({ ...row, member_id: memberId });
-    return res.json({ ok: true, member: m, complete: isComplete(m), linked: true });
+    reasons.push('swid_linked');
+    return res.json({ ok: true, member: m, complete: isComplete(m), linked: true, reasons });
   } catch (e) {
     console.error('[qh.check]', e);
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
 
 
 
