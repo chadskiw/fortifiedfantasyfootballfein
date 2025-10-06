@@ -57,10 +57,10 @@ async function upsertEspnCred({ swidBrace, s2 }) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
   await pool.query(
     `
-    INSERT INTO ff_espn_cred (swid, espn_s2, updated_at)
+    INSERT INTO ff_espn_cred (swid, espn_s2, last_seen)
     VALUES ($1::uuid, NULLIF($2,'') , NOW())
     ON CONFLICT (swid)
-    DO UPDATE SET espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2), updated_at = NOW()
+    DO UPDATE SET espn_s2 = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2), last_seen = NOW()
     `,
     [swidUuid, s2 || null]
   );
@@ -73,7 +73,7 @@ async function linkFromSwid({ swidBrace }) {
     SELECT * FROM ff_quickhitter
      WHERE quick_snap = $1
         OR swid = $2::uuid
-     ORDER BY updated_at DESC NULLS LAST, created_at DESC
+     ORDER BY last_seen DESC NULLS LAST, created_at DESC
      LIMIT 1
     `,
     [swidBrace, swidUuid]
@@ -83,13 +83,13 @@ async function linkFromSwid({ swidBrace }) {
 
   // backfill swid uuid
   if (!row.swid) {
-    await pool.query(`UPDATE ff_quickhitter SET swid=$1::uuid, updated_at=NOW() WHERE id=$2`, [swidUuid, row.id]);
+    await pool.query(`UPDATE ff_quickhitter SET swid=$1::uuid, last_seen__at=NOW() WHERE id=$2`, [swidUuid, row.id]);
   }
 
   let memberId = norm(row.member_id);
   if (!memberId) {
     memberId = ensureMemberId(row.member_id);
-    await pool.query(`UPDATE ff_quickhitter SET member_id=$1, updated_at=NOW() WHERE id=$2`, [memberId, row.id]);
+    await pool.query(`UPDATE ff_quickhitter SET member_id=$1, last_seen_at=NOW() WHERE id=$2`, [memberId, row.id]);
   }
 
   return { step: 'linked', memberId };
@@ -200,12 +200,12 @@ router.post('/link', async (req, res) => {
     // update/insert quickhitter row for that member (preserve existing handle/color/etc)
     await pool.query(
       `
-      INSERT INTO ff_quickhitter (member_id, quick_snap, swid, updated_at, created_at)
+      INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
       VALUES ($1, $2, $3::uuid, NOW(), NOW())
       ON CONFLICT (member_id)
       DO UPDATE SET quick_snap = EXCLUDED.quick_snap,
                     swid       = EXCLUDED.swid,
-                    updated_at = NOW()
+                    last_seen_at = NOW()
       `,
       [memberId, swidBrace, swidUuid]
     );
