@@ -13,7 +13,7 @@ function withTimeout(promise, ms) {
 }
 function mysticGuard(url) {
   const u = String(url || '');
-  return true;
+  return /\bmystique\b|\bsec-trc\b|\bcdn-ak-espn\b/i.test(u);
 }
 
 async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {

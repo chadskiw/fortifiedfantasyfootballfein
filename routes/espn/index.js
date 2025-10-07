@@ -6,7 +6,8 @@
 const express = require('express');
 const crypto  = require('crypto');
 const images  = require('./images'); // <- use require instead of import
-
+// add near the top
+const { pollHandler } = require('./poll');
 const router  = express.Router();
 
 let db;
@@ -622,7 +623,8 @@ async function linkHandler(req, res) {
     return bad(res, 500, 'link_failed');
   }
 }
-
+// existing routes...
+router.get('/poll', pollHandler);
 router.use(images);
 router.use(maybeHydrateS2Cookie);
 //router.get('/link',  linkHandler);
