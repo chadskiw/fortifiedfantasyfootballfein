@@ -22,29 +22,13 @@ function withTimeout(promise, ms) {
 const r = await safeFetch(upstreamUrl, { headers }, { retries: 1, timeout: DEFAULT_TIMEOUT_MS });
 
 if (!r.ok) {
-  // ESPN up but flaky (or blocked by Mystique/CDN): give the FE an empty roster, not a failure.
   if (r.blocked || r.status === 502 || r.status === 503 || r.status === 504) {
-    console.warn(`[espn/roster] upstream ${r.status || 'blocked'} → returning empty roster`);
-    return {
-      ok: true,
-      soft: true,
-      source: 'espn.v3',
-      platform: 'espn',
-      leagueId, season, week, teamId,
-      players: [],           // <- empty payload
-    };
+    console.warn(`[espn/roster] upstream ${r.status || 'blocked'} → soft-empty`);
+    return { ok: true, soft: true, source:'espn.v3', platform:'espn',
+             leagueId, season, week, teamId, players: [] };
   }
-
-  // other cases: structured soft fail (still empty players)
-  return {
-    ok: false,
-    soft: true,
-    code: r.blocked ? 'UPSTREAM_BLOCKED' : 'UPSTREAM_ERROR',
-    status: r.status || 0,
-    platform: 'espn',
-    leagueId, season, week, teamId,
-    players: [],
-  };
+  return { ok:false, soft:true, code: r.blocked ? 'UPSTREAM_BLOCKED' : 'UPSTREAM_ERROR',
+           status: r.status || 0, platform:'espn', leagueId, season, week, teamId, players: [] };
 }
 
 

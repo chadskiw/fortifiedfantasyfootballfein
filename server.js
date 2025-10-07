@@ -176,6 +176,13 @@ app.get('/bootstrap', async (req, res) => {
     res.status(200).json({ ok: true, authenticated: false });
   }
 });
+app.use((req,res,next)=>{
+  res.set('Content-Security-Policy',
+    "default-src 'self'; connect-src 'self' https://fortifiedfantasy.com; " +
+    "img-src 'self' data: https://img.fortifiedfantasy.com https://a.espncdn.com; " +
+    "frame-ancestors 'self'; base-uri 'self'");
+  next();
+});
 
 // ===== 🔧 IMPORTANT: FEIN roster JSON alias (TOP-LEVEL, before FEIN static) =====
 // Preserves the original query string (?season=&leagueId=&teamId=&week=)
