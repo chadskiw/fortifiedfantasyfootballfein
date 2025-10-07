@@ -37,10 +37,17 @@ app.use((req, res, next) => { res.set(allow); next(); });
 
 // ===== Health & status =====
 // server.js — add near the top-level after other routes
+// Health endpoints (must come before static middleware)
+app.get('/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: true, ts: new Date().toISOString(), path: '/healthz' });
+});
+
 app.get('/api/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ ok: true, ts: new Date().toISOString() });
+  res.json({ ok: true, ts: new Date().toISOString(), path: '/api/healthz' });
 });
+
 
 
 const pool = require('./src/db/pool');
