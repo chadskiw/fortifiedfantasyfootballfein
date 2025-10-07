@@ -80,7 +80,7 @@ const sendLogo = (req, res) => {
       .send('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0f1422"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="system-ui" font-size="10" fill="#9fb2c9">FF</text></svg>');
   }
 };
-app.use('/api/platforms/espn/poll', require('./routes/espn/poll'));
+app.get('/api/platforms/espn/poll', require('./routes/espn/poll'));
 // Mount under the routes your FE already hits
 app.get('/api/platforms/espn/image/:id', sendLogo);
 app.get('/api/espn/image/:id',           sendLogo); // legacy alias
