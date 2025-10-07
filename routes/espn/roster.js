@@ -13,21 +13,30 @@ function withTimeout(promise, ms) {
 }
 
 
-async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {
-  for (let i=0; i<=retries; i++) {
-    try {
-      const res = await withTimeout(fetch(url, opt), timeout); // Node 18+ has global fetch
-      if (!res.ok && (res.status >= 500 || [403,429,451].includes(res.status))) {
-        return { ok:false, status:res.status, blocked:true, res };
-      }
-      return { ok:res.ok, status:res.status, res };
-    } catch (e) {
-      if (i < retries) await sleep(250 + 250*i);
-      else return { ok:false, status:0, error:e?.message || 'fetch_failed' };
-    }
+ function mysticGuard(url) {
+   const u = String(url || '');
+   return /\bmystique\b|\bsec-trc\b|\bcdn-ak-espn\b/i.test(u);
+ }
+
+ async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {
+  // allow mystique/espn asset hosts to go through so upstream failures surface
+  // if you ever want to re-enable the guard, set process.env.MYSTIQUE_GUARD='1'
+  if (process.env.MYSTIQUE_GUARD === '1' && mysticGuard(url)) {
+    return { ok:false, status:0, blocked:true };
   }
-  return { ok:false, status:0, error:'unknown' };
-}
+   for (let i=0; i<=retries; i++) {
+     try {
+       const res = await withTimeout(fetch(url, opt), timeout);
+      // do not “catch” upstream errors; hand raw response back to caller
+      return { ok:res.ok, status:res.status, res };
+     } catch (e) {
+       if (i < retries) await sleep(250 + 250*i);
+       else return { ok:false, status:0, error:e?.message || 'fetch_failed' };
+     }
+   }
+   return { ok:false, status:0, error:'unknown' };
+ }
+
 
 function posName(id){
   switch(Number(id)){ case 1:return 'QB'; case 2:return 'RB'; case 3:return 'WR'; case 4:return 'TE'; case 5:return 'K'; case 16:return 'DST'; default:return 'FLEX'; }
