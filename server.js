@@ -36,10 +36,12 @@ app.options('*', (req, res) => res.set(allow).sendStatus(204));
 app.use((req, res, next) => { res.set(allow); next(); });
 
 // ===== Health & status =====
-app.get('/healthz', (_req, res) => {
+// server.js — add near the top-level after other routes
+app.get('/api/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ts: new Date().toISOString() });
 });
+
 
 const pool = require('./src/db/pool');
 app.set('pg', pool);
@@ -193,6 +195,14 @@ app.get('/robots.txt', (_req, res) => {
 
 // ===== Public static (non-FEIN) =====
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+app.use('/api/*', (req, res) => {
+  res.status(200).json({
+    ok: false,
+    soft: true,
+    error: 'not_found',
+    path: req.originalUrl || req.url,
+  });
+});
 
 // ===== JSON 404 for /api =====
 app.use('/api', (req, res, next) => {
