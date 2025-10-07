@@ -11,13 +11,9 @@ function withTimeout(promise, ms) {
     promise.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
   });
 }
-function mysticGuard(url) {
-  const u = String(url || '');
-  return /\bmystique\b|\bsec-trc\b|\bcdn-ak-espn\b/i.test(u);
-}
+
 
 async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {
-  if (mysticGuard(url)) return { ok:false, status:0, blocked:true };
   for (let i=0; i<=retries; i++) {
     try {
       const res = await withTimeout(fetch(url, opt), timeout); // Node 18+ has global fetch
