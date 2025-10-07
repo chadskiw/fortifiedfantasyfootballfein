@@ -1,7 +1,7 @@
 // TRUE_LOCATION: routes/espn/poll.js
 // Synthesizes Pole Position "pool" from the working /teams endpoint.
 
-const { fetchEspnTeams } = require('./teams'); // see note below
+const { fetchEspnTeams } = require('../pp/teams'); // see note below
 
 const CDN = 'https://img.fortifiedfantasy.com';
 const DEFAULT_IMG = `${CDN}/avatars/default.png`;
