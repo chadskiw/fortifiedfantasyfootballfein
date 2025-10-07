@@ -672,7 +672,29 @@ router.get('/link', async (req, res) => {
   }
 });
 
+router.get('/roster', async (req, res) => {
+  try {
+    const season   = Number(req.query.season) || new Date().getUTCFullYear();
+    const leagueId = req.query.leagueId;
+    const teamId   = req.query.teamId ? Number(req.query.teamId) : undefined;
+    const week     = req.query.week ? Number(req.query.week) : undefined;
+    const scope    = (req.query.scope || 'season');
 
+    if (!leagueId) {
+      return res.status(200).json({ ok:false, soft:true, code:'MISSING_LEAGUE', message:'leagueId is required', players:[] });
+    }
+
+    const swid = req.get('x-espn-swid') || req.cookies?.SWID || req.cookies?.ff_espn_swid || undefined;
+    const s2   = req.get('x-espn-s2')   || req.cookies?.espn_s2 || req.cookies?.ff_espn_s2 || undefined;
+
+    const payload = await getEspnRoster({ season, leagueId, teamId, week, scope, swid, s2 });
+    // Always 200; payload.ok may be false (soft failure). FE can render blanks.
+    res.status(200).json(payload);
+  } catch (e) {
+    console.error('[espn/roster] error', e);
+    res.status(200).json({ ok:false, soft:true, code:'HANDLER_CRASH', message:String(e?.message||e), players:[] });
+  }
+});
 
 
 
