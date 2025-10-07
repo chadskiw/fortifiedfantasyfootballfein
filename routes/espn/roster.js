@@ -18,24 +18,35 @@ function withTimeout(promise, ms) {
    return /\bmystique\b|\bsec-trc\b|\bcdn-ak-espn\b/i.test(u);
  }
 
- async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {
-  // allow mystique/espn asset hosts to go through so upstream failures surface
-  // if you ever want to re-enable the guard, set process.env.MYSTIQUE_GUARD='1'
-  if (process.env.MYSTIQUE_GUARD === '1' && url) {
-    return { ok:false, status:0, blocked:true };
+// inside getEspnRoster()
+const r = await safeFetch(upstreamUrl, { headers }, { retries: 1, timeout: DEFAULT_TIMEOUT_MS });
+
+if (!r.ok) {
+  // ESPN up but flaky (or blocked by Mystique/CDN): give the FE an empty roster, not a failure.
+  if (r.blocked || r.status === 502 || r.status === 503 || r.status === 504) {
+    console.warn(`[espn/roster] upstream ${r.status || 'blocked'} → returning empty roster`);
+    return {
+      ok: true,
+      soft: true,
+      source: 'espn.v3',
+      platform: 'espn',
+      leagueId, season, week, teamId,
+      players: [],           // <- empty payload
+    };
   }
-   for (let i=0; i<=retries; i++) {
-     try {
-       const res = await withTimeout(fetch(url, opt), timeout);
-      // do not “catch” upstream errors; hand raw response back to caller
-      return { ok:res.ok, status:res.status, res };
-     } catch (e) {
-       if (i < retries) await sleep(250 + 250*i);
-       else return { ok:false, status:0, error:e?.message || 'fetch_failed' };
-     }
-   }
-   return { ok:false, status:0, error:'unknown' };
- }
+
+  // other cases: structured soft fail (still empty players)
+  return {
+    ok: false,
+    soft: true,
+    code: r.blocked ? 'UPSTREAM_BLOCKED' : 'UPSTREAM_ERROR',
+    status: r.status || 0,
+    platform: 'espn',
+    leagueId, season, week, teamId,
+    players: [],
+  };
+}
+
 
 
 function posName(id){
