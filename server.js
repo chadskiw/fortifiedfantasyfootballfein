@@ -68,8 +68,30 @@ app.get('/status', (req, res) => {
    cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
  }));
 
-// Mount poll router under the ESPN namespace
-app.use('/api/platforms/espn', require('./routes/espn/poll'));
+// --- helper to accept CJS, ESM default, plain handler, or an Express Router
+function asMiddleware(mod) {
+  if (!mod) return null;
+  // unwrap ESM default
+  if (mod.default) return asMiddleware(mod.default);
+  // express.Router() has .handle
+  if (typeof mod === 'function') return mod;
+  if (typeof mod.handle === 'function') return mod;      // Router instance
+  if (mod.router && typeof mod.router.handle === 'function') return mod.router;
+  if (typeof mod.handler === 'function') return mod.handler;
+  return null;
+}
+
+// poll
+{
+  const pollMod = require('./routes/espn/poll');
+  const pollMw = asMiddleware(pollMod);
+  if (!pollMw) throw new Error('espn/poll export is not a middleware or Router');
+  app.use('/api/platforms/espn', pollMw);   // exposes GET /poll under /api/platforms/espn
+}
+
+// (repeat for other routers if needed)
+// const teamsMw = asMiddleware(require('./routes/espn/teams'));
+// app.use('/api/platforms/espn', teamsMw);
 
 // Avatar/logo fallback – always serve local logo, never call Mystique
 const sendLogo = (req, res) => {
