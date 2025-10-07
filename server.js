@@ -61,13 +61,15 @@ app.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
-app.get('/api/platforms/espn/poll', require('./routes/espn/poll'));
 
 // Mount under your platform namespace
  app.use('/api/platforms/espn', espnAuthRouter({
    pool,
    cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
  }));
+
+// Mount poll router under the ESPN namespace
+app.use('/api/platforms/espn', require('./routes/espn/poll'));
 
 // Avatar/logo fallback – always serve local logo, never call Mystique
 const sendLogo = (req, res) => {
