@@ -1,7 +1,16 @@
 // TRUE_LOCATION: routes/espn/poll.js
-// Synthesizes Pole Position "pool" from the working /teams endpoint.
+// Express Router that builds a Pole Position "pool" directly from ff_sport_ffl
+// and returns a flat list suitable for your FE PolePosition UI.
 
-const { fetchEspnTeams } = require('../pp/teams'); // see note below
+const express = require('express');
+const router = express.Router();
+
+// DB pool (same as used by routes/pp/teams.js)
+let db = require('../../src/db/pool');
+let pool = db.pool || db;
+if (!pool || typeof pool.query !== 'function') {
+  throw new Error('[espn/poll] pg pool missing/invalid import');
+}
 
 const CDN = 'https://img.fortifiedfantasy.com';
 const DEFAULT_IMG = `${CDN}/avatars/default.png`;
@@ -21,17 +30,74 @@ function sanitizeImg(src) {
   } catch { return DEFAULT_IMG; }
 }
 
-// Try to read W-L string safely
+// Try to read W-L string safely (fallback when record not present)
 function toRecord(rec) {
   if (!rec) return '0–0';
   if (typeof rec === 'string') return rec.replace('-', '–');
-  const { wins=0, losses=0, ties=0 } = rec;
+  const { wins = 0, losses = 0, ties = 0 } = rec;
   return `${wins}–${losses}${ties ? `–${ties}` : ''}`;
 }
 
 /**
- * Build a flat "pool" list:
- *   [{ leagueId, leagueName, teamId, teamName, logo, record }]
+ * Query ff_sport_ffl and quickhitter to produce a leagues → teams structure:
+ * [
+ *   { leagueId, leagueName, teams: [ { id, name, logo, record, owner... } ] }
+ * ]
+ */
+async function fetchEspnTeams({ season, sport = 'ffl' }) {
+  if (String(sport).toLowerCase() !== 'ffl') {
+    return [];
+  }
+
+  // Pull core league/team info; owner adornments are optional but nice for PP
+  const sql = `
+    SELECT
+      f.season,
+      f.league_id::text             AS "leagueId",
+      COALESCE(f.league_name,'League') AS "leagueName",
+      f.team_id::text               AS "teamId",
+      NULLIF(f.team_name,'')        AS "teamName",
+      COALESCE(f.team_logo_url,'')  AS "logo",
+      q.handle                      AS "ownerHandle",
+      q.color_hex                   AS "ownerColorHex",
+      CASE
+        WHEN q.image_key IS NOT NULL AND q.image_key <> ''
+          THEN ('https://img.fortifiedfantasy.com/' || q.image_key)
+        ELSE NULL
+      END                           AS "ownerBadgeUrl"
+    FROM ff_sport_ffl f
+    LEFT JOIN ff_quickhitter q
+      ON q.member_id = f.member_id
+    WHERE f.season = $1
+    ORDER BY f.league_id::text, f.team_id::text
+  `;
+  const { rows } = await pool.query(sql, [season]);
+
+  // Group rows into leagues
+  const map = new Map();
+  for (const r of rows) {
+    if (!map.has(r.leagueId)) {
+      map.set(r.leagueId, { leagueId: r.leagueId, leagueName: r.leagueName, teams: [] });
+    }
+    map.get(r.leagueId).teams.push({
+      id: r.teamId,
+      name: r.teamName || `Team ${r.teamId}`,
+      logo: sanitizeImg(r.logo),
+      record: toRecord(null), // if you add W/L later, wire it here
+      ownerHandle: r.ownerHandle || null,
+      ownerColorHex: r.ownerColorHex || null,
+      ownerBadgeUrl: (r.ownerBadgeUrl || '').replace(
+        'https://img.fortifiedfantasy.com//',
+        'https://img.fortifiedfantasy.com/'
+      ) || null,
+    });
+  }
+  return Array.from(map.values());
+}
+
+/**
+ * Build a flat "pool" list from leagues payload:
+ *   [{ leagueId, leagueName, teamId, teamName, logo, record, ownerHandle, ownerColorHex, ownerBadgeUrl }]
  */
 function buildPoolFromTeams(teamsPayload, { size = 10 } = {}) {
   const leagues = Array.isArray(teamsPayload?.leagues)
@@ -53,11 +119,14 @@ function buildPoolFromTeams(teamsPayload, { size = 10 } = {}) {
         teamName: t.name ?? t.teamName ?? `Team ${t.id}`,
         logo: sanitizeImg(t.logo ?? t.logoUrl ?? t.avatar),
         record: toRecord(t.record),
+        ownerHandle: t.ownerHandle || null,
+        ownerColorHex: t.ownerColorHex || null,
+        ownerBadgeUrl: t.ownerBadgeUrl || null,
       });
     }
   }
 
-  // Simple deterministic order: by league then by team name
+  // Deterministic order: league then team
   rows.sort((a, b) =>
     a.leagueId.localeCompare(b.leagueId) || a.teamName.localeCompare(b.teamName)
   );
@@ -71,11 +140,8 @@ async function pollHandler(req, res) {
     const size   = Number(req.query.size) || 10;
     const sport  = (req.query.sport || 'ffl').toLowerCase();
 
-    // Pull the same data your /teams route uses
-    // If you don't have fetchEspnTeams exported yet, export it from routes/espn/teams.js
-    const teamsPayload = await fetchEspnTeams({ season, sport, req });
-
-    const data = buildPoolFromTeams(teamsPayload, { size });
+    const leagues = await fetchEspnTeams({ season, sport });
+    const data = buildPoolFromTeams(leagues, { size });
 
     res.set('Cache-Control', 'no-store');
     return res.status(200).json({ ok: true, season, size, data, meta: { ts: Date.now() } });
@@ -85,4 +151,7 @@ async function pollHandler(req, res) {
   }
 }
 
-module.exports = { pollHandler, buildPoolFromTeams };
+// Mount GET /poll under whatever base path server.js uses (e.g., /api/platforms/espn)
+router.get('/poll', pollHandler);
+
+module.exports = router;
