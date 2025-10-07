@@ -57,15 +57,32 @@ async function getEspnRoster({ season, leagueId, teamId, week, scope='season', s
 
   const r = await safeFetch(upstreamUrl, { headers }, { retries:1, timeout:DEFAULT_TIMEOUT_MS });
 
-  if (!r.ok) {
+if (!r.ok) {
+  // Treat 502s and similar as safe empty payloads
+  if (r.status === 502 || r.status === 503 || r.status === 504) {
+    console.warn(`[espn/roster] upstream ${r.status} → returning empty roster`);
     return {
-      ok:false, soft:true,
-      code: r.blocked ? 'UPSTREAM_BLOCKED' : 'UPSTREAM_ERROR',
-      status: r.status || 0,
-      platform:'espn', leagueId, season, week, teamId,
-      players:[]
+      ok: true,
+      soft: true,
+      source: 'espn.v3',
+      platform: 'espn',
+      leagueId, season, week, teamId,
+      players: [],
     };
   }
+
+  // all other errors: structured soft fail
+  return {
+    ok: false,
+    soft: true,
+    code: r.blocked ? 'UPSTREAM_BLOCKED' : 'UPSTREAM_ERROR',
+    status: r.status || 0,
+    platform: 'espn',
+    leagueId, season, week, teamId,
+    players: [],
+  };
+}
+
 
   let data;
   try { data = await r.res.json(); } catch { data = null; }
