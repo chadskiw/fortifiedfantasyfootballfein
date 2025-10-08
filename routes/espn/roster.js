@@ -118,7 +118,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
     } else {
       errors.push(`ESPN ${res.status} ${res.statusText}`);
     }
-  }
+ 
 
   if (!data) {
     // If we tried multiple candidates, include a repro with redacted cookies
@@ -141,7 +141,7 @@ if (debug) {
     `-H 'User-Agent: ff-platform-service/1.0' ` +
     `-H 'Cookie: espn_s2=${cand.s2}; SWID=${cand.swid}'`
   );
-}
+}}
     throw new Error(errors[0] || 'ESPN 401');
   }
 
