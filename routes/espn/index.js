@@ -717,7 +717,7 @@ router.get('/teams', ensureCred, async (req, res) => {
       id: t.id,
       location: t.location,
       nickname: t.nickname,
-      logo: t.logo || null,
+      logo: imgt.logo || null,
       owners: t.owners || []
     }));
 

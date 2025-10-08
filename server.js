@@ -96,6 +96,14 @@ function asMiddleware(mod) {
   // exposes GET /api/platforms/espn/roster
   app.use('/api/platforms/espn', rosterMw);
 }
+// league
+{
+  const leagueMod = require('./routes/espn/league');
+  const leagueMw = asMiddleware(leagueMod);
+  if (!leagueMw) throw new Error('espn/league export is not a middleware or Router');
+  // exposes GET /api/platforms/espn/roster
+  app.use('/api/platforms/espn', leaguerMw);
+}
 
 // (repeat for other routers if needed)
 // const teamsMw = asMiddleware(require('./routes/espn/teams'));
