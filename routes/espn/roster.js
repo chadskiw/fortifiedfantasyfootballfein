@@ -129,7 +129,19 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
       url,
     });
     // Show curl repro once (cookies redacted)
-    console.warn("[espn/roster] repro: curl -i '%s' -H 'Accept: application/json, text/plain, */*' -H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${s2}; SWID=${swid}'", url);
+if (debug) {
+  console.warn(
+    `[espn/roster] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+    `-H 'User-Agent: ff-platform-service/1.0' ` +
+    `-H 'Cookie: espn_s2=${cand.s2}; SWID=${cand.swid}'`
+  );
+} else {
+  console.warn(
+    `[espn/roster] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+    `-H 'User-Agent: ff-platform-service/1.0' ` +
+    `-H 'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'`
+  );
+}
     throw new Error(errors[0] || 'ESPN 401');
   }
 
