@@ -174,55 +174,6 @@ async function getRosterFromUpstream({ season, leagueId, week = 1, teamId, req, 
 }
 
 
-  if (!data) {
-    throw new Error(errors.join(' | '));
-  }
-
-  // --- helpers local to this function ---
-  const teamNameOf = (t) => {
-    const loc = t?.location || t?.teamLocation || '';
-    const nick = t?.nickname || t?.teamNickname || '';
-    const joined = `${loc} ${nick}`.trim();
-    return joined || t?.name || `Team ${t?.id}`;
-  };
-
-  const rosterEntriesOf = (t) => {
-    const entries = t?.roster?.entries || [];
-    return entries.map(e => {
-      const p = e?.playerPoolEntry?.player || e?.player || {};
-      return {
-        lineupSlotId: e?.lineupSlotId ?? e?.player?.lineupSlotId,
-        onTeam: true,
-        player: {
-          id: p?.id,
-          fullName: p?.fullName || p?.displayName || p?.name,
-          defaultPositionId: p?.defaultPositionId,
-          proTeamId: p?.proTeamId,
-          proTeamAbbreviation: p?.proTeamAbbreviation,
-          headshot: p?.headshot || p?.ownership?.profile?.headshot || null,
-          image: p?.image || null,
-          photo: p?.photo || null,
-          avatar: p?.avatar || null,
-          fantasyProsId: p?.fantasyProsId || p?.fpId
-        }
-      };
-    });
-  };
-
-  // Single-team response
-  if (teamId != null) {
-    const team = (data?.teams || []).find(t => Number(t?.id) === Number(teamId));
-    if (!team) return { ok: true, team_name: `Team ${teamId}`, players: [] };
-    return { ok: true, team_name: teamNameOf(team), players: rosterEntriesOf(team) };
-  }
-
-  // League-wide response
-  const teams = (data?.teams || []).map(t => ({
-    teamId: t?.id,
-    team_name: teamNameOf(t),
-    players: rosterEntriesOf(t)
-  }));
-
 
 /* ---------------- headshot resolver ---------------- */
 
