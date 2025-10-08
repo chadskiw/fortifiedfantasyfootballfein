@@ -58,119 +58,19 @@ function readEspnCreds(req) {
     h['x-espn-s2'] || null;
   return { swid, s2 };
 }
-
+function espnPlayersUrl({ season, leagueId, week }) {
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}/players`;
+  const sp = new URLSearchParams();
+  if (week) sp.set('scoringPeriodId', String(week));
+  sp.set('view', 'kona_player_info');
+  sp.set('limit', '1000');
+  sp.set('offset', '0');
+  return `${base}?${sp.toString()}`;
+}
 /* ---------------- upstream fetcher (ESPN v3) ---------------- */
 
 async function getRosterFromUpstream({ season, leagueId, week = 1, teamId, req, debug }) {
-  if (!season || !leagueId) throw new Error('season and leagueId are required');
-
-  const { swid, s2 } = readEspnCreds(req);
-  if (!swid || !s2) {
-    console.warn('[roster] Missing SWID/S2 — ESPN may reject');
-  }
-
-  const hosts = [
-    'https://lm-api-reads.fantasy.espn.com', // primary read host
-    'https://fantasy.espn.com'               // fallback
-  ];
-
-  // Shared query
-  const params = new URLSearchParams({
-    matchupPeriodId: String(week || 1),
-    scoringPeriodId: String(week || 1),
-  });
-  params.append('view', 'mTeam');
-  params.append('view', 'mRoster');
-  params.append('view', 'mSettings');
-
-  // Some leagues honor forTeamId; harmless if ignored
-  if (teamId != null) params.set('forTeamId', String(teamId));
-
-  // Headers ESPN expects
-  const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    'User-Agent': 'ff-platform-service/1.0',
-    'Origin': 'https://fantasy.espn.com',
-    'Referer': `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${season}`,
-    'x-fantasy-platform': 'kona',
-    'x-fantasy-source': 'fantasy_web',
-  };
-  if (swid && s2) {
-    headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`; // order matters for some WAF paths
-    headers['x-espn-s2'] = s2;
-    headers['x-espn-swid'] = swid;
-  }
-
-  const path = `/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-  const errors = [];
-  let data = null;
-
-  for (const host of hosts) {
-    const url = `${host}${path}?${params.toString()}`;
-    try {
-      const r = await fetch(url, { headers });
-      if (!r.ok) {
-        const txt = await r.text().catch(() => '');
-        const msg = `ESPN ${r.status} ${r.statusText} @ ${host}`;
-        errors.push(debug ? `${msg} – ${txt.slice(0, 256)}` : msg);
-        continue;
-      }
-      data = await r.json();
-      break;
-    } catch (e) {
-      errors.push(`Fetch failed @ ${host}: ${String(e.message || e)}`);
-    }
-  }
-
-  if (!data) {
-    throw new Error(errors.join(' | '));
-  }
-
-  // Helpers
-  const teamNameOf = (t) => {
-    const loc = t?.location || t?.teamLocation || '';
-    const nick = t?.nickname || t?.teamNickname || '';
-    const joined = `${loc} ${nick}`.trim();
-    return joined || t?.name || `Team ${t?.id}`;
-  };
-
-  const rosterEntriesOf = (t) => {
-    const entries = t?.roster?.entries || [];
-    return entries.map(e => {
-      const p = e?.playerPoolEntry?.player || e?.player || {};
-      return {
-        lineupSlotId: e?.lineupSlotId ?? e?.player?.lineupSlotId,
-        onTeam: true,
-        player: {
-          id: p?.id,
-          fullName: p?.fullName || p?.displayName || p?.name,
-          defaultPositionId: p?.defaultPositionId,
-          proTeamId: p?.proTeamId,
-          proTeamAbbreviation: p?.proTeamAbbreviation,
-          headshot: p?.headshot || p?.ownership?.profile?.headshot || null,
-          image: p?.image || null,
-          photo: p?.photo || null,
-          avatar: p?.avatar || null,
-          fantasyProsId: p?.fantasyProsId || p?.fpId
-        }
-      };
-    });
-  };
-
-  // Single-team result
-  if (teamId != null) {
-    const team = (data?.teams || []).find(t => Number(t?.id) === Number(teamId));
-    if (!team) return { ok: true, team_name: `Team ${teamId}`, players: [] };
-    return { ok: true, team_name: teamNameOf(team), players: rosterEntriesOf(team) };
-  }
-
-  // League-wide result
-  const teams = (data?.teams || []).map(t => ({
-    teamId: t?.id,
-    team_name: teamNameOf(t),
-    players: rosterEntriesOf(t)
-  }));
-  return { ok: true, teams };
+ return espnPlayersUrl({season, leagueId, week});
 }
 
 
