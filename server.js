@@ -88,6 +88,14 @@ function asMiddleware(mod) {
   if (!pollMw) throw new Error('espn/poll export is not a middleware or Router');
   app.use('/api/platforms/espn', pollMw);   // exposes GET /poll under /api/platforms/espn
 }
+// roster
+{
+  const rosterMod = require('./routes/espn/roster');
+  const rosterMw = asMiddleware(rosterMod);
+  if (!rosterMw) throw new Error('espn/roster export is not a middleware or Router');
+  // exposes GET /api/platforms/espn/roster
+  app.use('/api/platforms/espn', rosterMw);
+}
 
 // (repeat for other routers if needed)
 // const teamsMw = asMiddleware(require('./routes/espn/teams'));
