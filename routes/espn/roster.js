@@ -49,14 +49,22 @@ function mask(v) {
   if (s.length <= 12) return s;
   return s.slice(0, 6) + '…' + s.slice(-6);
 }
+const NFL_MAX_WEEK = 18;
 
+function guessCurrentWeek(){
+  const urlW = Number(new URL(location.href).searchParams.get('week'));
+  if (Number.isFinite(urlW) && urlW >= 1) return clamp(urlW,1,NFL_MAX_WEEK);
+  const ls = Number(localStorage.getItem('ff.week'));
+  if (Number.isFinite(ls) && ls >= 1) return clamp(ls,1,NFL_MAX_WEEK);
+  return 1;
+}
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
 let data = null;
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const params = new URLSearchParams({
-    matchupPeriodId: String(week || 1),
-    scoringPeriodId: String(week || 1),
+    matchupPeriodId: String(week || guessCurrentWeek()),
+    scoringPeriodId: String(week || guessCurrentWeek()),
   });
   params.append('view', 'mTeam');
   params.append('view', 'mRoster');
