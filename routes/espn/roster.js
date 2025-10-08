@@ -63,7 +63,7 @@ function mask(v) {
 
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
-
+let data = null;
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const params = new URLSearchParams({
     matchupPeriodId: String(week || 1),
@@ -104,7 +104,7 @@ if (!data) {
 }
 
   const errors = [];
-  let data = null, winner = null, lastCand = null;
+   winner = null, lastCand = null;
 
   for (const cand of cands) {
     lastCand = cand;
