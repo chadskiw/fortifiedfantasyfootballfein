@@ -4,6 +4,7 @@ const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
 const { fetchJsonWithCred } = require('./_fetch');
 
+const NFL_MAX_WEEK = 5;
 
 // ----- ESPN → FF maps (corrected) -----
 const TEAM_ABBR = {
@@ -49,14 +50,13 @@ function mask(v) {
   if (s.length <= 12) return s;
   return s.slice(0, 6) + '…' + s.slice(-6);
 }
-const NFL_MAX_WEEK = 18;
 
 function guessCurrentWeek(){
   const urlW = Number(new URL(location.href).searchParams.get('week'));
   if (Number.isFinite(urlW) && urlW >= 1) return clamp(urlW,1,NFL_MAX_WEEK);
   const ls = Number(localStorage.getItem('ff.week'));
   if (Number.isFinite(ls) && ls >= 1) return clamp(ls,1,NFL_MAX_WEEK);
-  return 1;
+  return NFL_MAX_WEEK);
 }
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
