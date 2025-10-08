@@ -1,93 +1,117 @@
-/**
- * getEspnRoster
- * Server-side helper you can import from other server files.
- * Returns the same shapes your route returns (one team or league-wide).
- *
- * @param {Object} params
- * @param {string|number} params.leagueId
- * @param {number} params.season
- * @param {number|undefined} params.week
- * @param {string|undefined} params.teamId
- * @param {string} params.swid   // normalized {GUID} or empty
- * @param {string} params.s2     // espn_s2 or empty
- * @returns {Promise<{ ok: boolean } & object>}
- */
-export async function getEspnRoster({ leagueId, season, week, teamId, swid, s2 }) {
-  if (!leagueId) return { ok:false, error:'Missing leagueId' };
-  if (!Number.isFinite(season) || season < 2000) return { ok:false, error:'Invalid season' };
-  if (week != null && (!Number.isFinite(week) || week < 0)) return { ok:false, error:'Invalid week' };
+// ----- ESPN → FF maps (corrected) -----
+const TEAM_ABBR = {
+  1:'ATL',2:'BUF',3:'CHI',4:'CIN',5:'CLE',6:'DAL',7:'DEN',8:'DET',9:'GB',
+  10:'TEN',11:'IND',12:'KC',13:'LV',14:'LAR',15:'MIA',16:'MIN',17:'NE',
+  18:'NO',19:'NYG',20:'NYJ',21:'PHI',22:'ARI',23:'PIT',24:'LAC',25:'SF',
+  26:'SEA',27:'TB',28:'WSH',29:'CAR',30:'JAX',33:'BAL',34:'HOU'
+};
 
-  // Build headers once
-  const headers = {
-    cookie: (swid && s2) ? `SWID=${swid}; espn_s2=${s2}` : '',
-    accept: "application/json",
-    referer: `https://fantasy.espn.com/football/league?leagueId=${leagueId}`,
-    origin: "https://fantasy.espn.com",
-    "user-agent": "FortifiedFantasy/1.0 (+cf-pages)",
-    "x-fantasy-platform": "kona",
-    "x-fantasy-source": "kona",
-    "cache-control": "no-cache",
-  };
+// ESPN defaultPositionId -> canonical position  (✔ fixed)
+const POS = {
+  1:'QB',
+  2:'RB',
+  3:'WR',
+  4:'TE',
+  5:'K',
+  16:'DST'
+};
 
-  // Try read host first, then standard host
-  const urls = [
-    { label: "lm-api-reads", href: espnLeagueUrlRead({ leagueId, season, week }) },
-    { label: "fantasy.espn.com", href: espnLeagueUrlStd({ leagueId, season, week }) },
-  ];
+// ESPN lineupSlotId -> slot label (expanded)
+const SLOT = {
+  0:'QB',
+  2:'RB',
+  3:'RB/WR',
+  4:'WR',
+  5:'WR/TE',
+  6:'TE',
+  7:'OP',           // superflex/OP
+  16:'DST',
+  17:'K',
+  18:'P',           // punter in some leagues
+  19:'HC',
+  20:'BE',
+  21:'IR',
+  22:'ES',          // espn 'extra slot'
+  23:'FLEX',        // RB/WR/TE
+  24:'ED',
+  25:'DL',
+  26:'LB',
+  27:'DB',
+  28:'DP'
+};
 
-  let upstream = null;
-  const attempts = [];
-  for (const u of urls) {
-    const res = await fetchJson(u.href, { headers }, 12000);
-    attempts.push({ host: u.label, status: res.status, ok: res.ok, hasData: !!res.data, bodyPreview: res.ok ? undefined : res.raw });
-    if (res.ok && res.data) { upstream = res; break; }
+function resolveHeadshot(p, position, teamAbbr) {
+  // Prefer explicit URLs ESPN sometimes returns
+  const cand =
+    p.headshot?.href ||
+    p.headshot ||
+    p.image?.href ||
+    p.photo?.href ||
+    p.avatar?.href ||
+    null;
+
+  if (cand) return cand;
+
+  // D/ST: use team logo (players don't have headshots)
+  if (position === 'DST' && teamAbbr) {
+    const slug = teamAbbr.toLowerCase();
+    return `https://a.espncdn.com/combiner/i?img=/i/teamlogos/nfl/500/${slug}.png&h=80&w=80&scale=crop`;
   }
 
-  if (!upstream?.ok || !upstream?.data) {
-    return {
-      ok: false,
-      error: "Upstream ESPN error",
-      status: upstream?.status ?? 502,
-      upstream: upstream?.data ?? upstream?.raw ?? null,
-      attempts,
-    };
+  // Fallback to ESPN id-based headshot (often exists)
+  if (p.id) {
+    return `https://a.espncdn.com/i/headshots/nfl/players/full/${p.id}.png`;
   }
 
-  const blob = upstream.data || {};
-  const rawTeams = Array.isArray(blob?.teams) ? blob.teams : [];
+  // Final local placeholder
+  return '/img/placeholders/player.png';
+}
 
-  if (teamId) {
-    const t = rawTeams.find((tt) => String(tt?.id) === String(teamId));
-    if (!t) {
-      return {
-        ok: false,
-        error: `Team ${teamId} not found in league ${leagueId}`,
-        teamsReturned: rawTeams.length,
-      };
-    }
-    const one = normalizeOneTeam(t);
-    return {
-      ok: true,
-      platform: "espn",
-      leagueId: String(leagueId),
-      season: Number(season),
-      week: week ?? null,
-      teamId: one.teamId,
-      team_name: one.team_name,
-      players: one.players,
-      meta: { attempts },
-    };
-  }
+function espnRosterEntryToPlayer(entry = {}) {
+  const p = entry.player || entry;
 
-  // league-wide
-  const teams = rawTeams.map(normalizeOneTeam);
+  const teamAbbr =
+    p.proTeamAbbreviation ||
+    TEAM_ABBR[p.proTeamId] ||
+    p.proTeam ||
+    '';
+
+  // Position: prefer mapped id, then any string present
+let position =
+  POS[p.defaultPositionId] ||
+  p.position ||
+  p.defaultPosition ||
+  (p.player && POS[p.player?.defaultPositionId]) ||
+  '';
+
+position = correctKnownPosition(p.fullName || p.displayName || p.name, position);
+
+
+  // Slot: from lineupSlotId with safe fallbacks
+  const slot =
+    SLOT[entry.lineupSlotId] ||
+    entry.slot ||
+    (entry.onTeam ? 'BE' : 'BE');
+
+  const isStarter = !['BE','BN','IR'].includes(String(slot).toUpperCase());
+
+  const fpId =
+    p.fantasyProsId ||
+    p.fpId ||
+    p.externalIds?.fantasyProsId ||
+    p.externalIds?.fpid ||
+    undefined;
+
+  const headshot = resolveHeadshot(p, position, teamAbbr);
+
   return {
-    ok: true,
-    platform: "espn",
-    leagueId: String(leagueId),
-    season: Number(season),
-    week: week ?? null,
-    teams,
-    meta: { attempts },
+    id: p.id || p.playerId,
+    name: p.fullName || p.displayName || p.name,
+    team: teamAbbr,
+    position,            // ✔ correct now (TE shows as TE)
+    slot,                // QB/RB/WR/TE/FLEX/K/DST/BE/IR/...
+    isStarter,
+    fpId,
+    headshot
   };
 }

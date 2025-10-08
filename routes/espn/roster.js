@@ -233,12 +233,15 @@ function espnRosterEntryToPlayer(entry = {}) {
     '';
 
   // Position: prefer mapped id, then any string present
-  const position =
-    POS[p.defaultPositionId] ||
-    p.position ||
-    p.defaultPosition ||
-    (p.player && POS[p.player?.defaultPositionId]) ||
-    '';
+let position =
+  POS[p.defaultPositionId] ||
+  p.position ||
+  p.defaultPosition ||
+  (p.player && POS[p.player?.defaultPositionId]) ||
+  '';
+
+position = correctKnownPosition(p.fullName || p.displayName || p.name, position);
+
 
   // Slot: from lineupSlotId with safe fallbacks
 const slot = slotLabel(entry.lineupSlotId, p.defaultPositionId);
