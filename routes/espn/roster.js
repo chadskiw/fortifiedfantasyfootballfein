@@ -58,28 +58,140 @@ function readEspnCreds(req) {
   return { swid, s2 };
 }
 
-async function fetchJsonWithCred(url, cand) {
+async function fetchJsonWithCred(url, cand = {}) {
   const headers = {
     'Accept': 'application/json, text/plain, */*',
     'User-Agent': 'ff-platform-service/1.0',
   };
-  if (cand?.swid && cand?.s2) {
+  // espn_s2 FIRST, then SWID (WAF is picky)
+  if (cand.s2 && cand.swid) {
     headers['Cookie'] = `espn_s2=${cand.s2}; SWID=${cand.swid}`;
-    headers['x-espn-s2'] = cand.s2;
-    headers['x-espn-swid'] = cand.swid;
   }
   const r = await fetch(url, { headers });
-  const text = await r.text().catch(()=>'');
-
-  return {
-    ok: r.ok,
-    status: r.status,
-    statusText: r.statusText || '',
-    json: (!text ? null : (()=>{ try { return JSON.parse(text); } catch { return null; } })()),
-    text,
-    headers,
-  };
+  const text = await r.text().catch(() => '');
+  let json = null; try { json = JSON.parse(text); } catch {}
+  return { ok: r.ok, status: r.status, statusText: r.statusText, text, json };
 }
+
+function mask(v) {
+  if (!v) return '';
+  const s = String(v);
+  if (s.length <= 12) return s;
+  return s.slice(0, 6) + '…' + s.slice(-6);
+}
+
+async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
+  if (!season || !leagueId) throw new Error('season and leagueId are required');
+
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const params = new URLSearchParams({
+    matchupPeriodId: String(week || 1),
+    scoringPeriodId: String(week || 1),
+  });
+  params.append('view', 'mTeam');
+  params.append('view', 'mRoster');
+  params.append('view', 'mSettings');
+
+  const url = `${base}?${params.toString()}`;
+  console.log('[roster] fetch:', url);
+
+  const candidates = (await resolveEspnCredCandidates({ req, leagueId, teamId })) || [];
+  if (!candidates.length) {
+    console.warn('[espn/roster] no ESPN creds available for league', { leagueId, teamId });
+  }
+
+  const errors = [];
+  let data = null, winner = null, lastCand = null;
+
+  for (const cand of candidates) {
+    lastCand = cand;
+    const res = await fetchJsonWithCred(url, cand);
+    if (res.ok && res.json) { data = res.json; winner = cand; break; }
+
+    if (res.status === 401) {
+      console.warn('[espn/roster] 401 with candidate', {
+        leagueId, teamId,
+        source: cand.source,
+        member_id: cand.member_id || null,
+        bodySnippet: (res.text || '').slice(0, 300),
+      });
+    } else {
+      errors.push(`ESPN ${res.status} ${res.statusText}`);
+    }
+  }
+
+  if (!data) {
+    const s2 = lastCand?.s2 || candidates[0]?.s2 || '';
+    const swid = lastCand?.swid || candidates[0]?.swid || '';
+const s2Out = s2;
+const swidOut = swid;
+
+
+    console.warn('[espn/roster] all candidates failed', {
+      leagueId, teamId,
+      tried: candidates.map(c => c.source),
+      lastError: errors[errors.length - 1] || 'unauthorized',
+      url,
+    });
+    console.warn(
+      `[espn/roster] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+      `-H 'User-Agent: ff-platform-service/1.0' ` +
+      `-H 'Cookie: espn_s2=${s2Out}; SWID=${swidOut}'`
+    );
+    throw new Error(errors[0] || 'ESPN 401');
+  }
+
+  // Let FE/devtools know which credential source worked
+  if (winner) {
+    try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
+  }
+
+  // ---- normalization (unchanged) ----
+  const teamNameOf = (t) => {
+    const loc = t?.location || t?.teamLocation || '';
+    const nick = t?.nickname || t?.teamNickname || '';
+    const joined = `${loc} ${nick}`.trim();
+    return joined || t?.name || `Team ${t?.id}`;
+  };
+
+  const rosterEntriesOf = (t) => {
+    const entries = t?.roster?.entries || [];
+    return entries.map(e => {
+      const p = e?.playerPoolEntry?.player || e?.player || {};
+      return {
+        lineupSlotId: e?.lineupSlotId ?? e?.player?.lineupSlotId,
+        onTeam: true,
+        player: {
+          id: p?.id,
+          fullName: p?.fullName || p?.displayName || p?.name,
+          defaultPositionId: p?.defaultPositionId,
+          proTeamId: p?.proTeamId,
+          proTeamAbbreviation: p?.proTeamAbbreviation,
+          headshot: p?.headshot || p?.ownership?.profile?.headshot || null,
+          image: p?.image || null,
+          photo: p?.photo || null,
+          avatar: p?.avatar || null,
+          fantasyProsId: p?.fantasyProsId || p?.fpId
+        }
+      };
+    });
+  };
+
+  if (teamId != null) {
+    const team = (data?.teams || []).find(t => Number(t?.id) === Number(teamId));
+    if (!team) return { ok: true, team_name: `Team ${teamId}`, players: [] };
+    const players = rosterEntriesOf(team);
+    return { ok: true, team_name: teamNameOf(team), players };
+  }
+
+  const teams = (data?.teams || []).map(t => ({
+    teamId: t?.id,
+    team_name: teamNameOf(t),
+    players: rosterEntriesOf(t)
+  }));
+  return { ok: true, teams };
+}
+
 
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
