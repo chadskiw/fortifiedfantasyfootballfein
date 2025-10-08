@@ -241,6 +241,9 @@ let position =
   '';
 
 position = correctKnownPosition(p.fullName || p.displayName || p.name, position);
+if (!position && entry.lineupSlotId) {
+  position = slotLabel(entry.lineupSlotId);
+}
 
 
   // Slot: from lineupSlotId with safe fallbacks
