@@ -4,7 +4,8 @@
 
 const express = require('express');
 const router  = express.Router();
-const { resolveEspnCredCandidates } = require('./espnCred'); // <-- NEW
+const { resolveEspnCredCandidates } = require('./_cred');
+const { fetchJsonWithCred } = require('./_fetch');
 /* ---------------- creds from cookies/headers ---------------- */
 
 function readEspnCreds(req) {
@@ -203,10 +204,32 @@ router.get('/league', async (req, res) => {
 
     // try candidate creds in order
     const { resolveEspnCredCandidates } = require('./espnCred'); // your helper
-    const cands = await resolveEspnCredCandidates({ req, leagueId });
-    if (!Array.isArray(cands) || !cands.length) {
-      console.warn('[espn/league] no ESPN creds available for league', { leagueId });
-    }
+const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
+if (!cands.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
+
+let last = null;
+for (const cand of cands) {
+  const res = await fetchJsonWithCred(url.toString(), cand);
+  if (res.ok && res.json) {
+    try { req.res?.set?.('x-espn-cred-source', cand.source || 'unknown'); } catch {}
+    data = res.json;
+    break;
+  }
+  last = { cand, res };
+  if (res.status === 401) {
+    console.warn('[espn/league] 401 with candidate', {
+      leagueId, source: cand.source, member_id: cand.member_id || null,
+      bodySnippet: (res.text||'').slice(0,240)
+    });
+  }
+}
+if (!data) {
+  console.warn(
+    `[espn/league] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+    `-H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${last?.cand?.s2||''}; SWID=${last?.cand?.swid||''}'`
+  );
+  throw new Error(`ESPN ${last?.res?.status || 401} ${last?.res?.statusText || ''}`);
+}
 
     let lastErr = null;
     let winner  = null;
