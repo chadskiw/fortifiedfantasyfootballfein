@@ -156,15 +156,7 @@ function sanitizeImg(src){
   if (!src) return DEFAULT_IMG;
   const s = String(src).trim();
   if (/^myst(ic|ique):/i.test(s)) return DEFAULT_IMG;
-  if (!/^https?:\/\//i.test(s)) {
-    if (/^data:/i.test(s)) return s; // allow legitimate data URIs
-    return DEFAULT_IMG;
-  }
-  try {
-    const u = new URL(s);
-    if (/\bmystic\b|\bmystique\b/i.test(u.hostname)) return DEFAULT_IMG;
-    return u.href;
-  } catch { return DEFAULT_IMG; }
+return src;
 }
 /* ---------------- routes ---------------- */
 
