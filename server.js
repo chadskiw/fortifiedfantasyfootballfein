@@ -68,6 +68,18 @@ app.get('/status', (req, res) => {
    cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
  }));
 
+// --- helper to accept CJS, ESM default, plain handler, or an Express Router
+function asMiddleware(mod) {
+  if (!mod) return null;
+  // unwrap ESM default
+  if (mod.default) return asMiddleware(mod.default);
+  // express.Router() has .handle
+  if (typeof mod === 'function') return mod;
+  if (typeof mod.handle === 'function') return mod;      // Router instance
+  if (mod.router && typeof mod.router.handle === 'function') return mod.router;
+  if (typeof mod.handler === 'function') return mod.handler;
+  return null;
+}
 
 // poll
 {
