@@ -114,7 +114,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
         url,
         `'Accept: application/json, text/plain, */*'`,
         `'User-Agent: ff-platform-service/1.0'`,
-        `'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'`
+        `'Cookie: espn_s2=${s2}; SWID=${swid}'`
       );
     }
     const msg = `ESPN ${r.status} ${r.statusText || ''}`;
