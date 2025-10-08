@@ -21,7 +21,7 @@ function withTimeout(promise, ms) {
  async function safeFetch(url, opt={}, { retries=1, timeout=DEFAULT_TIMEOUT_MS } = {}) {
   // allow mystique/espn asset hosts to go through so upstream failures surface
   // if you ever want to re-enable the guard, set process.env.MYSTIQUE_GUARD='1'
-  if (process.env.MYSTIQUE_GUARD === '1' && mysticGuard(url)) {
+  if (process.env.MYSTIQUE_GUARD === '1' && url) {
     return { ok:false, status:0, blocked:true };
   }
    for (let i=0; i<=retries; i++) {
