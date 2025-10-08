@@ -69,7 +69,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
     console.warn('[roster] Missing SWID/S2 — ESPN may reject');
   }
 
-  const base = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const params = new URLSearchParams({
     matchupPeriodId: String(week || 1),
     scoringPeriodId: String(week || 1),
