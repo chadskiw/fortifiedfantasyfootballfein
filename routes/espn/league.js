@@ -158,47 +158,104 @@ router.get('/league/selftest', (_req, res) => {
 
 // GET /api/platforms/espn/league?season=2025&leagueId=123456
 // Optional: &debug=1 to include upstream snippet/hint
+function mask(v){ if(!v) return ''; const s=String(v); return s.length<=12?s:'{'+s.slice(1,7)+'…'+s.slice(-7)+'}'; }
+const ESPN_BASE_HOST = 'https://lm-api-reads.fantasy.espn.com';
+
+async function espnGET(url, { swid, s2, debug }) {
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'ff-platform-service/1.0'
+  };
+  if (s2 && swid) headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
+  const r = await fetch(url, { headers });
+  const text = await r.text().catch(()=>'');
+  let json = null; try { json = JSON.parse(text); } catch {}
+  return { ok:r.ok, status:r.status, statusText:r.statusText, text, json };
+}
+
+// Normalizes ESPN teams to a compact shape your FE already expects
+function toTeamsPayload(data = {}) {
+  const teams = (data.teams || []).map(t => ({
+    teamId: t.id,
+    teamName: [t.location || t.teamLocation || '', t.nickname || t.teamNickname || ''].join(' ').trim() || t.name || `Team ${t.id}`,
+    wins: t.record?.overall?.wins ?? t.record?.overallWins ?? t.wins ?? 0,
+    losses: t.record?.overall?.losses ?? t.record?.overallLosses ?? t.losses ?? 0,
+    ties: t.record?.overall?.ties ?? t.ties ?? 0,
+    logo: t.logo || t.logoURL || t.logoUrl || t.avatar,
+    owner: t.primaryOwner || t.owner || ''
+  }));
+  return { teamCount: teams.length, teams };
+}
+
 router.get('/league', async (req, res) => {
   try {
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '');
     const debug    = String(req.query.debug || '') === '1';
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'season and leagueId are required' });
 
-    if (!season || !leagueId) {
-      return res.status(400).json({ ok:false, error:'season and leagueId are required' });
+    const base = `${ESPN_BASE_HOST}/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+    const params = new URLSearchParams();
+    // mTeam + mSettings covers names/owners/record; add more views if needed
+    params.append('view','mTeam');
+    params.append('view','mSettings');
+    const url = `${base}?${params.toString()}`;
+
+    // try candidate creds in order
+    const { resolveEspnCredCandidates } = require('./espnCred'); // your helper
+    const cands = await resolveEspnCredCandidates({ req, leagueId });
+    if (!Array.isArray(cands) || !cands.length) {
+      console.warn('[espn/league] no ESPN creds available for league', { leagueId });
     }
 
-    const { data, usedUrl } = await fetchLeagueTeamsFromESPN({ season, leagueId, req, debug });
-    const { leagueName, teams } = normalizeTeamsPayload(data, leagueId, season);
+    let lastErr = null;
+    let winner  = null;
+    let data    = null;
 
-    // Helpful hint when ESPN returns 200 but no league array
-    const meta = {
-      source: 'lm-api-reads',
-      hint: (!Array.isArray(data?.teams) || data.teams.length === 0)
-        ? { reason: 'no_league', possibilities: ['private_or_not_member', 'season_mismatch', 'views_missing'] }
-        : null,
+    const tryWith = async (cand, label) => {
+      const out = await espnGET(url, { swid: cand?.swid, s2: cand?.s2, debug });
+      if (out.ok) {
+        data = out.json;
+        winner = label;
+        return true;
+      }
+      if (out.status === 401) {
+        console.warn('[espn/league] 401 with candidate', {
+          leagueId, source: label,
+          bodySnippet: out.text?.slice(0, 240)
+        });
+      } else {
+        console.warn('[espn/league] upstream %s: %s', out.status, out.statusText);
+      }
+      lastErr = out;
+      return false;
     };
-    if (debug) {
-      meta.request = { url: usedUrl };
-      // include a tiny upstream snippet for troubleshooting
-      try {
-        meta.upstreamKeys = Object.keys(data || {});
-        meta.upstreamTeamsLen = Array.isArray(data?.teams) ? data.teams.length : 0;
-      } catch {}
+
+    // order: request → db:league-team → db:any-in-league
+    for (const cand of (cands || [])) {
+      if (await tryWith(cand, cand.source || 'unknown')) break;
     }
 
-    res.json({
-      ok: true,
-      leagueId,
-      season,
-      teamCount: teams.length,
-      leagueName,
-      teams,
-      meta,
-    });
+    if (!data) {
+      const s2 = cands?.[0]?.s2, swid = cands?.[0]?.swid;
+      console.warn(
+        "[espn/league] repro: curl -i '%s' -H 'Accept: application/json, text/plain, */*' -H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=%s; SWID=%s'",
+        url, mask(s2), mask(swid)
+      );
+      const status = lastErr?.status || 500;
+      // Soft 200 with empty list keeps FE happy if you prefer:
+      // return res.json({ ok:true, leagueId, season, teamCount:0, teams:[], meta:{ reason:'unauthorized' } });
+      return res.status(status).json({ ok:false, error:'ESPN league fetch failed', status, detail:lastErr?.statusText || 'unknown' });
+    }
+
+    // success
+    try { res.set('x-espn-cred-source', String(winner || 'request')); } catch {}
+    const { teams, teamCount } = toTeamsPayload(data);
+    return res.json({ ok:true, leagueId, season, teamCount, teams, meta: { source:winner || 'request' } });
+
   } catch (err) {
     console.error('[espn/league] error:', err);
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
+    return res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
