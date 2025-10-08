@@ -124,6 +124,7 @@ function espnRosterEntryToPlayer(entry = {}) {
     // Base position from ESPN id/strings
     let pos =
       POS_MAP[p?.defaultPositionId] ||
+      p?.pos ||
       p?.position ||
       p?.defaultPosition ||
       (p?.player && POS_MAP[p?.player?.defaultPositionId]) ||
