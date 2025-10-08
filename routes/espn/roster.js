@@ -24,19 +24,8 @@ const POS = {
 };
 
 const SLOT = {
-  0:'QB',
-  2:'RB',
-  3:'WR',
-  4:'TE',
-  5:'K',
-  7:'OP',        // Superflex / OP
-  16:'DST',
-  17:'K',        // Some leagues repeat K here; harmless
-  20:'BE',
-  21:'IR',
-  22:'ES',
-  23:'FLEX',     // RB/WR/TE
-  24:'ED', 25:'DL', 26:'LB', 27:'DB', 28:'DP'
+  0:'QB', 2:'RB', 4:'WR', 6:'TE', 7:'OP', 16:'DST', 17:'K', 20:'BN', 21:'IR',
+  23:'FLEX', 24:'FLEX', 25:'FLEX', 26:'FLEX', 27:'FLEX'
 };
 
 
