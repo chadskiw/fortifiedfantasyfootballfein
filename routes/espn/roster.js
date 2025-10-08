@@ -256,6 +256,4 @@ router.get('/roster', async (req, res) => {
 
 
 /* ===== Exports (cover CJS + ESM) ===== */
-module.exports = router;
-module.exports.router = router;
-module.exports.default = router;
+module.exports = router;   
