@@ -1,13 +1,16 @@
 // routes/espn/espnCred.js
-// Resolves the best ESPN cookies for a league/team/member.
-// Order of preference:
-//   1) DB creds for the member that owns (leagueId, teamId)
-//   2) DB creds for any member seen in that league (last_seen desc)
-//   3) Request headers/cookies
-//   4) Nothing
+// Build an ordered list of candidate ESPN creds for a (leagueId, teamId).
+// Order: team owner → any member seen in league (most recent) → request cookies.
 
-const HEADER_SWID_KEYS = ['x-espn-swid', 'x-espn-s2-swid', 'x-espen-swid']; // permissive
-const HEADER_S2_KEYS   = ['x-espn-s2', 'x-espen-s2'];
+const HEADER_SWID_KEYS = ['x-espn-swid', 'x-espn-s2-swid'];
+const HEADER_S2_KEYS   = ['x-espn-s2'];
+
+function normalizeSwid(s) {
+  if (!s) return '';
+  const raw = String(s).trim();
+  const inner = raw.replace(/^\{|\}$/g, '');
+  return `{${inner}}`;
+}
 
 function readReqCreds(req) {
   const c = req.cookies || {};
@@ -17,88 +20,80 @@ function readReqCreds(req) {
   let s2 =
     c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || null;
 
-  // permissive header read
   for (const k of HEADER_SWID_KEYS) if (!swid && h[k]) swid = h[k];
   for (const k of HEADER_S2_KEYS)   if (!s2   && h[k]) s2   = h[k];
 
-  return { swid, s2, source: 'request' };
+  if (swid && s2) {
+    return [{ swid: normalizeSwid(swid), s2, source: 'request' }];
+  }
+  return [];
 }
 
-// normalize { GUID } format; ESPN is picky
-function normalizeSwid(s) {
-  if (!s) return '';
-  const raw = String(s).trim();
-  const inner = raw.replace(/^\{|\}$/g, '');
-  return `{${inner}}`;
-}
-
-async function resolveEspnCred({ req, leagueId, teamId = null, memberId = null }) {
+// Return an array of {swid, s2, source, member_id?} sorted by preference.
+async function resolveEspnCredCandidates({ req, leagueId, teamId = null, memberId = null }) {
   const db = req.app?.get?.('db') || req.db;
-  const wantLeague = String(leagueId || '').trim();
-  const wantTeam   = teamId != null ? String(teamId) : null;
+  const out = [];
 
-  // If no DB, just use request creds
+  // If no DB, just return request cookies.
   if (!db) return readReqCreds(req);
 
-  // 1) If caller passed memberId, try direct lookup
+  // 1) Explicit memberId (if provided)
   if (memberId) {
-    const row = await db.oneOrNone(
-      `SELECT swid, espn_s2
-         FROM ff_espn_cred
-        WHERE member_id = $1
-        ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-        LIMIT 1`,
-      [memberId]
-    );
+    const row = await db.oneOrNone(`
+      SELECT swid, espn_s2, member_id
+      FROM ff_espn_cred
+      WHERE member_id = $1
+      ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
+      LIMIT 1
+    `, [memberId]);
     if (row?.swid && row?.espn_s2) {
-      return { swid: normalizeSwid(row.swid), s2: row.espn_s2, source: 'db:member' };
+      out.push({ swid: normalizeSwid(row.swid), s2: row.espn_s2, source: 'db:member', member_id: row.member_id });
     }
   }
 
-  // 2) Use ff_sport_ffl to find the owning member for this league/team
-  if (wantLeague) {
-    // try precise (league + team) first
-    if (wantTeam) {
-      const own = await db.oneOrNone(
-        `SELECT member_id
-           FROM ff_sport_ffl
-          WHERE league_id = $1 AND team_id = $2
-          ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC NULLS LAST
-          LIMIT 1`,
-        [wantLeague, wantTeam]
-      );
-      if (own?.member_id) {
-        const cred = await db.oneOrNone(
-          `SELECT swid, espn_s2
-             FROM ff_espn_cred
-            WHERE member_id = $1
-            ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-            LIMIT 1`,
-          [own.member_id]
-        );
-        if (cred?.swid && cred?.espn_s2) {
-          return { swid: normalizeSwid(cred.swid), s2: cred.espn_s2, source: 'db:league-team' };
-        }
+  // 2) Owner of (league, team) if known
+  if (leagueId && teamId != null) {
+    const own = await db.oneOrNone(`
+      SELECT f.member_id, c.swid, c.espn_s2
+      FROM ff_sport_ffl f
+      JOIN ff_espn_cred c ON c.member_id = f.member_id
+      WHERE f.league_id = $1 AND f.team_id = $2
+      ORDER BY c.last_seen DESC NULLS LAST, f.last_seen_at DESC NULLS LAST
+      LIMIT 1
+    `, [String(leagueId), String(teamId)]);
+    if (own?.swid && own?.espn_s2) {
+      out.push({ swid: normalizeSwid(own.swid), s2: own.espn_s2, source: 'db:league-team', member_id: own.member_id });
+    }
+  }
+
+  // 3) Any member seen in this league (most recent first) — add a few
+  if (leagueId) {
+    const any = await db.any(`
+      SELECT DISTINCT ON (c.member_id) c.member_id, c.swid, c.espn_s2, c.last_seen
+      FROM ff_sport_ffl f
+      JOIN ff_espn_cred c ON c.member_id = f.member_id
+      WHERE f.league_id = $1
+      ORDER BY c.member_id, c.last_seen DESC NULLS LAST
+      LIMIT 5
+    `, [String(leagueId)]);
+    for (const r of any) {
+      if (r?.swid && r?.espn_s2) {
+        out.push({ swid: normalizeSwid(r.swid), s2: r.espn_s2, source: 'db:any-in-league', member_id: r.member_id });
       }
     }
-
-    // fall back: anyone seen in this league recently
-    const any = await db.oneOrNone(
-      `SELECT c.swid, c.espn_s2
-         FROM ff_sport_ffl f
-         JOIN ff_espn_cred c ON c.member_id = f.member_id
-        WHERE f.league_id = $1
-        ORDER BY c.last_seen DESC NULLS LAST, f.last_seen_at DESC NULLS LAST
-        LIMIT 1`,
-      [wantLeague]
-    );
-    if (any?.swid && any?.espn_s2) {
-      return { swid: normalizeSwid(any.swid), s2: any.espn_s2, source: 'db:any-in-league' };
-    }
   }
 
-  // 3) Request cookies/headers fallback
-  return readReqCreds(req);
+  // 4) Request cookies last
+  out.push(...readReqCreds(req));
+
+  // De-dupe by (swid,s2)
+  const seen = new Set();
+  const uniq = [];
+  for (const cand of out) {
+    const key = `${cand.swid}|${cand.s2}`;
+    if (!seen.has(key)) { seen.add(key); uniq.push(cand); }
+  }
+  return uniq;
 }
 
-module.exports = { resolveEspnCred, normalizeSwid };
+module.exports = { resolveEspnCredCandidates, normalizeSwid };

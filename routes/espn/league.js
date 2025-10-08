@@ -4,7 +4,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const { resolveEspnCred } = require('./espnCred');
+const { resolveEspnCredCandidates } = require('./espnCred'); // <-- NEW
 /* ---------------- creds from cookies/headers ---------------- */
 
 function readEspnCreds(req) {
@@ -85,7 +85,7 @@ function primaryOwner(t) {
 
 async function fetchLeagueTeamsFromESPN({ season, leagueId, req, debug }) {
 // inside your fetchLeagueTeamsFromESPN or similar:
-const { swid, s2 } = await resolveEspnCred({ req, leagueId });
+const { swid, s2 } = await resolveEspnCredCandidates({ req, leagueId });
 const headers = {
   'Accept': 'application/json, text/plain, */*',
   'User-Agent': 'ff-platform-service/1.0',

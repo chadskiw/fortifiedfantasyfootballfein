@@ -1,7 +1,7 @@
 // routes/espn/roster.js
 const express = require('express');
 const router  = express.Router();
-const { resolveEspnCred } = require('./espnCred'); // <-- NEW
+const { resolveEspnCredCandidates } = require('./espnCred'); // <-- NEW
 
 // ----- ESPN → FF maps (corrected) -----
 const TEAM_ABBR = {
@@ -58,21 +58,31 @@ function readEspnCreds(req) {
   return { swid, s2 };
 }
 
-// --- core ESPN fetcher ---
+async function fetchJsonWithCred(url, cand) {
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'ff-platform-service/1.0',
+  };
+  if (cand?.swid && cand?.s2) {
+    headers['Cookie'] = `espn_s2=${cand.s2}; SWID=${cand.swid}`;
+    headers['x-espn-s2'] = cand.s2;
+    headers['x-espn-swid'] = cand.swid;
+  }
+  const r = await fetch(url, { headers });
+  const text = await r.text().catch(()=>'');
+
+  return {
+    ok: r.ok,
+    status: r.status,
+    statusText: r.statusText || '',
+    json: (!text ? null : (()=>{ try { return JSON.parse(text); } catch { return null; } })()),
+    text,
+    headers,
+  };
+}
+
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
-
-  // Prefer league-scoped creds from DB
-  const { swid, s2, source } = await resolveEspnCred({
-    req,
-    leagueId,
-    teamId: teamId ?? null,
-    // memberId: (optional) pass one if you have it on req.user
-  });
-
-  if (!swid || !s2) {
-    console.warn('[roster] Missing SWID/S2 — ESPN may reject', { leagueId, teamId, source });
-  }
 
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const params = new URLSearchParams({
@@ -86,45 +96,49 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
   const url = `${base}?${params.toString()}`;
   console.log('[roster] fetch:', url);
 
-  const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    'User-Agent': 'ff-platform-service/1.0',
-  };
-  if (swid && s2) {
-    // Order matters occasionally: espn_s2 first, then SWID
-    headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
-    headers['x-espn-s2'] = s2;
-    headers['x-espn-swid'] = swid;
-  }
+  // Build candidate list and try each until one authorizes
+  const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
+  if (!candidates.length) console.warn('[espn/roster] no ESPN creds available for league', { leagueId, teamId });
 
-  const r = await fetch(url, { headers });
+  const errors = [];
+  let data = null, winner = null;
 
-  if (!r.ok) {
-    const bodySnippet = await r.text().catch(()=>'');
-    // Helpful 401 sampler for logs
-    if (r.status === 401) {
-      console.warn('[espn/roster] upstream failure sample →', {
-        season, leagueId, teamId, week,
-        status: r.status,
-        statusText: r.statusText || '',
-        url,
-        bodySnippet: bodySnippet.slice(0, 300),
+  for (const cand of candidates) {
+    const res = await fetchJsonWithCred(url, cand);
+    if (res.ok && res.json) { data = res.json; winner = cand; break; }
+
+    // Log a compact sample for 401 to help pick the right identity later
+    if (res.status === 401) {
+      console.warn('[espn/roster] 401 with candidate', {
+        leagueId, teamId,
+        source: cand.source,
+        member_id: cand.member_id || null,
+        bodySnippet: (res.text || '').slice(0, 300),
       });
-      console.warn('[espn/roster] repro (cookies redacted): curl.exe -i %s -H %s -H %s -H %s',
-        url,
-        `'Accept: application/json, text/plain, */*'`,
-        `'User-Agent: ff-platform-service/1.0'`,
-        `'Cookie: espn_s2=${s2}; SWID=${swid}'`
-      );
+    } else {
+      errors.push(`ESPN ${res.status} ${res.statusText}`);
     }
-    const msg = `ESPN ${r.status} ${r.statusText || ''}`;
-    if (debug) throw new Error(`${msg}  – ${bodySnippet.slice(0, 512)}`);
-    throw new Error(msg);
   }
 
-  const data = await r.json();
+  if (!data) {
+    // If we tried multiple candidates, include a repro with redacted cookies
+    console.warn('[espn/roster] all candidates failed', {
+      leagueId, teamId,
+      tried: candidates.map(c => c.source),
+      lastError: errors[errors.length - 1] || 'unauthorized',
+      url,
+    });
+    // Show curl repro once (cookies redacted)
+    console.warn("[espn/roster] repro: curl -i '%s' -H 'Accept: application/json, text/plain, */*' -H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'", url);
+    throw new Error(errors[0] || 'ESPN 401');
+  }
 
-  // --- your existing normalizers below unchanged ---
+  if (winner) {
+    // Optionally expose which source won (useful for front-end debugging)
+    try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
+  }
+
+  // ---- existing normalization code below unchanged ----
   const teamNameOf = (t) => {
     const loc = t?.location || t?.teamLocation || '';
     const nick = t?.nickname || t?.teamNickname || '';
