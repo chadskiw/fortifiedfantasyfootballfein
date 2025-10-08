@@ -102,7 +102,7 @@ function asMiddleware(mod) {
   const leagueMw = asMiddleware(leagueMod);
   if (!leagueMw) throw new Error('espn/league export is not a middleware or Router');
   // exposes GET /api/platforms/espn/roster
-  app.use('/api/platforms/espn', leaguerMw);
+  app.use('/api/platforms/espn', leagueMw);
 }
 
 // (repeat for other routers if needed)
