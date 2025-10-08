@@ -4,7 +4,7 @@
 
 const express = require('express');
 const router  = express.Router();
-
+const { resolveEspnCred } = require('./espnCred');
 /* ---------------- creds from cookies/headers ---------------- */
 
 function readEspnCreds(req) {
@@ -84,26 +84,18 @@ function primaryOwner(t) {
 /* ---------------- upstream fetcher (ESPN v3) ---------------- */
 
 async function fetchLeagueTeamsFromESPN({ season, leagueId, req, debug }) {
-  const { swid, s2 } = readEspnCreds(req);
-  if (!swid || !s2) {
-    console.warn('[league] Missing SWID/S2 — ESPN may reject');
-  }
+// inside your fetchLeagueTeamsFromESPN or similar:
+const { swid, s2 } = await resolveEspnCred({ req, leagueId });
+const headers = {
+  'Accept': 'application/json, text/plain, */*',
+  'User-Agent': 'ff-platform-service/1.0',
+};
+if (swid && s2) headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
 
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const url  = new URL(base);
   url.searchParams.append('view', 'mTeam');
   url.searchParams.append('view', 'mSettings');
-
-  const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    'User-Agent': 'ff-platform-service/1.0',
-  };
-  if (swid && s2) {
-    // cookie order matters on some edges
-    headers['Cookie']    = `espn_s2=${s2}; SWID=${swid}`;
-    headers['x-espn-s2'] = s2;
-    headers['x-espn-swid'] = swid;
-  }
 
   const r = await fetch(url.toString(), { headers });
   if (!r.ok) {
