@@ -1,6 +1,7 @@
 // routes/espn/roster.js
 const express = require('express');
 const router  = express.Router();
+const { resolveEspnCred } = require('./espnCred'); // <-- NEW
 
 // ----- ESPN → FF maps (corrected) -----
 const TEAM_ABBR = {
@@ -58,12 +59,19 @@ function readEspnCreds(req) {
 }
 
 // --- core ESPN fetcher ---
-async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
+async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
 
-  const { swid, s2 } = readEspnCreds(req);
+  // Prefer league-scoped creds from DB
+  const { swid, s2, source } = await resolveEspnCred({
+    req,
+    leagueId,
+    teamId: teamId ?? null,
+    // memberId: (optional) pass one if you have it on req.user
+  });
+
   if (!swid || !s2) {
-    console.warn('[roster] Missing SWID/S2 — ESPN may reject');
+    console.warn('[roster] Missing SWID/S2 — ESPN may reject', { leagueId, teamId, source });
   }
 
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
@@ -71,7 +79,6 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
     matchupPeriodId: String(week || 1),
     scoringPeriodId: String(week || 1),
   });
-  // NOTE: when using URLSearchParams, use append() for repeated keys
   params.append('view', 'mTeam');
   params.append('view', 'mRoster');
   params.append('view', 'mSettings');
@@ -84,95 +91,79 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
     'User-Agent': 'ff-platform-service/1.0',
   };
   if (swid && s2) {
-    // keep order: espn_s2; SWID
+    // Order matters occasionally: espn_s2 first, then SWID
     headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
-  }
-
-  // --- fail-log (once per shape) ---
-  if (!global.__espnFailKeys) global.__espnFailKeys = new Set();
-  function logFailOnce({ status, statusText, bodySnippet }) {
-    const key = `${leagueId}|${teamId ?? 'all'}|w${week || 1}|${status}`;
-    if (global.__espnFailKeys.has(key)) return;
-    global.__espnFailKeys.add(key);
-
-    const curl = [
-      'curl.exe',
-      '-i',
-      `'${url}'`,
-      "-H 'Accept: application/json, text/plain, */*'",
-      "-H 'User-Agent: ff-platform-service/1.0'",
-      ...(swid && s2 ? ["-H 'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'"] : [])
-    ].join(' ');
-
-    console.error('[espn/roster] upstream failure sample →', {
-      season,
-      leagueId,
-      teamId: teamId ?? null,
-      week: week || 1,
-      status,
-      statusText,
-      url,
-      bodySnippet
-    });
-    console.error('[espn/roster] repro (cookies redacted):', curl);
+    headers['x-espn-s2'] = s2;
+    headers['x-espn-swid'] = swid;
   }
 
   const r = await fetch(url, { headers });
+
   if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    const snippet = text.slice(0, 512);
-    logFailOnce({ status: r.status, statusText: r.statusText, bodySnippet: snippet });
-    throw new Error(`ESPN ${r.status} ${r.statusText} – ${snippet}`);
+    const bodySnippet = await r.text().catch(()=>'');
+    // Helpful 401 sampler for logs
+    if (r.status === 401) {
+      console.warn('[espn/roster] upstream failure sample →', {
+        season, leagueId, teamId, week,
+        status: r.status,
+        statusText: r.statusText || '',
+        url,
+        bodySnippet: bodySnippet.slice(0, 300),
+      });
+      console.warn('[espn/roster] repro (cookies redacted): curl.exe -i %s -H %s -H %s -H %s',
+        url,
+        `'Accept: application/json, text/plain, */*'`,
+        `'User-Agent: ff-platform-service/1.0'`,
+        `'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'`
+      );
+    }
+    const msg = `ESPN ${r.status} ${r.statusText || ''}`;
+    if (debug) throw new Error(`${msg}  – ${bodySnippet.slice(0, 512)}`);
+    throw new Error(msg);
   }
 
   const data = await r.json();
 
-  // Helpers to normalize ESPN’s shapes
+  // --- your existing normalizers below unchanged ---
   const teamNameOf = (t) => {
     const loc = t?.location || t?.teamLocation || '';
     const nick = t?.nickname || t?.teamNickname || '';
-    return `${loc} ${nick}`.trim() || t?.name || `Team ${t?.id}`;
+    const joined = `${loc} ${nick}`.trim();
+    return joined || t?.name || `Team ${t?.id}`;
   };
 
   const rosterEntriesOf = (t) => {
-    // Usually under t.roster.entries[]
     const entries = t?.roster?.entries || [];
     return entries.map(e => {
-      const p = e.playerPoolEntry?.player || e.player || {};
+      const p = e?.playerPoolEntry?.player || e?.player || {};
       return {
-        lineupSlotId: e.lineupSlotId ?? e.player?.lineupSlotId,
+        lineupSlotId: e?.lineupSlotId ?? e?.player?.lineupSlotId,
         onTeam: true,
         player: {
-          id: p.id,
-          fullName: p.fullName || p.displayName || p.name,
-          defaultPositionId: p.defaultPositionId,
-          proTeamId: p.proTeamId,
-          proTeamAbbreviation: p.proTeamAbbreviation,
-          headshot: p.headshot || p?.ownership?.profile?.headshot || null,
-          // sometimes ESPN nests images elsewhere:
-          image: p.image || null,
-          photo: p.photo || null,
-          avatar: p.avatar || null,
-          // pass through if your upstream has FantasyPros id mapped
-          fantasyProsId: p.fantasyProsId || p.fpId
+          id: p?.id,
+          fullName: p?.fullName || p?.displayName || p?.name,
+          defaultPositionId: p?.defaultPositionId,
+          proTeamId: p?.proTeamId,
+          proTeamAbbreviation: p?.proTeamAbbreviation,
+          headshot: p?.headshot || p?.ownership?.profile?.headshot || null,
+          image: p?.image || null,
+          photo: p?.photo || null,
+          avatar: p?.avatar || null,
+          fantasyProsId: p?.fantasyProsId || p?.fpId
         }
       };
     });
   };
 
-  // Single-team mode
   if (teamId != null) {
-    const team = (data.teams || []).find(t => Number(t.id) === Number(teamId));
-    if (!team) {
-      return { ok: true, team_name: `Team ${teamId}`, players: [] };
-    }
+    const team = (data?.teams || []).find(t => Number(t?.id) === Number(teamId));
+    if (!team) return { ok: true, team_name: `Team ${teamId}`, players: [] };
     const players = rosterEntriesOf(team);
     return { ok: true, team_name: teamNameOf(team), players };
   }
 
-  // League-wide
-  const teams = (data.teams || []).map(t => ({
-    teamId: t.id,
+  const teams = (data?.teams || []).map(t => ({
+    teamId: t?.id,
     team_name: teamNameOf(t),
     players: rosterEntriesOf(t)
   }));
