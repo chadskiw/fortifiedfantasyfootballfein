@@ -1,11 +1,11 @@
 // routes/espn/roster.js
 // TRUE_LOCATION: routes/espn/roster.js
-// IN_USE: yes (FEIN roster + league-wide roster fetcher)
+// IN_USE: yes — FEIN roster + league-wide roster
 
 const express = require('express');
 const router  = express.Router();
 
-/* ---------------- ESPN → FF maps (corrected) ---------------- */
+/* ---------------- ESPN → FF maps ---------------- */
 
 const TEAM_ABBR = {
   1:'ATL',2:'BUF',3:'CHI',4:'CIN',5:'CLE',6:'DAL',7:'DEN',8:'DET',9:'GB',
@@ -15,60 +15,28 @@ const TEAM_ABBR = {
 };
 
 // ESPN defaultPositionId -> canonical position
-const POS_MAP = {
-  1:'QB',
-  2:'RB',
-  3:'WR',
-  4:'TE',
-  5:'K',
-  16:'DST'
-};
+const POS_MAP = { 1:'QB', 2:'RB', 3:'WR', 4:'TE', 5:'K', 16:'DST' };
 
 /* ---------------- lineup slot labelling ---------------- */
 
 function slotLabel(lineupSlotId, defaultPositionId) {
   const MAP = {
-    0:'QB',
-    2:'RB',
-    3:'WR',
-    4:'TE',
-    5:'WR/TE',
-    6:'RB/WR',
-    7:'OP',             // superflex/OP
-    8:'TAXI',
-    9:'RB/WR/TE',       // flex variant
-    10:'QB/RB/WR/TE',
-    11:'WR/TE',
-    12:'RB/WR',
-    13:'RB/TE',
-    14:'QB/RB/WR/TE',
-    15:'BN',
-    16:'DST',
-    17:'K',
-    18:'P',
-    19:'HC',
-    20:'BE',
-    21:'IR',
-    22:'ES',
-    23:'FLEX',
-    24:'ED',
-    25:'DL',
-    26:'LB',
-    27:'DB',
-    28:'DP'
+    0:'QB', 2:'RB', 3:'WR', 4:'TE', 5:'WR/TE', 6:'RB/WR', 7:'OP',
+    8:'TAXI', 9:'RB/WR/TE', 10:'QB/RB/WR/TE', 11:'WR/TE', 12:'RB/WR',
+    13:'RB/TE', 14:'QB/RB/WR/TE', 15:'BN',
+    16:'DST', 17:'K', 18:'P', 19:'HC', 20:'BE', 21:'IR', 22:'ES',
+    23:'FLEX', 24:'ED', 25:'DL', 26:'LB', 27:'DB', 28:'DP'
   };
 
   if (Object.prototype.hasOwnProperty.call(MAP, lineupSlotId)) {
     return MAP[lineupSlotId];
   }
 
-  // Fallback: if we know the player's default position, use that as chip
   if (defaultPositionId != null) {
     const DEF_POS = { 1:'QB', 2:'RB', 3:'WR', 4:'TE', 5:'K', 16:'DST' };
     if (DEF_POS[defaultPositionId]) return DEF_POS[defaultPositionId];
   }
 
-  // Last resort: treat unknowns as bench but log once
   if (!global.__unkSlots) global.__unkSlots = new Set();
   if (!global.__unkSlots.has(lineupSlotId)) {
     console.warn('[roster] Unknown lineupSlotId:', lineupSlotId);
@@ -93,17 +61,15 @@ function readEspnCreds(req) {
 
 /* ---------------- upstream fetcher (ESPN v3) ---------------- */
 
-async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
+async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
 
   const { swid, s2 } = readEspnCreds(req);
   if (!swid || !s2) {
-    // Public leagues may still work; warn for visibility.
     console.warn('[roster] Missing SWID/S2 — ESPN may reject');
   }
 
   const base = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-  // Multiple "view" params are supported; URLSearchParams will include all.
   const params = new URLSearchParams({
     matchupPeriodId: String(week || 1),
     scoringPeriodId: String(week || 1),
@@ -125,7 +91,11 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
   const r = await fetch(url, { headers });
   if (!r.ok) {
     const text = await r.text().catch(() => '');
-    throw new Error(`ESPN ${r.status} ${r.statusText} – ${text.slice(0, 256)}`);
+    const msg = `ESPN ${r.status} ${r.statusText}`;
+    if (debug) {
+      throw new Error(`${msg} – ${text.slice(0, 256)}`);
+    }
+    throw new Error(msg);
   }
   const data = await r.json();
 
@@ -189,13 +159,11 @@ function resolveHeadshot(p, pos, teamAbbr) {
 
   if (cand) return cand;
 
-  // D/ST use team logo
   if (pos === 'DST' && teamAbbr) {
     const slug = String(teamAbbr).toLowerCase();
     return `https://a.espncdn.com/combiner/i?img=/i/teamlogos/nfl/500/${slug}.png&h=80&w=80&scale=crop`;
   }
 
-  // ESPN id-based fallback
   if (p?.id) {
     return `https://a.espncdn.com/i/headshots/nfl/players/full/${p.id}.png`;
   }
@@ -207,8 +175,8 @@ function resolveHeadshot(p, pos, teamAbbr) {
 
 function correctKnownPosition(name, pos) {
   const n = String(name || '').toLowerCase();
-  if (n.includes('jaxon smith')) return 'WR';  // JSN safety
-  if (n.includes('taysom hill')) return 'TE';  // ESPN sometimes lists as QB
+  if (n.includes('jaxon smith')) return 'WR';
+  if (n.includes('taysom hill')) return 'TE';
   return pos;
 }
 
@@ -224,7 +192,6 @@ function espnRosterEntryToPlayer(entry = {}) {
       p?.proTeam ||
       '';
 
-    // Position: prefer mapped id, then any string present
     let pos =
       POS_MAP[p?.defaultPositionId] ||
       p?.position ||
@@ -234,7 +201,6 @@ function espnRosterEntryToPlayer(entry = {}) {
 
     pos = correctKnownPosition(p?.fullName || p?.displayName || p?.name, pos);
 
-    // Slot: resolve robustly; never blank
     const slot = slotLabel(entry?.lineupSlotId, p?.defaultPositionId);
     const isStarter = !['BE','BN','IR','ES'].includes(String(slot).toUpperCase());
 
@@ -251,8 +217,8 @@ function espnRosterEntryToPlayer(entry = {}) {
       id: p?.id || p?.playerId,
       name: p?.fullName || p?.displayName || p?.name || 'Unknown',
       team: teamAbbr || '',
-      position: pos || '',       // canonical: QB/RB/WR/TE/K/DST
-      slot,                      // QB/RB/WR/TE/FLEX/K/DST/BE/IR/...
+      position: pos || '',
+      slot,
       isStarter,
       fpId,
       headshot
@@ -267,7 +233,7 @@ function espnRosterEntryToPlayer(entry = {}) {
       slot: 'BE',
       isStarter: false,
       fpId: undefined,
-      headshot: '/img/placeholders/player.png'
+      headshot: 'https://img.fortifiedfantasy.com/avatars/default.png'
     };
   }
 }
@@ -278,18 +244,23 @@ router.get('/roster/selftest', (_req, res) => {
   res.json({ ok:true, msg:'roster router mounted' });
 });
 
+// GET /api/platforms/espn/roster?season=2025&leagueId=...&teamId=7[&week=1][&scope=season][&debug=1]
 router.get('/roster', async (req, res) => {
   try {
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '');
     const week     = Number(req.query.week || 1);
     const teamId   = (req.query.teamId != null) ? Number(req.query.teamId) : null;
+    const debug    = String(req.query.debug || '') === '1';
 
     if (!season || !leagueId) {
       return res.status(400).json({ ok:false, error:'season and leagueId are required' });
     }
 
-    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
+    // scope is accepted but not used server-side; FE can pass it freely
+    const _scope = req.query.scope; // eslint appeaser
+
+    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req, debug });
 
     if (teamId != null) {
       const players = (raw?.players || []).map(espnRosterEntryToPlayer);
