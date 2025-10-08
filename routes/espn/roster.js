@@ -92,9 +92,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
   if (!r.ok) {
     const text = await r.text().catch(() => '');
     const msg = `ESPN ${r.status} ${r.statusText}`;
-    if (debug) {
-      throw new Error(`${msg} – ${text.slice(0, 256)}`);
-    }
+    if (debug) throw new Error(`${msg} – ${text.slice(0, 256)}`);
     throw new Error(msg);
   }
   const data = await r.json();
@@ -192,6 +190,7 @@ function espnRosterEntryToPlayer(entry = {}) {
       p?.proTeam ||
       '';
 
+    // Base position from ESPN id/strings
     let pos =
       POS_MAP[p?.defaultPositionId] ||
       p?.position ||
@@ -199,10 +198,23 @@ function espnRosterEntryToPlayer(entry = {}) {
       (p?.player && POS_MAP[p?.player?.defaultPositionId]) ||
       '';
 
+    // Slot (always derive)
+    const slot = slotLabel(entry?.lineupSlotId, p?.defaultPositionId);
+    const slotUp = String(slot || '').toUpperCase();
+
+    // If ESPN didn’t give a position, derive from slot; else FLEX fallback
+    if (!pos) {
+      if (['QB','RB','WR','TE','K','DST'].includes(slotUp)) {
+        pos = slotUp;
+      } else {
+        pos = 'FLEX';
+      }
+    }
+
+    // Clean special cases after fallback
     pos = correctKnownPosition(p?.fullName || p?.displayName || p?.name, pos);
 
-    const slot = slotLabel(entry?.lineupSlotId, p?.defaultPositionId);
-    const isStarter = !['BE','BN','IR','ES'].includes(String(slot).toUpperCase());
+    const isStarter = !['BE','BN','IR','ES'].includes(slotUp);
 
     const fpId =
       p?.fantasyProsId ||
@@ -217,8 +229,8 @@ function espnRosterEntryToPlayer(entry = {}) {
       id: p?.id || p?.playerId,
       name: p?.fullName || p?.displayName || p?.name || 'Unknown',
       team: teamAbbr || '',
-      position: pos || '',
-      slot,
+      position: pos,           // guaranteed non-empty
+      slot,                    // readable slot
       isStarter,
       fpId,
       headshot
@@ -229,7 +241,7 @@ function espnRosterEntryToPlayer(entry = {}) {
       id: undefined,
       name: 'Unknown',
       team: '',
-      position: '',
+      position: 'FLEX',
       slot: 'BE',
       isStarter: false,
       fpId: undefined,
