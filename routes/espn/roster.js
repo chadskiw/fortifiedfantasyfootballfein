@@ -141,15 +141,15 @@ if (debug) {
     `-H 'User-Agent: ff-platform-service/1.0' ` +
     `-H 'Cookie: espn_s2=${cand.s2}; SWID=${cand.swid}'`
   );
-}}
+}
     throw new Error(errors[0] || 'ESPN 401');
   }
 
-if (winner) {
-  try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
-}
-
-
+  if (winner) {
+    // Optionally expose which source won (useful for front-end debugging)
+    try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
+  }
+  }
   // ---- existing normalization code below unchanged ----
   const teamNameOf = (t) => {
     const loc = t?.location || t?.teamLocation || '';
