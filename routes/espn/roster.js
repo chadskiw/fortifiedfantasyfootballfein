@@ -125,7 +125,7 @@ function espnRosterEntryToPlayer(entry = {}) {
     let pos =
       POS_MAP[p?.defaultPositionId] ||
       p?.pos ||
-      p?.position ||
+     // p?.position ||
       p?.defaultPosition ||
       (p?.player && POS_MAP[p?.player?.defaultPositionId]) ||
       '';
