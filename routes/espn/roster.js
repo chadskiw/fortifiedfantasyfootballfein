@@ -63,34 +63,68 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
 
   const { swid, s2 } = readEspnCreds(req);
   if (!swid || !s2) {
-    // We still try (public leagues sometimes load), but warn
     console.warn('[roster] Missing SWID/S2 — ESPN may reject');
   }
 
-  // ESPN v3 league endpoint; views that contain teams + roster entries
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const params = new URLSearchParams({
     matchupPeriodId: String(week || 1),
     scoringPeriodId: String(week || 1),
-    view: 'mTeam',
-    view: 'mRoster',
-    view: 'mSettings'
   });
+  // NOTE: when using URLSearchParams, use append() for repeated keys
+  params.append('view', 'mTeam');
+  params.append('view', 'mRoster');
+  params.append('view', 'mSettings');
+
   const url = `${base}?${params.toString()}`;
-console.log(url);
+  console.log('[roster] fetch:', url);
+
   const headers = {
     'Accept': 'application/json, text/plain, */*',
     'User-Agent': 'ff-platform-service/1.0',
   };
   if (swid && s2) {
-    headers['Cookie'] = `SWID=${swid}; espn_s2=${s2}`;
+    // keep order: espn_s2; SWID
+    headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
+  }
+
+  // --- fail-log (once per shape) ---
+  if (!global.__espnFailKeys) global.__espnFailKeys = new Set();
+  function logFailOnce({ status, statusText, bodySnippet }) {
+    const key = `${leagueId}|${teamId ?? 'all'}|w${week || 1}|${status}`;
+    if (global.__espnFailKeys.has(key)) return;
+    global.__espnFailKeys.add(key);
+
+    const curl = [
+      'curl',
+      '-i',
+      `'${url}'`,
+      "-H 'Accept: application/json, text/plain, */*'",
+      "-H 'User-Agent: ff-platform-service/1.0'",
+      ...(swid && s2 ? ["-H 'Cookie: espn_s2=<REDACTED>; SWID=<REDACTED>'"] : [])
+    ].join(' ');
+
+    console.error('[espn/roster] upstream failure sample →', {
+      season,
+      leagueId,
+      teamId: teamId ?? null,
+      week: week || 1,
+      status,
+      statusText,
+      url,
+      bodySnippet
+    });
+    console.error('[espn/roster] repro (cookies redacted):', curl);
   }
 
   const r = await fetch(url, { headers });
   if (!r.ok) {
     const text = await r.text().catch(() => '');
-    throw new Error(`ESPN ${r.status} ${r.statusText} – ${text.slice(0, 256)}`);
+    const snippet = text.slice(0, 512);
+    logFailOnce({ status: r.status, statusText: r.statusText, bodySnippet: snippet });
+    throw new Error(`ESPN ${r.status} ${r.statusText} – ${snippet}`);
   }
+
   const data = await r.json();
 
   // Helpers to normalize ESPN’s shapes
@@ -144,6 +178,7 @@ console.log(url);
   }));
   return { ok: true, teams };
 }
+
 
 function resolveHeadshot(p, position, teamAbbr) {
   // Prefer explicit URLs ESPN sometimes returns
