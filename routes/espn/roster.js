@@ -303,22 +303,6 @@ router.get('/roster', async (req, res) => {
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
-router.get('/roster/slots-debug', async (req, res) => {
-  try {
-    const season  = Number(req.query.season);
-    const leagueId= String(req.query.leagueId || '');
-    const week    = Number(req.query.week || 1);
-    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId: null, req });
-    const ids = new Set();
-    (raw.teams || []).forEach(t => (t.players || []).forEach(e => {
-      const id = e.lineupSlotId ?? e.player?.lineupSlotId;
-      if (id != null) ids.add(id);
-    }));
-    res.json({ ok:true, slotIds:[...ids].sort((a,b)=>a-b) });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:String(e?.message || e) });
-  }
-});
 
 
 /* ===== Exports (cover CJS + ESM) ===== */
