@@ -155,7 +155,7 @@ const DEFAULT_IMG = `${CDN_IMG}/avatars/default.png`;
 function sanitizeImg(src){
   if (!src) return DEFAULT_IMG;
   const s = String(src).trim();
-  if (/^myst(ic|ique):/i.test(s)) return DEFAULT_IMG;
+  if (/^mystique:/i.test(s)) return DEFAULT_IMG;
 return src;
 }
 /* ---------------- routes ---------------- */
