@@ -252,9 +252,7 @@ router.get('/league', async (req, res) => {
     const base = `${ESPN_BASE_HOST}/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
     const url  = `${base}?view=mTeam&view=mSettings`;
 
-    const { resolveEspnCredCandidates, mask } = require('./espnCred');
-    const { fetchJsonWithCred } = require('./lib/fetchJsonWithCred'); // adjust import path if needed
-    const cands0 = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
+     const cands0 = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
 
     if (!cands0.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
 
