@@ -77,7 +77,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
     view: 'mSettings'
   });
   const url = `${base}?${params.toString()}`;
-
+console.log(url);
   const headers = {
     'Accept': 'application/json, text/plain, */*',
     'User-Agent': 'ff-platform-service/1.0',
