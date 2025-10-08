@@ -11,11 +11,11 @@ const LEAGUE_TO_MEMBER_SQL = `
 `;
 
 const CREDS_FOR_MEMBERS_SQL = `
-  select c.member_id, c.swid, coalesce(c.espn_s2, c.s2) as espn_s2, c.last_seen
+  select c.member_id, c.swid, c.espn_s2, c.last_seen
   from ff_espn_cred c
   where c.member_id = any($1)
     and c.swid is not null and trim(c.swid) <> ''
-    and coalesce(c.espn_s2, c.s2) is not null and trim(coalesce(c.espn_s2, c.s2)) <> ''
+    and c.espn_s2 is not null and trim(c.espn_s2) <> ''
   order by c.last_seen desc nulls last
   limit 10
 `;
@@ -31,7 +31,7 @@ async function credsForMembers(memberIds) {
   return rows.map(r => ({
     member_id: r.member_id,
     swid: r.swid,
-    s2: r.espn_s2
+    s2: r.espn_s2,        // <- important: use espn_s2
   }));
 }
 
