@@ -145,10 +145,10 @@ if (debug) {
     throw new Error(errors[0] || 'ESPN 401');
   }
 
-  if (winner) {
-    // Optionally expose which source won (useful for front-end debugging)
-    try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
-  }
+if (winner) {
+  try { req.res?.set?.('x-espn-cred-source', winner.source || 'unknown'); } catch {}
+}
+
 
   // ---- existing normalization code below unchanged ----
   const teamNameOf = (t) => {
