@@ -152,11 +152,6 @@ function normalizeTeamsPayload(raw, leagueId, season) {
 }
 const CDN_IMG = 'https://img.fortifiedfantasy.com';
 const DEFAULT_IMG = `${CDN_IMG}/avatars/default.png`;
-if (!window.state) window.state = {};
-if (!Number.isFinite(+state.season)) {
-  const qsSeason = Number(new URLSearchParams(location.search).get('season'));
-  state.season = Number.isFinite(qsSeason) ? qsSeason : new Date().getUTCFullYear();
-}
 
 function sanitizeImg(src){
   if (!src) return DEFAULT_IMG;
