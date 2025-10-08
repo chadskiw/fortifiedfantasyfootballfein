@@ -50,13 +50,12 @@ function leagueDisplayName(data) {
 
 function safeLogo(t) {
   // common fields ESPN uses in different payloads
-  return first(
-    t?.logo,
+  const x =     (t?.logo,
     t?.logoUrl,
     t?.avatar,
-    t?.teamLogo || t?.teamLogoUrl,
-    ''
-  );
+    t?.teamLogo) || t?.teamLogoUrl;
+    const y = sanitizeImg(x);
+  return y;
 }
 
 function parseRecord(t) {
@@ -128,7 +127,7 @@ function normalizeTeamsPayload(raw, leagueId, season) {
     const id   = t?.id ?? t?.teamId;
     const name = teamDisplayName(t);
     const rec  = parseRecord(t);
-    const logo = sanitizeImg(t);
+    const logo = safeLogo(t);
     const owner= primaryOwner(t);
 
     return {
