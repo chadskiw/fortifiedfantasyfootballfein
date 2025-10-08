@@ -1,3 +1,7 @@
+// routes/espn/roster.js
+const express = require('express');
+const router  = express.Router();
+
 // ----- ESPN → FF maps (corrected) -----
 const TEAM_ABBR = {
   1:'ATL',2:'BUF',3:'CHI',4:'CIN',5:'CLE',6:'DAL',7:'DEN',8:'DET',9:'GB',
@@ -39,6 +43,106 @@ const SLOT = {
   27:'DB',
   28:'DP'
 };
+// --- helper: pull SWID/S2 from req (cookies or headers) ---
+function readEspnCreds(req) {
+  const c = req.cookies || {};
+  const h = req.headers || {};
+  const swid =
+    c.SWID || c.swid || c.ff_espn_swid ||
+    h['x-espn-swid'] || h['x-espn-s2-swid'] || null;
+  const s2 =
+    c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 ||
+    h['x-espn-s2'] || null;
+  return { swid, s2 };
+}
+
+// --- core ESPN fetcher ---
+async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
+  if (!season || !leagueId) throw new Error('season and leagueId are required');
+
+  const { swid, s2 } = readEspnCreds(req);
+  if (!swid || !s2) {
+    // We still try (public leagues sometimes load), but warn
+    console.warn('[roster] Missing SWID/S2 — ESPN may reject');
+  }
+
+  // ESPN v3 league endpoint; views that contain teams + roster entries
+  const base = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const params = new URLSearchParams({
+    matchupPeriodId: String(week || 1),
+    scoringPeriodId: String(week || 1),
+    view: 'mTeam',
+    view: 'mRoster',
+    view: 'mSettings'
+  });
+  const url = `${base}?${params.toString()}`;
+
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'ff-platform-service/1.0',
+  };
+  if (swid && s2) {
+    headers['Cookie'] = `SWID=${swid}; espn_s2=${s2}`;
+  }
+
+  const r = await fetch(url, { headers });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`ESPN ${r.status} ${r.statusText} – ${text.slice(0, 256)}`);
+  }
+  const data = await r.json();
+
+  // Helpers to normalize ESPN’s shapes
+  const teamNameOf = (t) => {
+    const loc = t?.location || t?.teamLocation || '';
+    const nick = t?.nickname || t?.teamNickname || '';
+    return `${loc} ${nick}`.trim() || t?.name || `Team ${t?.id}`;
+  };
+
+  const rosterEntriesOf = (t) => {
+    // Usually under t.roster.entries[]
+    const entries = t?.roster?.entries || [];
+    return entries.map(e => {
+      const p = e.playerPoolEntry?.player || e.player || {};
+      return {
+        lineupSlotId: e.lineupSlotId ?? e.player?.lineupSlotId,
+        onTeam: true,
+        player: {
+          id: p.id,
+          fullName: p.fullName || p.displayName || p.name,
+          defaultPositionId: p.defaultPositionId,
+          proTeamId: p.proTeamId,
+          proTeamAbbreviation: p.proTeamAbbreviation,
+          headshot: p.headshot || p?.ownership?.profile?.headshot || null,
+          // sometimes ESPN nests images elsewhere:
+          image: p.image || null,
+          photo: p.photo || null,
+          avatar: p.avatar || null,
+          // pass through if your upstream has FantasyPros id mapped
+          fantasyProsId: p.fantasyProsId || p.fpId
+        }
+      };
+    });
+  };
+
+  // Single-team mode
+  if (teamId != null) {
+    const team = (data.teams || []).find(t => Number(t.id) === Number(teamId));
+    if (!team) {
+      return { ok: true, team_name: `Team ${teamId}`, players: [] };
+    }
+    const players = rosterEntriesOf(team);
+    return { ok: true, team_name: teamNameOf(team), players };
+  }
+
+  // League-wide
+  const teams = (data.teams || []).map(t => ({
+    teamId: t.id,
+    team_name: teamNameOf(t),
+    players: rosterEntriesOf(t)
+  }));
+  return { ok: true, teams };
+}
 
 function resolveHeadshot(p, position, teamAbbr) {
   // Prefer explicit URLs ESPN sometimes returns
@@ -112,3 +216,46 @@ function espnRosterEntryToPlayer(entry = {}) {
     headshot
   };
 }
+// Self-test so you can verify the mount works:
+router.get('/roster/selftest', (_req, res) => {
+  res.json({ ok:true, msg:'roster router mounted' });
+});
+
+// Main endpoint used by FE/ingestor
+router.get('/roster', async (req, res) => {
+  try {
+    const season  = Number(req.query.season);
+    const leagueId= String(req.query.leagueId || '');
+    const week    = Number(req.query.week || 1);
+    const teamId  = req.query.teamId ? Number(req.query.teamId) : null;
+
+    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
+
+    if (teamId != null) {
+      const players = (raw.players || []).map(espnRosterEntryToPlayer);
+      return res.json({
+        ok: true,
+        platform: 'espn',
+        leagueId, season, week, teamId,
+        team_name: raw.team_name || `Team ${teamId}`,
+        players
+      });
+    }
+
+    const teams = (raw.teams || []).map(t => ({
+      teamId: t.teamId,
+      team_name: t.team_name,
+      players: (t.players || []).map(espnRosterEntryToPlayer)
+    }));
+    return res.json({ ok:true, platform:'espn', leagueId, season, week, teams });
+  } catch (err) {
+    console.error('[espn/roster] error:', err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
+  }
+});
+
+
+/* ===== Exports (cover CJS + ESM) ===== */
+module.exports = router;
+module.exports.router = router;
+module.exports.default = router;
