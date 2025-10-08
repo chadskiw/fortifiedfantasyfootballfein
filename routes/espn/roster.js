@@ -56,7 +56,7 @@ function guessCurrentWeek(){
   if (Number.isFinite(urlW) && urlW >= 1) return clamp(urlW,1,NFL_MAX_WEEK);
   const ls = Number(localStorage.getItem('ff.week'));
   if (Number.isFinite(ls) && ls >= 1) return clamp(ls,1,NFL_MAX_WEEK);
-  return NFL_MAX_WEEK);
+  return NFL_MAX_WEEK;
 }
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');

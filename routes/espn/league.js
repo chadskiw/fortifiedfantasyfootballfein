@@ -84,30 +84,82 @@ function primaryOwner(t) {
 
 /* ---------------- upstream fetcher (ESPN v3) ---------------- */
 
-async function fetchLeagueTeamsFromESPN({ season, leagueId, req, debug }) {
-// inside your fetchLeagueTeamsFromESPN or similar:
-const { swid, s2 } = await resolveEspnCredCandidates({ req, leagueId });
-const headers = {
-  'Accept': 'application/json, text/plain, */*',
-  'User-Agent': 'ff-platform-service/1.0',
-};
-if (swid && s2) headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
+async function fetchLeagueTeamsFromESPN({ season, leagueId, req, teamId, debug }) {
+  if (!season || !leagueId) throw new Error('season and leagueId are required');
 
+  // ESPN league metadata/teams: mTeam + mSettings (no roster needed here)
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-  const url  = new URL(base);
-  url.searchParams.append('view', 'mTeam');
-  url.searchParams.append('view', 'mSettings');
+  const url  = `${base}?view=mTeam&view=mSettings`;
 
-  const r = await fetch(url.toString(), { headers });
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    const msg = `ESPN ${r.status} ${r.statusText}`;
-    const full = debug ? `${msg} – ${text.slice(0, 512)}` : msg;
-    throw new Error(full);
+  // Try candidates in order: public → request cookies → db (member-linked)
+  const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
+  if (!candidates.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
+
+  let data = null;
+  let lastCand = null, lastRes = null;
+
+  for (const cand of candidates.length ? candidates : [{ source: 'public', swid: '', s2: '' }]) {
+    lastCand = cand;
+    const res = await fetchJsonWithCred(url, cand);
+    lastRes = res;
+
+    if (res.ok && res.json) {
+      try { req.res?.set?.('x-espn-cred-source', cand.source || 'unknown'); } catch {}
+      data = res.json;
+      break;
+    }
+
+    if (res.status === 401) {
+      console.warn('[espn/league] 401 with candidate', {
+        leagueId, teamId, source: cand.source, member_id: cand.member_id || null,
+        bodySnippet: (res.text || '').slice(0, 240)
+      });
+    } else if (String(res.status).startsWith('5')) {
+      console.warn('[espn/league] upstream 5xx', {
+        leagueId, teamId, status: res.status, statusText: res.statusText,
+        bodySnippet: (res.text || '').slice(0, 240)
+      });
+    }
   }
-  const data = await r.json();
-  return { data, usedUrl: url.toString() };
+
+  if (!data) {
+    console.warn(
+      `[espn/league] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+      `-H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${lastCand?.s2 || ''}; SWID=${lastCand?.swid || ''}'`
+    );
+    throw new Error(`ESPN ${lastRes?.status || 401} ${lastRes?.statusText || ''}`);
+  }
+
+  // Normalize minimal shape your frontend expects
+  const teamNameOf = (t) => {
+    const loc = t?.location || t?.teamLocation || '';
+    const nick = t?.nickname || t?.teamNickname || '';
+    const name = `${loc} ${nick}`.trim();
+    return name || t?.name || `Team ${t?.id}`;
+  };
+
+  const teams = (data?.teams || []).map(t => ({
+    teamId: t?.id,
+    team_name: teamNameOf(t),
+    logo: t?.logo || t?.logoUrl || t?.teamLogoUrl || null,
+    wins: t?.record?.overall?.wins ?? 0,
+    losses: t?.record?.overall?.losses ?? 0,
+    ties: t?.record?.overall?.ties ?? 0,
+  }));
+
+  return {
+    ok: true,
+    leagueId,
+    season,
+    teamCount: teams.length,
+    teams,
+    meta: {
+      scoringPeriodId: data?.scoringPeriodId,
+      status: data?.status?.type?.name,
+    }
+  };
 }
+
 
 /* ---------------- normalization ---------------- */
 
@@ -188,99 +240,96 @@ function toTeamsPayload(data = {}) {
   return { teamCount: teams.length, teams };
 }
 
+// routes/espn/league.js
 router.get('/league', async (req, res) => {
   try {
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '');
+    const teamId   = req.query.teamId != null ? Number(req.query.teamId) : undefined;
     const debug    = String(req.query.debug || '') === '1';
     if (!season || !leagueId) return res.status(400).json({ ok:false, error:'season and leagueId are required' });
 
     const base = `${ESPN_BASE_HOST}/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-    const params = new URLSearchParams();
-    // mTeam + mSettings covers names/owners/record; add more views if needed
-    params.append('view','mTeam');
-    params.append('view','mSettings');
-    const url = `${base}?${params.toString()}`;
+    const url  = `${base}?view=mTeam&view=mSettings`;
 
-    // try candidate creds in order
-    const { resolveEspnCredCandidates } = require('./espnCred'); // your helper
-const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
-if (!cands.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
+    const { resolveEspnCredCandidates, mask } = require('./espnCred');
+    const { fetchJsonWithCred } = require('./lib/fetchJsonWithCred'); // adjust import path if needed
+    const cands0 = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
 
-let last = null;
-for (const cand of cands) {
-  const res = await fetchJsonWithCred(url.toString(), cand);
-  if (res.ok && res.json) {
-    try { req.res?.set?.('x-espn-cred-source', cand.source || 'unknown'); } catch {}
-    data = res.json;
-    break;
-  }
-  last = { cand, res };
-  if (res.status === 401) {
-    console.warn('[espn/league] 401 with candidate', {
-      leagueId, source: cand.source, member_id: cand.member_id || null,
-      bodySnippet: (res.text||'').slice(0,240)
-    });
-  }
-}
-if (!data) {
-  console.warn(
-    `[espn/league] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
-    `-H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${last?.cand?.s2||''}; SWID=${last?.cand?.swid||''}'`
-  );
-  throw new Error(`ESPN ${last?.res?.status || 401} ${last?.res?.statusText || ''}`);
-}
+    if (!cands0.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
 
-    let lastErr = null;
-    let winner  = null;
-    let data    = null;
+    // always include a public try
+    const candidates = (cands0.length ? cands0 : []).concat([{ source:'public', swid:'', s2:'' }]);
 
-    const tryWith = async (cand, label) => {
-      const out = await espnGET(url, { swid: cand?.swid, s2: cand?.s2, debug });
-      if (out.ok) {
-        data = out.json;
-        winner = label;
-        return true;
+    let data = null;
+    let last = null;
+
+    for (const cand of candidates) {
+      const r = await fetchJsonWithCred(url, cand);
+      last = { cand, res: r };
+
+      if (r.ok && r.json) {
+        data = r.json;
+        try { res.set('x-espn-cred-source', cand.source || 'unknown'); } catch {}
+        break;
       }
-      if (out.status === 401) {
+
+      if (r.status === 401) {
         console.warn('[espn/league] 401 with candidate', {
-          leagueId, source: label,
-          bodySnippet: out.text?.slice(0, 240)
+          leagueId, teamId, source: cand.source, member_id: cand.member_id || null,
+          bodySnippet: (r.text || '').slice(0, 240)
         });
-      } else {
-        console.warn('[espn/league] upstream %s: %s', out.status, out.statusText);
+      } else if (String(r.status || '').startsWith('5')) {
+        console.warn('[espn/league] upstream 5xx', {
+          leagueId, status: r.status, statusText: r.statusText,
+          bodySnippet: (r.text || '').slice(0, 240)
+        });
       }
-      lastErr = out;
-      return false;
-    };
-
-    // order: request → db:league-team → db:any-in-league
-    for (const cand of (cands || [])) {
-      if (await tryWith(cand, cand.source || 'unknown')) break;
     }
 
     if (!data) {
-      const s2 = cands?.[0]?.s2, swid = cands?.[0]?.swid;
       console.warn(
-        "[espn/league] repro: curl -i '%s' -H 'Accept: application/json, text/plain, */*' -H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=%s; SWID=%s'",
-        url, mask(s2), mask(swid)
+        `[espn/league] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
+        `-H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${last?.cand?.s2 || ''}; SWID=${last?.cand?.swid || ''}'`
       );
-      const status = lastErr?.status || 500;
-      // Soft 200 with empty list keeps FE happy if you prefer:
-      // return res.json({ ok:true, leagueId, season, teamCount:0, teams:[], meta:{ reason:'unauthorized' } });
-      return res.status(status).json({ ok:false, error:'ESPN league fetch failed', status, detail:lastErr?.statusText || 'unknown' });
+      const status = last?.res?.status || 401;
+      return res.status(status).json({ ok:false, error:'ESPN league fetch failed', status, detail:last?.res?.statusText || '' });
     }
 
-    // success
-    try { res.set('x-espn-cred-source', String(winner || 'request')); } catch {}
-    const { teams, teamCount } = toTeamsPayload(data);
-    return res.json({ ok:true, leagueId, season, teamCount, teams, meta: { source:winner || 'request' } });
+    // normalize for FE
+    const teamNameOf = (t) => {
+      const loc = t?.location || t?.teamLocation || '';
+      const nick = t?.nickname || t?.teamNickname || '';
+      const joined = `${loc} ${nick}`.trim();
+      return joined || t?.name || `Team ${t?.id}`;
+    };
 
+    const teams = (data?.teams || []).map(t => ({
+      teamId: t?.id,
+      team_name: teamNameOf(t),
+      logo: t?.logo || t?.logoUrl || t?.teamLogoUrl || null,
+      wins: t?.record?.overall?.wins ?? 0,
+      losses: t?.record?.overall?.losses ?? 0,
+      ties: t?.record?.overall?.ties ?? 0,
+    }));
+
+    return res.json({
+      ok: true,
+      leagueId,
+      season,
+      teamCount: teams.length,
+      teams,
+      meta: {
+        scoringPeriodId: data?.scoringPeriodId,
+        status: data?.status?.type?.name,
+      }
+    });
   } catch (err) {
     console.error('[espn/league] error:', err);
     return res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
+
 
 /* ---------------- exports ---------------- */
 
