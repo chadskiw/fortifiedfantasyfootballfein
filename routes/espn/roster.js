@@ -96,7 +96,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req }) {
     global.__espnFailKeys.add(key);
 
     const curl = [
-      'curl',
+      'curl.exe',
       '-i',
       `'${url}'`,
       "-H 'Accept: application/json, text/plain, */*'",
