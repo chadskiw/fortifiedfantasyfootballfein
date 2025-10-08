@@ -223,6 +223,14 @@ function resolveHeadshot(p, position, teamAbbr) {
   return '/img/placeholders/player.png';
 }
 
+// ---- optional: fix known ESPN quirks (JSN etc.) ----
+function correctKnownPosition(name, position) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('jaxon smith')) return 'WR';      // JSN
+  if (n.includes('taysom hill')) return 'TE';      // ESPN sometimes lists as QB
+  return position;
+}
+
 function espnRosterEntryToPlayer(entry = {}) {
   const p = entry.player || entry;
 
@@ -233,18 +241,19 @@ function espnRosterEntryToPlayer(entry = {}) {
     '';
 
   // Position: prefer mapped id, then any string present
-  const position =
+  let position =
     POS[p.defaultPositionId] ||
     p.position ||
     p.defaultPosition ||
     (p.player && POS[p.player?.defaultPositionId]) ||
     '';
 
-  // Slot: from lineupSlotId with safe fallbacks
-const slot = slotLabel(entry.lineupSlotId, p.defaultPositionId);
-const isStarter = !['BE','BN','IR','ES'].includes(String(slot).toUpperCase());
-const chip = player.slot || player.position || '—';
+  // Corrections (e.g., JSN -> WR)
+  position = correctKnownPosition(p.fullName || p.displayName || p.name, position);
 
+  // Slot: resolve robustly; never blank
+  const slot = slotLabel(entry.lineupSlotId, p.defaultPositionId);
+  const isStarter = !['BE','BN','IR','ES'].includes(String(slot).toUpperCase());
 
   const fpId =
     p.fantasyProsId ||
@@ -259,13 +268,14 @@ const chip = player.slot || player.position || '—';
     id: p.id || p.playerId,
     name: p.fullName || p.displayName || p.name,
     team: teamAbbr,
-    position,            // ✔ correct now (TE shows as TE)
-    slot,                // QB/RB/WR/TE/FLEX/K/DST/BE/IR/...
+    position,  // e.g., QB/RB/WR/TE/K/DST
+    slot,      // QB/RB/WR/TE/FLEX/K/DST/BE/IR/...
     isStarter,
     fpId,
     headshot
   };
 }
+
 // Self-test so you can verify the mount works:
 router.get('/roster/selftest', (_req, res) => {
   res.json({ ok:true, msg:'roster router mounted' });
