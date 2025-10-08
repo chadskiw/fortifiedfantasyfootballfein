@@ -43,6 +43,58 @@ const SLOT = {
   27:'DB',
   28:'DP'
 };
+function slotLabel(lineupSlotId, defaultPositionId) {
+  // Known/common ESPN ids
+  const MAP = {
+    0:'QB',
+    2:'RB',
+    3:'WR',
+    4:'TE',
+    5:'WR/TE',          // seen in some leagues
+    6:'RB/WR',          // seen in some leagues
+    7:'OP',             // superflex/OP
+    8:'TAXI',           // some variants
+    9:'RB/WR/TE',       // another FLEX code used by some
+    10:'QB/RB/WR/TE',   // super OP in custom leagues
+    11:'WR/TE',         // alt id
+    12:'RB/WR',         // alt id
+    13:'RB/TE',         // alt id
+    14:'QB/RB/WR/TE',   // alt id
+    15:'BN',            // alt bench in some dumps
+    16:'DST',
+    17:'K',
+    18:'P',
+    19:'HC',
+    20:'BE',
+    21:'IR',
+    22:'ES',
+    23:'FLEX',
+    24:'ED',
+    25:'DL',
+    26:'LB',
+    27:'DB',
+    28:'DP'
+  };
+
+  if (MAP.hasOwnProperty(lineupSlotId)) return MAP[lineupSlotId];
+
+  // Fallbacks so UI is never blank:
+  // 1) If it's a starter but unmapped, show the player position as the chip
+  if (defaultPositionId != null) {
+    const POS = { 1:'QB', 2:'RB', 3:'WR', 4:'TE', 5:'K', 16:'DST' };
+    if (POS[defaultPositionId]) return POS[defaultPositionId];
+  }
+
+  // 2) Bench-style fallback:
+  // ESPN treats unknown/non-active slots usually as bench. Use 'BE', but also log once.
+  if (!global.__unkSlots) global.__unkSlots = new Set();
+  if (!global.__unkSlots.has(lineupSlotId)) {
+    console.warn('[roster] Unknown lineupSlotId:', lineupSlotId);
+    global.__unkSlots.add(lineupSlotId);
+  }
+  return 'BE';
+}
+
 // --- helper: pull SWID/S2 from req (cookies or headers) ---
 function readEspnCreds(req) {
   const c = req.cookies || {};
@@ -189,12 +241,10 @@ function espnRosterEntryToPlayer(entry = {}) {
     '';
 
   // Slot: from lineupSlotId with safe fallbacks
-  const slot =
-    SLOT[entry.lineupSlotId] ||
-    entry.slot ||
-    (entry.onTeam ? 'BE' : 'BE');
+const slot = slotLabel(entry.lineupSlotId, p.defaultPositionId);
+const isStarter = !['BE','BN','IR','ES'].includes(String(slot).toUpperCase());
+const chip = player.slot || player.position || '—';
 
-  const isStarter = !['BE','BN','IR'].includes(String(slot).toUpperCase());
 
   const fpId =
     p.fantasyProsId ||
@@ -251,6 +301,22 @@ router.get('/roster', async (req, res) => {
   } catch (err) {
     console.error('[espn/roster] error:', err);
     res.status(500).json({ ok:false, error:String(err?.message || err) });
+  }
+});
+router.get('/roster/slots-debug', async (req, res) => {
+  try {
+    const season  = Number(req.query.season);
+    const leagueId= String(req.query.leagueId || '');
+    const week    = Number(req.query.week || 1);
+    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId: null, req });
+    const ids = new Set();
+    (raw.teams || []).forEach(t => (t.players || []).forEach(e => {
+      const id = e.lineupSlotId ?? e.player?.lineupSlotId;
+      if (id != null) ids.add(id);
+    }));
+    res.json({ ok:true, slotIds:[...ids].sort((a,b)=>a-b) });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
 
