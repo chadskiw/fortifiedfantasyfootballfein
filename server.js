@@ -13,7 +13,7 @@ const ffPointsRouter = require('./src/routes/ffPoints');
 const espnRouter    = require('./routes/espn');
 const hydrateEspn   = require('./routes/espn/hydrate');
 const imagesPresign = require('./routes/images/presign-r2');
-const createImagesRouter = require('./src/routes/images');
+const createImagesRouter = require('./routes/images');
 
 const app = express();
 app.disable('x-powered-by');
