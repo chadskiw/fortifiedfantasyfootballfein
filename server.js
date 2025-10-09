@@ -8,6 +8,7 @@ const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
 const espnAuthRouter = require('./routes/espnAuth');
+const ffPointsRouter = require('./src/routes/ffPoints');
 
 const espnRouter    = require('./routes/espn');
 const hydrateEspn   = require('./routes/espn/hydrate');
@@ -104,7 +105,6 @@ function asMiddleware(mod) {
   // exposes GET /api/platforms/espn/roster
   app.use('/api/platforms/espn', leagueMw);
 }
-const ffPointsRouter = require('./routes/ffPoints');
 // ...
 app.use('/api/ff', ffPointsRouter({ pool }));
 
