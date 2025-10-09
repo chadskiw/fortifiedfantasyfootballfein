@@ -8,12 +8,12 @@ const morgan       = require('morgan');
 const cookieParser = require('cookie-parser');
 const path         = require('path');
 const espnAuthRouter = require('./routes/espnAuth');
-const ffPointsRouter = require('./src/routes/ffPoints');
+const ffPointsRouter = require('./routes/ffPoints');
 
 const espnRouter    = require('./routes/espn');
 const hydrateEspn   = require('./routes/espn/hydrate');
 const imagesPresign = require('./routes/images/presign-r2');
-const createImagesRouter = require('./routes/images');
+const createImagesRouter = require('./src/routes/images');
 
 const app = express();
 app.disable('x-powered-by');
