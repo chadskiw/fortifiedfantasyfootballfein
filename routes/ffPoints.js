@@ -2,7 +2,7 @@
 // Reads weekly points and "season totals" (stored as week=1) from ff_team_weekly_points.
 
 const express = require('express');
-const pool = require('../db/pool'); // <-- your shared Pool instance (fallback)
+const pool = require('../src/db/pool'); // <-- your shared Pool instance (fallback)
 
 /** @typedef {import('pg').Pool} Pool */
 /** @param {{ db?: Pool }} deps */
