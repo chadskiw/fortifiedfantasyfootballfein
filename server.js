@@ -106,7 +106,7 @@ function asMiddleware(mod) {
 }
 const ffPointsRouter = require('./routes/ffPoints');
 // ...
-app.use('/api/ff', ffPointsRouter({ pool }));
+app.use('/api/fein', ffPointsRouter({ pool }));
 
 // (repeat for other routers if needed)
 // const teamsMw = asMiddleware(require('./routes/espn/teams'));
