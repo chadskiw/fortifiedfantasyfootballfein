@@ -1,16 +1,11 @@
 // routes/espn/free-agents.js
 const express = require('express');
 const router  = express.Router();
-const fetch   = global.fetch || require('node-fetch');
+const { fetchFromEspnWithCandidates } = require('./espnCred'); // same helper as league/roster
 
-// reuse your existing resolver
-const { fetchFromEspnWithCandidates } = require('./espnCred');
-
-// at top, near other consts
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
 
-// builds the CF Pages Function URL you already host
 function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig }) {
   const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
   u.searchParams.set('season', String(season));
@@ -22,7 +17,6 @@ function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig }) 
   return u;
 }
 
-// GET /api/platforms/espn/free-agents
 router.get('/free-agents', async (req, res) => {
   try {
     const season   = Number(req.query.season);
@@ -31,17 +25,12 @@ router.get('/free-agents', async (req, res) => {
     const pos      = String(req.query.pos || 'ALL');
     const minProj  = Number(req.query.minProj || 2);
     const onlyElig = String(req.query.onlyEligible || 'true') === 'true';
-
-    if (!season || !leagueId) {
-      return res.status(400).json({ ok:false, error:'missing_params' });
-    }
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
     const upstream = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig });
-
-    // Use your server-side cred resolution (same path used by /league, /roster)
     const { status, body } = await fetchFromEspnWithCandidates(
       upstream.toString(),
-      { headers: {} }, // we don't forward browser cookies
+      { headers: {} },                // do NOT forward browser cookies
       { leagueId, teamId: null, memberId: null }
     );
 
@@ -54,10 +43,9 @@ router.get('/free-agents', async (req, res) => {
       return res.json({ ok:true, ...data });
     }
     return res.status(200).json({ ok:false, error:String(body||'upstream_error'), upstream: upstream.toString() });
-  } catch (e) {
+  } catch {
     return res.status(200).json({ ok:false, error:'server_error' });
   }
 });
-
 
 module.exports = router;

@@ -128,7 +128,8 @@ async function konaHandler(req, res) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
-
+// server.js
+app.use('/api/platforms/espn', require('./routes/espn/free-agents'));
 // keep the original
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
