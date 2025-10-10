@@ -789,7 +789,11 @@ function inferPublicOrigin(req) {
  *  - Response is the worker JSON, no creds leave the server.
  */
 // routes/espn/index.js
-const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com'; // set this in env if different
+// ---- top of file ----
+const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
+// CF Functions path – pick the one you actually deployed:
+const FUNCTION_FREE_AGENTS_PATH =
+  process.env.FUNCTION_FREE_AGENTS_PATH || '/functions/api/free-agents'; // or '/api/free-agents'
 
 router.get('/free-agents', async (req, res) => {
   try {
@@ -805,18 +809,18 @@ router.get('/free-agents', async (req, res) => {
     });
 
     // 🔧 CALL CF PAGES FUNCTION DIRECTLY (no origin inference)
-    const u = new URL('/api/free-agents', PAGES_ORIGIN);
-    u.searchParams.set('season', season);
-    u.searchParams.set('leagueId', leagueId);
-    u.searchParams.set('week', week);
-    if (pos)     u.searchParams.set('pos', pos);
-    if (minProj) u.searchParams.set('minProj', String(minProj));
-    if (status)  u.searchParams.set('status', status);
-    if (slotIds) u.searchParams.set('slotIds', slotIds);
-    if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
-    if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
-    if (host)    u.searchParams.set('host', host);
-    if (diag)    u.searchParams.set('diag', diag);
+const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
+u.searchParams.set('season', season);
+u.searchParams.set('leagueId', leagueId);
+u.searchParams.set('week', week);
+if (pos)     u.searchParams.set('pos', pos);
+if (minProj) u.searchParams.set('minProj', String(minProj));
+if (status)  u.searchParams.set('status', status);
+if (slotIds) u.searchParams.set('slotIds', slotIds);
+if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
+if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
+if (host)    u.searchParams.set('host', host);
+if (diag)    u.searchParams.set('diag', diag);
 
     const hdrs = {
       accept: 'application/json',
@@ -825,12 +829,25 @@ router.get('/free-agents', async (req, res) => {
       'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy',
     };
 
-    const r = await fetch(u.toString(), { headers: hdrs, redirect: 'follow' });
-    const text = await r.text();
-    let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { ok:false, error:'bad_json', text }; }
+const r = await fetch(u.toString(), { headers: hdrs, redirect: 'follow' });
+const text = await r.text();
 
-    res.set('Cache-Control', 'no-store');
-    res.status(r.status).json(data);
+if (r.status === 404) {
+  // tell the FE exactly which upstream you called
+  res.set('Cache-Control', 'no-store');
+  return res.status(502).json({
+    ok: false,
+    error: 'upstream_not_found',
+    upstream: u.toString()
+  });
+}
+
+let data;
+try { data = text ? JSON.parse(text) : {}; }
+catch { data = { ok:false, error:'bad_json', text }; }
+
+res.set('Cache-Control', 'no-store');
+return res.status(r.status).json(data);
   } catch (err) {
     res.set('Cache-Control', 'no-store');
     res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err?.message || err) });
