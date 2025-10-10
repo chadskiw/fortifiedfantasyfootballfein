@@ -771,6 +771,81 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
   }
 });
 
+// --- helper to build the origin for your CF Pages functions ---
+// If you're serving the static site from the same host, this will work.
+// Otherwise, hardcode your Pages host (e.g., https://fortifiedfantasy.com).
+function inferPublicOrigin(req) {
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https');
+  const host  = (req.headers['x-forwarded-host'] || req.headers.host);
+  return `${proto}://${host}`;
+}
+
+/**
+ * GET /api/platforms/espn/free-agents
+ * Query: season, leagueId, week, pos, minProj, status, slotIds, onlyEligible, pfmv, host
+ * Notes:
+ *  - Frontend calls THIS endpoint with no creds.
+ *  - We resolve ESPN creds on the server and call the Cloudflare function for you.
+ *  - Response is the worker JSON, no creds leave the server.
+ */
+router.get('/free-agents', async (req, res) => {
+  try {
+    const {
+      season, leagueId, week,
+      pos, minProj, status, slotIds,
+      onlyEligible, pfmv, host, diag
+    } = req.query;
+
+    if (!season || !leagueId || !week) {
+      return res.status(400).json({ ok:false, error:'missing_params', need:['season','leagueId','week'] });
+    }
+
+    // Resolve the best server-side creds (never expose to FE)
+    const [best] = await resolveEspnCredCandidates({
+      req,
+      leagueId: String(leagueId),
+      teamId:   req.query.teamId ? String(req.query.teamId) : null
+    });
+
+    // Build the target worker URL
+    const origin = inferPublicOrigin(req);
+    const u = new URL('/functions/api/free-agents', origin);
+    u.searchParams.set('season', season);
+    u.searchParams.set('leagueId', leagueId);
+    u.searchParams.set('week', week);
+    if (pos)         u.searchParams.set('pos', pos);
+    if (minProj)     u.searchParams.set('minProj', String(minProj));
+    if (status)      u.searchParams.set('status', status);
+    if (slotIds)     u.searchParams.set('slotIds', slotIds);
+    if (onlyEligible!==undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
+    if (pfmv!==undefined)         u.searchParams.set('pfmv', String(pfmv));
+    if (host)        u.searchParams.set('host', host);
+    if (diag)        u.searchParams.set('diag', diag); // optional while testing
+
+    // Call the worker WITH creds, but entirely server-side
+    const hdrs = {
+      accept: 'application/json',
+      // Only include if present; never send undefined
+      ...(best?.swid ? { 'X-ESPN-SWID': best.swid } : {}),
+      ...(best?.s2   ? { 'X-ESPN-S2':   best.s2   } : {}),
+      // Pass through the user-agent if you want (sometimes ESPN cares)
+      'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy'
+    };
+
+    const r = await fetch(u.toString(), { headers: hdrs, redirect: 'follow' });
+    const text = await r.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { ok:false, error:'bad_json', text }; }
+
+    // Mirror upstream status but strip any leakage; set no-store
+    res.set('Cache-Control', 'no-store');
+    res.status(r.status).json(data);
+  } catch (err) {
+    res.set('Cache-Control', 'no-store');
+    res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err && err.message || err) });
+  }
+});
+
 // ---------------- simple team proxy ----------------
 router.get('/teams', async (req, res) => {
   try {
