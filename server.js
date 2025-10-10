@@ -70,11 +70,12 @@ app.get('/status', (req, res) => {
    cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
  }));
 // requires: const fetch = global.fetch || require('node-fetch');
-const { resolveEspnCredCandidates } = require('./routes/espn/_cred'); // you already have this
+// wherever fetchFromEspnWithCandidates lives (you showed it in server.js)
+const { resolveEspnCredCandidates } = require('./routes/espn/_cred');
+const { mask } = require('./routes/espn/_mask');
 
 async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId, memberId }) {
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
-  // final unauth try
   cands.push({ swid: '', s2: '', source: 'unauth' });
 
   for (const cand of cands) {
@@ -92,16 +93,32 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
           ...(cookie ? { cookie } : {})
         }
       });
+
       const text = await r.text();
       const ct = (r.headers.get('content-type') || '').toLowerCase();
-      if (r.ok && (ct.includes('application/json') || /^[\[{]/.test(text.trim()))) {
-        return { status: r.status, body: text };
+      const looksJson = ct.includes('application/json') || /^[\[{]/.test(text.trim());
+
+      if (r.ok && looksJson) {
+        const used = {
+          source: cand.source || 'unknown',
+          swidMasked: mask(cand.swid || ''),
+          s2Masked:   mask(cand.s2   || '')
+        };
+        // server log (masked)
+        console.log('[espn upstream OK]', {
+          leagueId, teamId, used
+        });
+        return { status: r.status, body: text, used };
       }
       // try next candidate
-    } catch (_) {}
+    } catch (e) {
+      // swallow and try next candidate
+    }
   }
   return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }) };
 }
+
+
 // reuse your fetchFromEspnWithCandidates and the same handler body
 async function konaHandler(req, res) {
   try {
@@ -116,13 +133,30 @@ async function konaHandler(req, res) {
     const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
     for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
-    const { status, body } = await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId, teamId, memberId });
+// in konaHandler AND in free-agents route handler, after the call:
+const { status, body, used } = await fetchFromEspnWithCandidates(/*...*/);
 
-    res.set('Content-Type','application/json; charset=utf-8');
-    res.set('Cache-Control','no-store, private');
-    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-    res.set('Access-Control-Allow-Credentials','true');
-    return res.status(status).send(body);
+// add easy-to-read headers
+if (used) {
+  res.setHeader('X-ESPN-Cred-Source', used.source);
+  res.setHeader('X-ESPN-Cred-SWID',   used.swidMasked);
+  res.setHeader('X-ESPN-Cred-S2',     used.s2Masked);
+}
+
+// normal passthrough
+// If you want an opt-in JSON echo for quick console checks:
+if (req.query.debug === '1' && status >= 200 && status < 300) {
+  try {
+    const j = JSON.parse(body || '{}');
+    j.__cred = used; // masked
+    return res.status(status).json(j);
+  } catch {
+    // fall through to raw send
+  }
+}
+
+return res.status(status).send(body);
+
   } catch (e) {
     console.error('[espn kona passthrough]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
@@ -150,13 +184,30 @@ app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', asy
     const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
     for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
-    const { status, body } = await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId, teamId, memberId });
+// in konaHandler AND in free-agents route handler, after the call:
+const { status, body, used } = await fetchFromEspnWithCandidates(/*...*/);
 
-    res.set('Content-Type', 'application/json; charset=utf-8');
-    res.set('Cache-Control', 'no-store, private');
-    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-    res.set('Access-Control-Allow-Credentials', 'true');
-    return res.status(status).send(body);
+// add easy-to-read headers
+if (used) {
+  res.setHeader('X-ESPN-Cred-Source', used.source);
+  res.setHeader('X-ESPN-Cred-SWID',   used.swidMasked);
+  res.setHeader('X-ESPN-Cred-S2',     used.s2Masked);
+}
+
+// normal passthrough
+// If you want an opt-in JSON echo for quick console checks:
+if (req.query.debug === '1' && status >= 200 && status < 300) {
+  try {
+    const j = JSON.parse(body || '{}');
+    j.__cred = used; // masked
+    return res.status(status).json(j);
+  } catch {
+    // fall through to raw send
+  }
+}
+
+return res.status(status).send(body);
+
   } catch (e) {
     console.error('[espn kona passthrough]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
@@ -382,3 +433,4 @@ app.use((err, _req, res, _next) => {
 // ===== Boot =====
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`FF Platform Service listening on :${port}`));
+module.exports = { fetchFromEspnWithCandidates };
