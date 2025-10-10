@@ -115,62 +115,51 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
 
 
 // reuse your fetchFromEspnWithCandidates and the same handler body
+// server.js
+
 async function konaHandler(req, res) {
   try {
-    const game     = String(req.params.game || 'ffl').toLowerCase();
+    const game     = String(req.params.game||'ffl').toLowerCase();
     const season   = Number(req.params.season);
     const leagueId = String(req.params.leagueId);
-    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
-
     const teamId   = req.query.teamId ? String(req.query.teamId) : null;
     const memberId = req.query.memberId ? String(req.query.memberId) : null;
 
-   // … inside konaHandler (both aliases that hit it) …
-const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
-for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
+    const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
+    for (const [k,v] of Object.entries(req.query)) upstream.searchParams.set(k,String(v));
 
-// NOTE: ctx is optional now, but we pass it so _cred can look up league-specific creds
-const { status, body, used } = await fetchFromEspnWithCandidates(
-  upstream.toString(),
-  req,
-  { leagueId, teamId, memberId }
-);
+    const { status, body, used } =
+      await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId, teamId, memberId });
 
-// handy headers so you can see what was used from the browser’s Network tab
-if (used) {
-  res.set('X-ESPN-Cred-Source', used.source);
-  res.set('X-ESPN-Cred-SWID',   used.swidMasked);
-  res.set('X-ESPN-Cred-S2',     used.s2Masked);
-}
+    if (used) {
+      res.set('X-ESPN-Cred-Source', used.source);
+      res.set('X-ESPN-Cred-SWID',   used.swidMasked);
+      res.set('X-ESPN-Cred-S2',     used.s2Masked);
+      // also log once per request (masked)
+      console.log('[kona] used', used);
+    }
 
-res.set('Content-Type','application/json; charset=utf-8');
-res.set('Cache-Control','no-store, private');
-res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-res.set('Access-Control-Allow-Credentials','true');
+    res.set('Content-Type','application/json; charset=utf-8');
+    res.set('Cache-Control','no-store, private');
+    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.set('Access-Control-Allow-Credentials','true');
 
-// optional JSON echo with creds when you add ?debug=1
-if (req.query.debug === '1' && status >= 200 && status < 300) {
-  try {
-    const j = JSON.parse(body || '{}');
-    j.__cred = used;
-    return res.status(status).json(j);
-  } catch { /* fall through */ }
-}
-
-return res.status(status).send(body);
-
+    if (req.query.debug === '1' && status >= 200 && status < 300) {
+      const j = JSON.parse(body || '{}'); j.__cred = used; return res.status(status).json(j);
+    }
+    return res.status(status).send(body);
   } catch (e) {
     console.error('[espn kona passthrough]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
+
+// use this one handler for both routes you already mounted
+app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
+app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
+
 // server.js
 app.use('/api/platforms/espn', require('./routes/espn/free-agents'));
-// keep the original
-app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
-
-// add the alias the FE is calling
-app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
 // ✅ Kona passthrough (the path your browser is hitting)
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
