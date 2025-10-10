@@ -74,8 +74,12 @@ app.get('/status', (req, res) => {
 const { resolveEspnCredCandidates } = require('./routes/espn/_cred');
 const { mask } = require('./routes/espn/_mask');
 
-async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId, memberId }) {
+// SAFE: 3rd arg optional
+async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
+  const { leagueId = null, teamId = null, memberId = null } = ctx || {};
+
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
+  // last attempt unauth
   cands.push({ swid: '', s2: '', source: 'unauth' });
 
   for (const cand of cands) {
@@ -96,27 +100,17 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
 
       const text = await r.text();
       const ct = (r.headers.get('content-type') || '').toLowerCase();
-      const looksJson = ct.includes('application/json') || /^[\[{]/.test(text.trim());
+      const okJson = r.ok && (ct.includes('application/json') || /^[\[{]/.test(text.trim()));
 
-      if (r.ok && looksJson) {
-        const used = {
-          source: cand.source || 'unknown',
-          swidMasked: mask(cand.swid || ''),
-          s2Masked:   mask(cand.s2   || '')
-        };
-        // server log (masked)
-        console.log('[espn upstream OK]', {
-          leagueId, teamId, used
-        });
-        return { status: r.status, body: text, used };
+      if (okJson) {
+        return { status: r.status, body: text };
       }
-      // try next candidate
-    } catch (e) {
-      // swallow and try next candidate
-    }
+      // otherwise try next candidate
+    } catch {/* keep iterating */}
   }
   return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }) };
 }
+
 
 
 // reuse your fetchFromEspnWithCandidates and the same handler body
