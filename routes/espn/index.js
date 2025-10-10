@@ -756,10 +756,10 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
 
     // If the caller wants everything (or didn’t specify limit) and this is kona,
     // do a paged crawl and merge. Toggle with ?aggregate=1 (or make it your default).
-    const wantsAggregate =
-      req.query.aggregate === '1' ||
-      (String(req.query.view || '').includes('kona_player_info') && !req.query.limit);
-
+ const v = String(req.query.view || '');
+ const wantsAggregate =
+   req.query.aggregate === '1' ||
+   ((v.includes('kona_player_info') || v.includes('kona_playercard')) && !req.query.limit);
     if (wantsAggregate) {
       const LIMIT =  500 ; // 50 safe
       let offset = Number(req.query.offset) || 0;
