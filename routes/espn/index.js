@@ -852,65 +852,42 @@ const FUNCTION_FREE_AGENTS_PATH =
 
 router.get('/free-agents', async (req, res) => {
   try {
-    const {
-      season, leagueId, week,
-      pos, minProj, status, slotIds,
-      onlyEligible, pfmv, host, diag
-    } = req.query;
+    const season   = Number(req.query.season);
+    const leagueId = String(req.query.leagueId || '');
+    const week     = Number(req.query.week || 1);
+    const pos      = String(req.query.pos || 'ALL');
+    const minProj  = Number(req.query.minProj || 2);
+    const onlyElig = String(req.query.onlyEligible || 'true') === 'true';
 
-    if (!season || !leagueId || !week) {
-      return res.status(400).json({ ok:false, error:'missing_params', need:['season','leagueId','week'] });
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
+
+    // Build the upstream FA URL you already use
+    const upstream = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig });
+
+    // IMPORTANT: select server creds; do NOT pass browser cookies/headers through
+    const { status, body } = await fetchFromEspnWithCandidates(
+      upstream.toString(),
+      /* req not needed for cookies; pass meta only: */
+      { headers: {} },
+      { leagueId, teamId: null, memberId: null } // helps your selector choose a cred
+    );
+
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Cache-Control', 'no-store, private');
+    if (status >= 200 && status < 300) {
+      // normalize to your existing shape
+      const data = JSON.parse(body || '{}');
+      return res.json({ ok:true, ...data });
+    } else {
+      const detail = body || 'upstream_error';
+      return res.status(200).json({ ok:false, error: detail, upstream: upstream.toString() });
     }
-
-    // Use the SAME cred-resolver your other endpoints use
-    const [best] = await resolveEspnCredCandidates({
-      req,
-      leagueId: String(leagueId),
-      teamId:   req.query.teamId ? String(req.query.teamId) : null
-    });
-
-    // Build the upstream function URL
-    const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
-    u.searchParams.set('season', String(season));
-    u.searchParams.set('leagueId', String(leagueId));
-    u.searchParams.set('week', String(week));
-    if (pos)     u.searchParams.set('pos', String(pos));
-    if (minProj) u.searchParams.set('minProj', String(minProj));
-    if (status)  u.searchParams.set('status', String(status));
-    if (slotIds) u.searchParams.set('slotIds', String(slotIds));
-    if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
-    if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
-    if (host)    u.searchParams.set('host', String(host));
-    if (diag)    u.searchParams.set('diag', String(diag)); // optional while testing
-
-    // Send creds server-side (never to the browser)
-    const headers = {
-      accept: 'application/json',
-      ...(best?.swid ? { 'X-ESPN-SWID': best.swid } : {}),
-      ...(best?.s2   ? { 'X-ESPN-S2':   best.s2   } : {}),
-      'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy'
-    };
-
-    const r = await fetch(u.toString(), { headers, redirect: 'follow' });
-    const text = await r.text();
-
-    // Helpful error if your function path is wrong on Pages
-    if (r.status === 404) {
-      res.set('Cache-Control', 'no-store');
-      return res.status(502).json({ ok:false, error:'upstream_not_found', upstream: u.toString() });
-    }
-
-    let data;
-    try { data = text ? JSON.parse(text) : {}; }
-    catch { data = { ok:false, error:'bad_json', text }; }
-
-    res.set('Cache-Control', 'no-store');
-    return res.status(r.status).json(data);
-  } catch (err) {
-    res.set('Cache-Control', 'no-store');
-    return res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err?.message || err) });
+  } catch (e) {
+    return res.status(200).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
