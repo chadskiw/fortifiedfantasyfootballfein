@@ -761,7 +761,7 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
       (String(req.query.view || '').includes('kona_player_info') && !req.query.limit);
 
     if (wantsAggregate) {
-      const LIMIT = Math.max(1, Math.min(100, Number(req.query.limit) || 500)); // 50 safe
+      const LIMIT =  500 ; // 50 safe
       let offset = Number(req.query.offset) || 0;
 
       let baseObj = null;
