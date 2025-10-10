@@ -101,6 +101,38 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
   }
   return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }) };
 }
+// reuse your fetchFromEspnWithCandidates and the same handler body
+async function konaHandler(req, res) {
+  try {
+    const game     = String(req.params.game || 'ffl').toLowerCase();
+    const season   = Number(req.params.season);
+    const leagueId = String(req.params.leagueId);
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
+
+    const teamId   = req.query.teamId ? String(req.query.teamId) : null;
+    const memberId = req.query.memberId ? String(req.query.memberId) : null;
+
+    const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
+    for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
+
+    const { status, body } = await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId, teamId, memberId });
+
+    res.set('Content-Type','application/json; charset=utf-8');
+    res.set('Cache-Control','no-store, private');
+    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.set('Access-Control-Allow-Credentials','true');
+    return res.status(status).send(body);
+  } catch (e) {
+    console.error('[espn kona passthrough]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+}
+
+// keep the original
+app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
+
+// add the alias the FE is calling
+app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
 // ✅ Kona passthrough (the path your browser is hitting)
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
