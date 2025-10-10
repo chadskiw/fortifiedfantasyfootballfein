@@ -62,11 +62,7 @@ app.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
-// …existing requires…
-const freeAgentsMw = require('./routes/espn/free-agents');
 
-// …after CORS/health and before the generic /api/* not_found:
-app.use('/api/platforms/espn', freeAgentsMw);
 
 // Mount under your platform namespace
  app.use('/api/platforms/espn', espnAuthRouter({

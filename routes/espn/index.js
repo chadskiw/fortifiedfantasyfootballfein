@@ -790,69 +790,76 @@ function inferPublicOrigin(req) {
  */
 // routes/espn/index.js
 // ---- top of file ----
+// ─────────────────────────────────────────────────────────────────────────────
+// Free Agents proxy → calls your CF Pages function `/api/free-agents`
+// Uses the same cred resolution as /league and /roster in this file.
+// ─────────────────────────────────────────────────────────────────────────────
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
-// CF Functions path – pick the one you actually deployed:
 const FUNCTION_FREE_AGENTS_PATH =
-  process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents'; // or '/api/free-agents'
+  process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents'; // CF Pages Functions live under /api/*
 
 router.get('/free-agents', async (req, res) => {
   try {
-    const { season, leagueId, week, pos, minProj, status, slotIds, onlyEligible, pfmv, host, diag } = req.query;
+    const {
+      season, leagueId, week,
+      pos, minProj, status, slotIds,
+      onlyEligible, pfmv, host, diag
+    } = req.query;
+
     if (!season || !leagueId || !week) {
       return res.status(400).json({ ok:false, error:'missing_params', need:['season','leagueId','week'] });
     }
 
+    // Use the SAME cred-resolver your other endpoints use
     const [best] = await resolveEspnCredCandidates({
       req,
       leagueId: String(leagueId),
-      teamId: req.query.teamId ? String(req.query.teamId) : null,
+      teamId:   req.query.teamId ? String(req.query.teamId) : null
     });
 
-    // 🔧 CALL CF PAGES FUNCTION DIRECTLY (no origin inference)
-const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
-u.searchParams.set('season', season);
-u.searchParams.set('leagueId', leagueId);
-u.searchParams.set('week', week);
-if (pos)     u.searchParams.set('pos', pos);
-if (minProj) u.searchParams.set('minProj', String(minProj));
-if (status)  u.searchParams.set('status', status);
-if (slotIds) u.searchParams.set('slotIds', slotIds);
-if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
-if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
-if (host)    u.searchParams.set('host', host);
-if (diag)    u.searchParams.set('diag', diag);
+    // Build the upstream function URL
+    const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
+    u.searchParams.set('season', String(season));
+    u.searchParams.set('leagueId', String(leagueId));
+    u.searchParams.set('week', String(week));
+    if (pos)     u.searchParams.set('pos', String(pos));
+    if (minProj) u.searchParams.set('minProj', String(minProj));
+    if (status)  u.searchParams.set('status', String(status));
+    if (slotIds) u.searchParams.set('slotIds', String(slotIds));
+    if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
+    if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
+    if (host)    u.searchParams.set('host', String(host));
+    if (diag)    u.searchParams.set('diag', String(diag)); // optional while testing
 
-    const hdrs = {
+    // Send creds server-side (never to the browser)
+    const headers = {
       accept: 'application/json',
       ...(best?.swid ? { 'X-ESPN-SWID': best.swid } : {}),
       ...(best?.s2   ? { 'X-ESPN-S2':   best.s2   } : {}),
-      'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy',
+      'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy'
     };
 
-const r = await fetch(u.toString(), { headers: hdrs, redirect: 'follow' });
-const text = await r.text();
+    const r = await fetch(u.toString(), { headers, redirect: 'follow' });
+    const text = await r.text();
 
-if (r.status === 404) {
-  // tell the FE exactly which upstream you called
-  res.set('Cache-Control', 'no-store');
-  return res.status(502).json({
-    ok: false,
-    error: 'upstream_not_found',
-    upstream: u.toString()
-  });
-}
+    // Helpful error if your function path is wrong on Pages
+    if (r.status === 404) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(502).json({ ok:false, error:'upstream_not_found', upstream: u.toString() });
+    }
 
-let data;
-try { data = text ? JSON.parse(text) : {}; }
-catch { data = { ok:false, error:'bad_json', text }; }
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch { data = { ok:false, error:'bad_json', text }; }
 
-res.set('Cache-Control', 'no-store');
-return res.status(r.status).json(data);
+    res.set('Cache-Control', 'no-store');
+    return res.status(r.status).json(data);
   } catch (err) {
     res.set('Cache-Control', 'no-store');
-    res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err?.message || err) });
+    return res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err?.message || err) });
   }
 });
+
 
 
 // ---------------- simple team proxy ----------------
