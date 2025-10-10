@@ -4,60 +4,60 @@ const router  = express.Router();
 const fetch   = global.fetch || require('node-fetch');
 
 // reuse your existing resolver
-const { resolveEspnCredCandidates } = require('./espnCred');
+const { fetchFromEspnWithCandidates } = require('./espnCred');
 
+// at top, near other consts
+const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
+const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
+
+// builds the CF Pages Function URL you already host
+function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig }) {
+  const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
+  u.searchParams.set('season', String(season));
+  u.searchParams.set('leagueId', String(leagueId));
+  u.searchParams.set('week', String(week));
+  if (pos) u.searchParams.set('pos', String(pos));
+  u.searchParams.set('minProj', String(minProj));
+  u.searchParams.set('onlyEligible', String(onlyElig));
+  return u;
+}
+
+// GET /api/platforms/espn/free-agents
 router.get('/free-agents', async (req, res) => {
   try {
-    const {
-      season, leagueId, week,
-      pos, minProj, status, slotIds,
-      onlyEligible, pfmv, host, diag
-    } = req.query;
+    const season   = Number(req.query.season);
+    const leagueId = String(req.query.leagueId || '');
+    const week     = Number(req.query.week || 1);
+    const pos      = String(req.query.pos || 'ALL');
+    const minProj  = Number(req.query.minProj || 2);
+    const onlyElig = String(req.query.onlyEligible || 'true') === 'true';
 
-    if (!season || !leagueId || !week) {
-      return res.status(400).json({ ok:false, error:'missing_params', need:['season','leagueId','week'] });
+    if (!season || !leagueId) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
-    // best server-side creds (never expose to FE)
-    const [best] = await resolveEspnCredCandidates({
-      req,
-      leagueId: String(leagueId),
-      teamId:   req.query.teamId ? String(req.query.teamId) : null
-    });
+    const upstream = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig });
 
-    // build target worker URL (your CF Worker function path)
-    const u = new URL('/functions/api/free-agents');
-    u.searchParams.set('season', String(season));
-    u.searchParams.set('leagueId', String(leagueId));
-    u.searchParams.set('week', String(week));
-    if (pos)         u.searchParams.set('pos', String(pos));
-    if (minProj)     u.searchParams.set('minProj', String(minProj));
-    if (status)      u.searchParams.set('status', String(status));
-    if (slotIds)     u.searchParams.set('slotIds', String(slotIds));
-    if (onlyEligible !== undefined) u.searchParams.set('onlyEligible', String(onlyEligible));
-    if (pfmv !== undefined)         u.searchParams.set('pfmv', String(pfmv));
-    if (host)        u.searchParams.set('host', String(host));
-    if (diag)        u.searchParams.set('diag', String(diag)); // optional debug
+    // Use your server-side cred resolution (same path used by /league, /roster)
+    const { status, body } = await fetchFromEspnWithCandidates(
+      upstream.toString(),
+      { headers: {} }, // we don't forward browser cookies
+      { leagueId, teamId: null, memberId: null }
+    );
 
-    // server-side fetch with creds
-    const headers = {
-      accept: 'application/json',
-      ...(best?.swid ? { 'X-ESPN-SWID': best.swid } : {}),
-      ...(best?.s2   ? { 'X-ESPN-S2':   best.s2   } : {}),
-      'User-Agent': req.get('user-agent') || 'FortifiedFantasy/espn-proxy'
-    };
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Cache-Control', 'no-store, private');
 
-    const r = await fetch(u.toString(), { headers, redirect: 'follow' });
-    const text = await r.text();
-    let data;
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { ok:false, error:'bad_json', text }; }
-
-    res.set('Cache-Control', 'no-store');
-    return res.status(r.status).json(data);
-  } catch (err) {
-    res.set('Cache-Control', 'no-store');
-    return res.status(500).json({ ok:false, error:'free_agents_proxy_failed', detail: String(err?.message || err) });
+    if (status >= 200 && status < 300) {
+      const data = JSON.parse(body || '{}');
+      return res.json({ ok:true, ...data });
+    }
+    return res.status(200).json({ ok:false, error:String(body||'upstream_error'), upstream: upstream.toString() });
+  } catch (e) {
+    return res.status(200).json({ ok:false, error:'server_error' });
   }
 });
+
 
 module.exports = router;
