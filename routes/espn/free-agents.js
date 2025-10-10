@@ -4,7 +4,7 @@ const router  = express.Router();
 const fetch   = global.fetch || require('node-fetch');
 
 // reuse your existing resolver
-const { resolveEspnCredCandidates } = require('./_cred');
+const { resolveEspnCredCandidates } = require('./espnCred');
 
 // infer the public origin to hit your worker (falls back to same origin)
 function inferPublicOrigin(req) {
