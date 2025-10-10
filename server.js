@@ -103,7 +103,7 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
 }
 
 // ✅ Kona passthrough (the path your browser is hitting)
-router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
+app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
   try {
     const game     = String(req.params.game || 'ffl').toLowerCase();
     const season   = Number(req.params.season);
