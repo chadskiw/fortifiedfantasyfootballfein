@@ -772,28 +772,40 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
 });
 
 // ---------------- simple team proxy ----------------
-router.get('/teams', ensureCred, async (req, res) => {
+router.get('/teams', async (req, res) => {
   try {
-    const game    = (req.query.game || 'ffl').toString().toLowerCase();
-    const season  = num(req.query.season, new Date().getUTCFullYear());
+    const game     = (req.query.game || 'ffl').toString().toLowerCase();
+    const season   = num(req.query.season, new Date().getUTCFullYear());
     const leagueId = String(req.query.leagueId || '').trim();
+    const teamId   = req.query.teamId ? String(req.query.teamId) : null;
     if (!season || !leagueId) return bad(res, 400, 'season and leagueId required');
 
-    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}?view=mTeam&view=mSettings`;
-    const data = await espnFetchJSON(url, req._espn);
+    const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`;
+    const url  = `${base}?view=mTeam&view=mSettings&view=mMembers`;
 
+    const { status, body } = await fetchFromEspnWithCandidates(url, req, { leagueId, teamId });
+    if (status >= 400) return res.status(status).send(body);
+
+    const data = JSON.parse(body);
     const teams = (data.teams || []).map(t => ({
       id: t.id,
       location: t.location,
       nickname: t.nickname,
-      logo: imgt.logo || null,
+      name: `${t.location || ''} ${t.nickname || ''}`.trim(),
+      logo: t.logo || null,
       owners: t.owners || []
     }));
 
-    return ok(res, { game, season, leagueId, teams });
+    return ok(res, {
+      leagueId,
+      season,
+      teamCount: teams.length,
+      teams,
+      meta: { okUpstream: true }
+    });
   } catch (e) {
     console.error('[espn/teams]', e);
-    return bad(res, e.status || 500, e.message || 'proxy_failed');
+    return bad(res, 500, 'proxy_failed');
   }
 });
 
