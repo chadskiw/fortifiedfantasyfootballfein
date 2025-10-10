@@ -1,7 +1,7 @@
 // routes/espn/free-agents.js
 const express = require('express');
 const router  = express.Router();
-const { fetchFromEspnWithCandidates } = require('./espnCred'); // same helper as league/roster
+const { fetchFromEspnWithCandidates } = require('./espnCred');
 
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
@@ -28,22 +28,29 @@ router.get('/free-agents', async (req, res) => {
     if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
     const upstream = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig });
-    const { status, body } = await fetchFromEspnWithCandidates(
+
+    const { status, body, used } = await fetchFromEspnWithCandidates(
       upstream.toString(),
-      { headers: {} },                // do NOT forward browser cookies
-      { leagueId, teamId: null, memberId: null }
+      req,
+      { leagueId }              // ctx helps DB lookup; we still don’t forward browser cookies
     );
 
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Cache-Control', 'no-store, private');
+    if (used) {
+      res.set('X-ESPN-Cred-Source', used.source);
+      res.set('X-ESPN-Cred-SWID',   used.swidMasked);
+      res.set('X-ESPN-Cred-S2',     used.s2Masked);
+    }
+
+    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.set('Access-Control-Allow-Credentials', 'true');
+    res.set('Cache-Control', 'no-store, private');
 
     if (status >= 200 && status < 300) {
       const data = JSON.parse(body || '{}');
       return res.json({ ok:true, ...data });
     }
-    return res.status(200).json({ ok:false, error:String(body||'upstream_error'), upstream: upstream.toString() });
-  } catch {
+    return res.status(200).json({ ok:false, error:String(body||'upstream_error') });
+  } catch (e) {
     return res.status(200).json({ ok:false, error:'server_error' });
   }
 });

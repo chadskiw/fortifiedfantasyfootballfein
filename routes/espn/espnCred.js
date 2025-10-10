@@ -1,99 +1,62 @@
 // routes/espn/espnCred.js
-// Build an ordered list of candidate ESPN creds for a (leagueId, teamId).
-// Order: team owner → any member seen in league (most recent) → request cookies.
+const { resolveEspnCredCandidates } = require('./_cred');
 
-const HEADER_SWID_KEYS = ['x-espn-swid', 'x-espn-s2-swid'];
-const HEADER_S2_KEYS   = ['x-espn-s2'];
-
-function normalizeSwid(s) {
-  if (!s) return '';
-  const raw = String(s).trim();
-  const inner = raw.replace(/^\{|\}$/g, '');
-  return `{${inner}}`;
+// simple masker for logging/headers
+function mask(val, keep = 4) {
+  if (!val) return '';
+  const s = String(val);
+  if (s.length <= keep * 2) return s[0] + '…' + s.slice(-1);
+  return s.slice(0, keep) + '…' + s.slice(-keep);
 }
 
-function readReqCreds(req) {
-  const c = req.cookies || {};
-  const h = req.headers || {};
-  let swid =
-    c.SWID || c.swid || c.ff_espn_swid || null;
-  let s2 =
-    c.espn_s2 || c.ESPN_S2 || c.ff_espn_s2 || null;
+/**
+ * Fetch ESPN with multiple credential candidates.
+ * - ctx is OPTIONAL
+ * - returns { status, body, used }
+ */
+async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
+  const { leagueId = null, teamId = null, memberId = null } = ctx || {};
 
-  for (const k of HEADER_SWID_KEYS) if (!swid && h[k]) swid = h[k];
-  for (const k of HEADER_S2_KEYS)   if (!s2   && h[k]) s2   = h[k];
+  const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
+  // final unauth try
+  cands.push({ swid: '', s2: '', source: 'unauth' });
 
-  if (swid && s2) {
-    return [{ swid: normalizeSwid(swid), s2, source: 'request' }];
-  }
-  return [];
-}
+  for (const cand of cands) {
+    try {
+      const cookie = [
+        cand?.swid ? `SWID=${cand.swid}`   : '',
+        cand?.s2   ? `espn_s2=${cand.s2}` : ''
+      ].filter(Boolean).join('; ');
 
-// Return an array of {swid, s2, source, member_id?} sorted by preference.
-async function resolveEspnCredCandidates({ req, leagueId, teamId = null, memberId = null }) {
-  const db = req.app?.get?.('db') || req.db;
-  const out = [];
+      const r = await fetch(upstreamUrl, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json, text/plain, */*',
+          referer: 'https://fantasy.espn.com/',
+          ...(cookie ? { cookie } : {})
+        }
+      });
 
-  // If no DB, just return request cookies.
-  if (!db) return readReqCreds(req);
-
-  // 1) Explicit memberId (if provided)
-  if (memberId) {
-    const row = await db.oneOrNone(`
-      SELECT swid, espn_s2, member_id
-      FROM ff_espn_cred
-      WHERE member_id = $1
-      ORDER BY last_seen DESC NULLS LAST, first_seen DESC NULLS LAST
-      LIMIT 1
-    `, [memberId]);
-    if (row?.swid && row?.espn_s2) {
-      out.push({ swid: normalizeSwid(row.swid), s2: row.espn_s2, source: 'db:member', member_id: row.member_id });
-    }
-  }
-
-  // 2) Owner of (league, team) if known
-  if (leagueId && teamId != null) {
-    const own = await db.oneOrNone(`
-      SELECT f.member_id, c.swid, c.espn_s2
-      FROM ff_sport_ffl f
-      JOIN ff_espn_cred c ON c.member_id = f.member_id
-      WHERE f.league_id = $1 AND f.team_id = $2
-      ORDER BY c.last_seen DESC NULLS LAST, f.last_seen_at DESC NULLS LAST
-      LIMIT 1
-    `, [String(leagueId), String(teamId)]);
-    if (own?.swid && own?.espn_s2) {
-      out.push({ swid: normalizeSwid(own.swid), s2: own.espn_s2, source: 'db:league-team', member_id: own.member_id });
-    }
-  }
-
-  // 3) Any member seen in this league (most recent first) — add a few
-  if (leagueId) {
-    const any = await db.any(`
-      SELECT DISTINCT ON (c.member_id) c.member_id, c.swid, c.espn_s2, c.last_seen
-      FROM ff_sport_ffl f
-      JOIN ff_espn_cred c ON c.member_id = f.member_id
-      WHERE f.league_id = $1
-      ORDER BY c.member_id, c.last_seen DESC NULLS LAST
-      LIMIT 5
-    `, [String(leagueId)]);
-    for (const r of any) {
-      if (r?.swid && r?.espn_s2) {
-        out.push({ swid: normalizeSwid(r.swid), s2: r.espn_s2, source: 'db:any-in-league', member_id: r.member_id });
+      const text = await r.text();
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      const okJson = r.ok && (ct.includes('application/json') || /^[\[{]/.test(text.trim()));
+      if (okJson) {
+        return {
+          status: r.status,
+          body: text,
+          used: {
+            source: cand.source || 'unknown',
+            swidMasked: mask(cand.swid, 6),
+            s2Masked:   mask(cand.s2,  6),
+          }
+        };
       }
+      // else: try next candidate
+    } catch {
+      // continue to next candidate
     }
   }
-
-  // 4) Request cookies last
-  out.push(...readReqCreds(req));
-
-  // De-dupe by (swid,s2)
-  const seen = new Set();
-  const uniq = [];
-  for (const cand of out) {
-    const key = `${cand.swid}|${cand.s2}`;
-    if (!seen.has(key)) { seen.add(key); uniq.push(cand); }
-  }
-  return uniq;
+  return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }), used: null };
 }
 
-module.exports = { resolveEspnCredCandidates, normalizeSwid };
+module.exports = { fetchFromEspnWithCandidates };

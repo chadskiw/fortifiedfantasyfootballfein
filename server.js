@@ -2,6 +2,7 @@
 require('dotenv').config();
 console.log('[R2] using bucket =', process.env.R2_BUCKET);
 console.log('[R2] endpoint =', process.env.R2_ENDPOINT);
+const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
 
 const express      = require('express');
 const morgan       = require('morgan');
@@ -74,7 +75,7 @@ app.get('/status', (req, res) => {
 const { resolveEspnCredCandidates } = require('./routes/espn/_cred');
 const { mask } = require('./routes/espn/_mask');
 
-// SAFE: 3rd arg optional
+/* SAFE: 3rd arg optional
 async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
   const { leagueId = null, teamId = null, memberId = null } = ctx || {};
 
@@ -92,7 +93,7 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
       const r = await fetch(upstreamUrl, {
         method: 'GET',
         headers: {
-          accept: 'application/json, text/plain, */*',
+          accept: 'application/json, text/plain, *//*',
           referer: 'https://fantasy.espn.com/',
           ...(cookie ? { cookie } : {})
         }
@@ -106,11 +107,11 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
         return { status: r.status, body: text };
       }
       // otherwise try next candidate
-    } catch {/* keep iterating */}
+    } catch {/* keep iterating *//*}
   }
   return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }) };
 }
-
+*/
 
 
 // reuse your fetchFromEspnWithCandidates and the same handler body
@@ -124,29 +125,36 @@ async function konaHandler(req, res) {
     const teamId   = req.query.teamId ? String(req.query.teamId) : null;
     const memberId = req.query.memberId ? String(req.query.memberId) : null;
 
-    const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
-    for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
+   // … inside konaHandler (both aliases that hit it) …
+const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
+for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
-// in konaHandler AND in free-agents route handler, after the call:
-const { status, body, used } = await fetchFromEspnWithCandidates(/*...*/);
+// NOTE: ctx is optional now, but we pass it so _cred can look up league-specific creds
+const { status, body, used } = await fetchFromEspnWithCandidates(
+  upstream.toString(),
+  req,
+  { leagueId, teamId, memberId }
+);
 
-// add easy-to-read headers
+// handy headers so you can see what was used from the browser’s Network tab
 if (used) {
-  res.setHeader('X-ESPN-Cred-Source', used.source);
-  res.setHeader('X-ESPN-Cred-SWID',   used.swidMasked);
-  res.setHeader('X-ESPN-Cred-S2',     used.s2Masked);
+  res.set('X-ESPN-Cred-Source', used.source);
+  res.set('X-ESPN-Cred-SWID',   used.swidMasked);
+  res.set('X-ESPN-Cred-S2',     used.s2Masked);
 }
 
-// normal passthrough
-// If you want an opt-in JSON echo for quick console checks:
+res.set('Content-Type','application/json; charset=utf-8');
+res.set('Cache-Control','no-store, private');
+res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+res.set('Access-Control-Allow-Credentials','true');
+
+// optional JSON echo with creds when you add ?debug=1
 if (req.query.debug === '1' && status >= 200 && status < 300) {
   try {
     const j = JSON.parse(body || '{}');
-    j.__cred = used; // masked
+    j.__cred = used;
     return res.status(status).json(j);
-  } catch {
-    // fall through to raw send
-  }
+  } catch { /* fall through */ }
 }
 
 return res.status(status).send(body);
