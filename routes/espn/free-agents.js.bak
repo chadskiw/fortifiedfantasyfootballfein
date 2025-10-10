@@ -6,15 +6,6 @@ const fetch   = global.fetch || require('node-fetch');
 // reuse your existing resolver
 const { resolveEspnCredCandidates } = require('./espnCred');
 
-// infer the public origin to hit your worker (falls back to same origin)
-function inferPublicOrigin(req) {
-  const h = req.headers || {};
-  // honor CF-Connecting host if present, otherwise your public site
-  const host = h['x-forwarded-host'] || h.host || 'fortifiedfantasy.com';
-  const proto = (h['x-forwarded-proto'] || 'https').split(',')[0].trim();
-  return `${proto}://${host}`;
-}
-
 router.get('/free-agents', async (req, res) => {
   try {
     const {
@@ -35,8 +26,7 @@ router.get('/free-agents', async (req, res) => {
     });
 
     // build target worker URL (your CF Worker function path)
-    const origin = inferPublicOrigin(req);
-    const u = new URL('/functions/api/free-agents', origin);
+    const u = new URL('/functions/api/free-agents');
     u.searchParams.set('season', String(season));
     u.searchParams.set('leagueId', String(leagueId));
     u.searchParams.set('week', String(week));
