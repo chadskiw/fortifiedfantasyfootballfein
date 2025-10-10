@@ -863,10 +863,23 @@ function inferPublicOrigin(req) {
 // Free Agents proxy → calls your CF Pages function `/api/free-agents`
 // Uses the same cred resolution as /league and /roster in this file.
 // ─────────────────────────────────────────────────────────────────────────────
+// at top, near other consts
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
-const FUNCTION_FREE_AGENTS_PATH =
-  process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents'; // CF Pages Functions live under /api/*
+const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
 
+// builds the CF Pages Function URL you already host
+function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig }) {
+  const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
+  u.searchParams.set('season', String(season));
+  u.searchParams.set('leagueId', String(leagueId));
+  u.searchParams.set('week', String(week));
+  if (pos) u.searchParams.set('pos', String(pos));
+  u.searchParams.set('minProj', String(minProj));
+  u.searchParams.set('onlyEligible', String(onlyElig));
+  return u;
+}
+
+// GET /api/platforms/espn/free-agents
 router.get('/free-agents', async (req, res) => {
   try {
     const season   = Number(req.query.season);
@@ -876,34 +889,33 @@ router.get('/free-agents', async (req, res) => {
     const minProj  = Number(req.query.minProj || 2);
     const onlyElig = String(req.query.onlyEligible || 'true') === 'true';
 
-    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
+    if (!season || !leagueId) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
+    }
 
-    // Build the upstream FA URL you already use
     const upstream = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyElig });
 
-    // IMPORTANT: select server creds; do NOT pass browser cookies/headers through
+    // Use your server-side cred resolution (same path used by /league, /roster)
     const { status, body } = await fetchFromEspnWithCandidates(
       upstream.toString(),
-      /* req not needed for cookies; pass meta only: */
-      { headers: {} },
-      { leagueId, teamId: null, memberId: null } // helps your selector choose a cred
+      { headers: {} }, // we don't forward browser cookies
+      { leagueId, teamId: null, memberId: null }
     );
 
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Cache-Control', 'no-store, private');
+
     if (status >= 200 && status < 300) {
-      // normalize to your existing shape
       const data = JSON.parse(body || '{}');
       return res.json({ ok:true, ...data });
-    } else {
-      const detail = body || 'upstream_error';
-      return res.status(200).json({ ok:false, error: detail, upstream: upstream.toString() });
     }
+    return res.status(200).json({ ok:false, error:String(body||'upstream_error'), upstream: upstream.toString() });
   } catch (e) {
     return res.status(200).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
