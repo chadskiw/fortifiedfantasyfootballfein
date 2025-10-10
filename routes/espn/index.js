@@ -751,10 +751,61 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
     const leagueId = String(req.params.leagueId);
     if (!season || !leagueId) return bad(res, 400, 'missing_params');
 
-    // For better cred selection pass teamId/memberId if the client includes them
     const teamId   = req.query.teamId ? String(req.query.teamId) : null;
     const memberId = req.query.memberId ? String(req.query.memberId) : null;
 
+    // If the caller wants everything (or didn’t specify limit) and this is kona,
+    // do a paged crawl and merge. Toggle with ?aggregate=1 (or make it your default).
+    const wantsAggregate =
+      req.query.aggregate === '1' ||
+      (String(req.query.view || '').includes('kona_player_info') && !req.query.limit);
+
+    if (wantsAggregate) {
+      const LIMIT = Math.max(1, Math.min(100, Number(req.query.limit) || 50)); // 50 safe
+      let offset = Number(req.query.offset) || 0;
+
+      let baseObj = null;
+      const allPlayers = [];
+
+      while (true) {
+        const u = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
+        // copy original query, then enforce paging
+        for (const [k, v] of Object.entries(req.query)) u.searchParams.set(k, String(v));
+        u.searchParams.set('limit', String(LIMIT));
+        u.searchParams.set('offset', String(offset));
+
+        const { status, body } = await fetchFromEspnWithCandidates(u.toString(), req, { leagueId, teamId, memberId });
+        if (status < 200 || status >= 300) {
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+          res.setHeader('Access-Control-Allow-Credentials', 'true');
+          res.setHeader('Cache-Control', 'no-store, private');
+          return res.status(status).send(body);
+        }
+
+        const page = JSON.parse(body || '{}');
+        if (!baseObj) baseObj = page;
+
+        const chunk = Array.isArray(page?.players) ? page.players : [];
+        allPlayers.push(...chunk);
+
+        if (chunk.length < LIMIT) break; // last page
+        offset += LIMIT;
+      }
+
+      // stitch and send
+      baseObj = baseObj || {};
+      baseObj.players = allPlayers;
+      const out = JSON.stringify(baseObj);
+
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Cache-Control', 'no-store, private');
+      return res.status(200).send(out);
+    }
+
+    // Default: simple passthrough (single page)
     const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
     for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
@@ -770,6 +821,7 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
     return bad(res, 500, 'server_error');
   }
 });
+
 
 // --- helper to build the origin for your CF Pages functions ---
 // If you're serving the static site from the same host, this will work.
