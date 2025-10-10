@@ -744,6 +744,7 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
 }
 
 // GET /api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId
+// server.js (or wherever your router lives)
 router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
   try {
     const game     = String(req.params.game || 'ffl').toLowerCase();
@@ -754,14 +755,13 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
     const teamId   = req.query.teamId ? String(req.query.teamId) : null;
     const memberId = req.query.memberId ? String(req.query.memberId) : null;
 
-    // If the caller wants everything (or didn’t specify limit) and this is kona,
-    // do a paged crawl and merge. Toggle with ?aggregate=1 (or make it your default).
- const v = String(req.query.view || '');
- const wantsAggregate =
-   req.query.aggregate === '1' ||
-   ((v.includes('kona_player_info') || v.includes('kona_playercard')) && !req.query.limit);
+    // Aggregate when FE asks for kona or explicitly aggregate=1
+    const wantsAggregate =
+      req.query.aggregate === '1' ||
+      (String(req.query.view || '').includes('kona_player_info') && !req.query.limit);
+
     if (wantsAggregate) {
-      const LIMIT =  500 ; // 50 safe
+      const LIMIT = 500; // safe upper bound
       let offset = Number(req.query.offset) || 0;
 
       let baseObj = null;
@@ -769,12 +769,27 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
 
       while (true) {
         const u = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
-        // copy original query, then enforce paging
-        for (const [k, v] of Object.entries(req.query)) u.searchParams.set(k, String(v));
-        u.searchParams.set('limit', String(LIMIT));
-        u.searchParams.set('offset', String(offset));
+        // copy original query EXCEPT any limit/offset (we'll use X-Fantasy-Filter)
+        for (const [k, v] of Object.entries(req.query)) {
+          if (k === 'limit' || k === 'offset') continue;
+          u.searchParams.set(k, String(v));
+        }
 
-        const { status, body } = await fetchFromEspnWithCandidates(u.toString(), req, { leagueId, teamId, memberId });
+        // ESPN paging is via header, not query params:
+        const fantasyFilter = { players: { limit: LIMIT, offset } };
+
+        const { status, body } = await fetchFromEspnWithCandidates(
+          u.toString(),
+          req,
+          {
+            leagueId,
+            teamId,
+            memberId,
+            // <-- send paging header each loop
+            extraHeaders: { 'X-Fantasy-Filter': JSON.stringify(fantasyFilter) }
+          }
+        );
+
         if (status < 200 || status >= 300) {
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.setHeader('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
@@ -789,11 +804,12 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
         const chunk = Array.isArray(page?.players) ? page.players : [];
         allPlayers.push(...chunk);
 
-        if (chunk.length < LIMIT) break; // last page
+        // if we got fewer than LIMIT back, we’re done
+        if (chunk.length < LIMIT) break;
+
         offset += LIMIT;
       }
 
-      // stitch and send
       baseObj = baseObj || {};
       baseObj.players = allPlayers;
       const out = JSON.stringify(baseObj);
@@ -805,7 +821,7 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
       return res.status(200).send(out);
     }
 
-    // Default: simple passthrough (single page)
+    // default passthrough
     const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
     for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
@@ -821,6 +837,7 @@ router.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', 
     return bad(res, 500, 'server_error');
   }
 });
+
 
 
 // --- helper to build the origin for your CF Pages functions ---
