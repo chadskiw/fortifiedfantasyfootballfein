@@ -1,37 +1,61 @@
-// routes/espn/espnCred.js  (new/central helper)
+// routes/espn/espnCred.js
 const { resolveEspnCredCandidates } = require('./_cred');
 
-const mask = (s, keep=6) => !s ? '' : (String(s).length <= keep*2
-  ? s[0]+'…'+s.slice(-1)
-  : s.slice(0,keep)+'…'+s.slice(-keep));
+// ASCII-only, header-safe mask (no unicode)
+const maskHeaderSafe = (s, keep = 6) => {
+  if (!s) return '';
+  const raw = String(s);
+  const start = raw.slice(0, keep).replace(/[^A-Za-z0-9{}\-]/g, '*');
+  const end   = raw.slice(-keep).replace(/[^A-Za-z0-9{}\-]/g, '*');
+  // 3 dots, ASCII only
+  return `${start}...${end}`;
+};
 
 async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
-  const { leagueId = null, teamId = null, memberId = null } = ctx || {};
+  const { leagueId = req.params?.leagueId || req.query?.leagueId || null,
+          teamId   = req.query?.teamId   || null,
+          memberId = req.query?.memberId || null } = ctx || {};
+
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
-  cands.push({ swid:'', s2:'', source:'unauth' });
+  cands.push({ swid: '', s2: '', source: 'unauth' });
 
   for (const cand of cands) {
     try {
       const cookie = [
-        cand?.swid ? `SWID=${cand.swid}`   : '',
+        cand?.swid ? `SWID=${cand.swid}` : '',
         cand?.s2   ? `espn_s2=${cand.s2}` : ''
       ].filter(Boolean).join('; ');
 
       const r = await fetch(upstreamUrl, {
-        headers: { accept:'application/json, */*', referer:'https://fantasy.espn.com/', ...(cookie?{cookie}:{}) }
+        method: 'GET',
+        headers: {
+          accept: 'application/json, text/plain, */*',
+          referer: 'https://fantasy.espn.com/',
+          ...(cookie ? { cookie } : {})
+        }
       });
+
       const text = await r.text();
-      const okJson = r.ok && ((r.headers.get('content-type')||'').includes('json') || /^[\[{]/.test(text.trim()));
-      if (okJson) {
-        return { status:r.status, body:text, used:{
-          source: cand.source || 'unknown',
-          swidMasked: mask(cand.swid),
-          s2Masked:   mask(cand.s2),
-        }};
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      const looksJson = ct.includes('application/json') || /^[\[{]/.test((text||'').trim());
+
+      if (r.ok && looksJson) {
+        return {
+          status: r.status,
+          body: text,
+          used: {
+            source: cand.source || 'unknown',
+            // header-safe
+            swidMasked: maskHeaderSafe(cand.swid || ''),
+            s2Masked:   maskHeaderSafe(cand.s2   || ''),
+          }
+        };
       }
-    } catch {}
+      // else try next candidate
+    } catch { /* keep iterating */ }
   }
-  return { status:502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }), used:null };
+
+  return { status: 502, body: JSON.stringify({ ok:false, error:'all_candidates_failed' }), used: null };
 }
 
-module.exports = { fetchFromEspnWithCandidates };
+module.exports = { fetchFromEspnWithCandidates, maskHeaderSafe };

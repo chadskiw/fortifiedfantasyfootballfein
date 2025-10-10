@@ -117,27 +117,37 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
 // reuse your fetchFromEspnWithCandidates and the same handler body
 // server.js
 
+// server.js (top)
+
+// ...
+
 async function konaHandler(req, res) {
   try {
-    const game     = String(req.params.game||'ffl').toLowerCase();
+    const game     = String(req.params.game || 'ffl').toLowerCase();
     const season   = Number(req.params.season);
     const leagueId = String(req.params.leagueId);
-    const teamId   = req.query.teamId ? String(req.query.teamId) : null;
-    const memberId = req.query.memberId ? String(req.query.memberId) : null;
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
     const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/${game}/seasons/${season}/segments/0/leagues/${leagueId}`);
-    for (const [k,v] of Object.entries(req.query)) upstream.searchParams.set(k,String(v));
+    for (const [k, v] of Object.entries(req.query)) upstream.searchParams.set(k, String(v));
 
     const { status, body, used } =
-      await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId, teamId, memberId });
+      await fetchFromEspnWithCandidates(upstream.toString(), req, {
+        leagueId,
+        teamId:   req.query?.teamId   || null,
+        memberId: req.query?.memberId || null,
+      });
 
-    if (used) {
-      res.set('X-ESPN-Cred-Source', used.source);
-      res.set('X-ESPN-Cred-SWID',   used.swidMasked);
-      res.set('X-ESPN-Cred-S2',     used.s2Masked);
-      // also log once per request (masked)
-      console.log('[kona] used', used);
-    }
+    // Set ASCII-only diagnostic headers safely
+    try {
+      if (used) {
+        if (used.source)   res.set('X-ESPN-Cred-Source', String(used.source));
+        if (used.swidMasked) res.set('X-ESPN-Cred-SWID',   String(used.swidMasked));
+        if (used.s2Masked)   res.set('X-ESPN-Cred-S2',     String(used.s2Masked));
+      }
+    } catch (_) { /* never fail a response over debugging headers */ }
+
+    if (used) console.log('[kona] used', used);
 
     res.set('Content-Type','application/json; charset=utf-8');
     res.set('Cache-Control','no-store, private');
@@ -145,7 +155,9 @@ async function konaHandler(req, res) {
     res.set('Access-Control-Allow-Credentials','true');
 
     if (req.query.debug === '1' && status >= 200 && status < 300) {
-      const j = JSON.parse(body || '{}'); j.__cred = used; return res.status(status).json(j);
+      const j = JSON.parse(body || '{}');
+      j.__cred = used;
+      return res.status(status).json(j);
     }
     return res.status(status).send(body);
   } catch (e) {
@@ -153,6 +165,7 @@ async function konaHandler(req, res) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
+
 
 // use this one handler for both routes you already mounted
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
