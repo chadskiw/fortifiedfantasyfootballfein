@@ -76,13 +76,6 @@ app.use('/api/platforms/espn', konaRouter);
 // Optional: make the old Kona path hit our router too
 app.use('/api/platforms/espn/apis/v3/games', konaRouter);
 
-
-// keep the original
-app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
-
-// add the alias the FE is calling
-app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
-
 // ✅ Kona passthrough (the path your browser is hitting)
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
   try {
