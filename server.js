@@ -69,7 +69,7 @@ app.get('/status', (req, res) => {
    cookieDomain: 'fortifiedfantasy.com' // set to your apex/root domain
  }));
 // requires: const fetch = global.fetch || require('node-fetch');
-const { resolveEspnCredCandidates } = require('./espnCred'); // you already have this
+const { resolveEspnCredCandidates } = require('./routes/espn/espnCred'); // you already have this
 
 async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId, memberId }) {
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
