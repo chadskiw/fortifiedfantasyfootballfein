@@ -793,7 +793,7 @@ function inferPublicOrigin(req) {
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 // CF Functions path – pick the one you actually deployed:
 const FUNCTION_FREE_AGENTS_PATH =
-  process.env.FUNCTION_FREE_AGENTS_PATH || '/functions/api/free-agents'; // or '/api/free-agents'
+  process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents'; // or '/api/free-agents'
 
 router.get('/free-agents', async (req, res) => {
   try {
