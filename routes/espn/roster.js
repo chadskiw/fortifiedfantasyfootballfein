@@ -39,39 +39,90 @@ function resolveHeadshot(p, position, teamAbbr){
 }
 
 /** Pull projections/etc from kona_player_info for a given week. */
+/** Build { playerId -> projection-ish fields } from either kona_player_info OR mBoxscore. */
 function buildKonaIndex(data, week){
-  const idx = new Map(); // playerId -> { proj, proTeamId, teamAbbr, byeWeek, ... }
-  const players = Array.isArray(data?.players) ? data.players : [];
-  for (const p of players) {
-    const pid = Number(p?.id);
-    if (!Number.isFinite(pid)) continue;
+  const idx = new Map();
 
-    const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
-    const teamAbbr  = p.proTeamAbbreviation || TEAM_ABBR[proTeamId] || null;
+  // Helper: pick best projected value for a given week
+  const pickProjected = (stats) => {
+    if (!Array.isArray(stats)) return null;
+    // exact week projection first (statSourceId 1 = projected)
+    const exact = stats.find(s => s?.statSourceId === 1 && Number(s?.scoringPeriodId) === Number(week));
+    if (exact && Number.isFinite(+exact.appliedTotal)) return +exact.appliedTotal;
+    // otherwise any projected entry
+    const anyProj = stats.find(s => s?.statSourceId === 1 && Number.isFinite(+s.appliedTotal));
+    return anyProj ? +anyProj.appliedTotal : null;
+  };
 
-    // stats: statSourceId 1 = projected; prefer exact scoringPeriodId match, else latest projected
-    let proj = null;
-    if (Array.isArray(p.stats)) {
-      // exact week projection first
-      const exact = p.stats.find(s => s?.statSourceId === 1 && Number(s?.scoringPeriodId) === Number(week));
-      const anyProj = exact || p.stats.find(s => s?.statSourceId === 1);
-      if (anyProj && Number.isFinite(+anyProj.appliedTotal)) proj = +anyProj.appliedTotal;
+  // ---- Path 1: kona_player_info (top-level players[]) ----
+  if (Array.isArray(data?.players) && data.players.length) {
+    for (const p of data.players) {
+      const pid = Number(p?.id);
+      if (!Number.isFinite(pid)) continue;
+
+      const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
+      const teamAbbr  = p.proTeamAbbreviation || TEAM_ABBR[proTeamId] || null;
+      const proj = pickProjected(p.stats);
+
+      idx.set(pid, {
+        proj: proj ?? null,
+        rank: null,
+        opponentAbbr: null,
+        defensiveRank: null,
+        byeWeek: null,
+        fmv: null,
+        proTeamId,
+        teamAbbr
+      });
     }
-
-    // byeWeek is not always present here; leave null for now
-    idx.set(pid, {
-      proj: proj ?? null,
-      rank: null,               // placeholder (can be wired later)
-      opponentAbbr: null,       // placeholder
-      defensiveRank: null,      // placeholder
-      byeWeek: null,            // placeholder unless you wire mSchedule
-      fmv: null,                // placeholder
-      proTeamId,
-      teamAbbr
-    });
+    return idx;
   }
+
+  // ---- Path 2: mBoxscore (walk schedule -> home/away -> rosterForCurrentScoringPeriod.entries[]) ----
+  const schedule = Array.isArray(data?.schedule) ? data.schedule : [];
+  for (const game of schedule) {
+    const sides = [];
+    if (game?.home) sides.push(game.home);
+    if (game?.away) sides.push(game.away);
+    // Some payloads use "competitors"
+    if (Array.isArray(game?.competitors)) sides.push(...game.competitors);
+
+    for (const side of sides) {
+      const entries = side?.rosterForCurrentScoringPeriod?.entries
+                   || side?.roster?.entries
+                   || [];
+      for (const e of entries) {
+        const p = e.playerPoolEntry?.player || e.player || {};
+        const pid = Number(p?.id || e?.playerId);
+        if (!Number.isFinite(pid) || idx.has(pid)) continue;
+
+        const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
+        const teamAbbr  = p.proTeamAbbreviation || TEAM_ABBR[proTeamId] || null;
+
+        // Try multiple places for stats depending on shape
+        const stats = Array.isArray(p?.stats) ? p.stats
+                    : Array.isArray(e?.playerStats) ? e.playerStats
+                    : null;
+
+        const proj = pickProjected(stats);
+
+        idx.set(pid, {
+          proj: proj ?? null,
+          rank: null,
+          opponentAbbr: null,
+          defensiveRank: null,
+          byeWeek: null,
+          fmv: null,
+          proTeamId,
+          teamAbbr
+        });
+      }
+    }
+  }
+
   return idx;
 }
+
 
 /** Convert one roster entry to your existing player shape + optional extras. */
 function espnRosterEntryToPlayer(entry = {}, extras = {} ) {
