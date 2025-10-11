@@ -3,24 +3,22 @@ const express = require('express');
 const router  = express.Router();
 const { fetchFromEspnWithCandidates } = require('./espnCred');
 
-// Keep these in sync with your existing free-agents route/env
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
-const FUNCTION_ROSTER_PATH = process.env.FUNCTION_ROSTER_PATH || '/api/platforms/espn/roster';
+const FUNCTION_ROSTER_PATH      = process.env.FUNCTION_ROSTER_PATH      || '/api/platforms/espn/roster';
 
-// Builders to hit your CF functions (mirrors your existing route style)
+/* --------------------------- URL builders --------------------------- */
 function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page }) {
   const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
   u.searchParams.set('season', String(season));
   u.searchParams.set('leagueId', String(leagueId));
-  u.searchParams.set('week',   String(week));
-  u.searchParams.set('pos',    String(pos || 'ALL'));    // expects worker to accept ALL/QB/RB/WR/TE/DST/K
+  u.searchParams.set('week', String(week));
+  u.searchParams.set('pos', String(pos || 'ALL')); // ALL/QB/RB/WR/TE/DST/K
   u.searchParams.set('minProj', String(minProj ?? 0));
   u.searchParams.set('onlyEligible', String(onlyEligible ?? true));
-  if (page != null) u.searchParams.set('page', String(page)); // worker should accept this; we’ll loop pages
+  if (page != null) u.searchParams.set('page', String(page));
   return u;
 }
-
 function buildRosterUrl({ season, leagueId, week }) {
   const u = new URL(FUNCTION_ROSTER_PATH, PAGES_ORIGIN);
   u.searchParams.set('season', String(season));
@@ -28,18 +26,97 @@ function buildRosterUrl({ season, leagueId, week }) {
   if (week != null) u.searchParams.set('week', String(week));
   return u;
 }
-
-// Helper: fetch JSON via your credential-rotating fetcher
 async function fetchJsonWithCred(url, req, ctx) {
   const { status, body, used } = await fetchFromEspnWithCandidates(url.toString(), req, ctx);
   const data = (status >= 200 && status < 300) && body ? JSON.parse(body) : null;
   return { data, status, used, rawBody: body };
 }
 
-// GET /api/free-agents-with-team?season=2025&leagueId=...&week=1
-// Optional: pos=ALL|QB|RB|WR|TE|DST|K (default ALL), minProj, onlyEligible=true|false
-// Optional: teamIds=1,4 (if you want to include only these teams’ rosters in the merged set)
-// Response: { ok:true, season, leagueId, week, players:[{..., team:{...}}] }
+/* ---------------- Canonical output shape helpers ------------------- */
+// Return exactly the FA shape for any input record.
+function toCanonicalShape({
+  id, name, position, proTeamId, teamAbbr,
+  proj, rank, opponentAbbr, defensiveRank, byeWeek, fmv,
+  team
+}) {
+  return {
+    id: Number(id),
+    name: name ?? null,
+    position: position ?? null,
+    proTeamId: (proTeamId == null || isNaN(+proTeamId)) ? null : Number(proTeamId),
+    teamAbbr: teamAbbr ?? null,
+    proj: (proj == null || isNaN(+proj)) ? null : Number(proj),
+    rank: (rank == null || isNaN(+rank)) ? null : Number(rank),
+    opponentAbbr: opponentAbbr ?? null,
+    defensiveRank: (defensiveRank == null || isNaN(+defensiveRank)) ? null : Number(defensiveRank),
+    byeWeek: (byeWeek == null || isNaN(+byeWeek)) ? null : Number(byeWeek),
+    fmv: (fmv == null || isNaN(+fmv)) ? null : Number(fmv),
+    team: team && team.type ? team : { type: 'FREE_AGENT' }
+  };
+}
+
+// Normalize a Free-Agent row (worker output) to canonical keys.
+function normalizeFA(row, teamMeta) {
+  const id = Number(row.playerId ?? row.id);
+  const position = String(row.position || row.defaultPosition || row.pos || '').toUpperCase();
+  return toCanonicalShape({
+    id,
+    name: row.name,
+    position,
+    proTeamId: row.proTeamId ?? null,
+    teamAbbr: row.teamAbbr ?? row.proTeamAbbr ?? null,
+    proj: row.proj ?? row.projectedPoints ?? null,
+    rank: row.rank ?? row.projRank ?? null,
+    opponentAbbr: row.opponentAbbr ?? row.oppAbbr ?? null,
+    defensiveRank: row.defensiveRank ?? null,
+    byeWeek: row.byeWeek ?? row.bye ?? null,
+    fmv: row.fmv ?? null,
+    team: teamMeta || { type: 'FREE_AGENT' }
+  });
+}
+
+// Normalize a roster row to canonical keys (mostly lacks proj/rank; we enrich later).
+function normalizeRoster(row, teamMeta) {
+  const id = Number(row.playerId ?? row.id);
+  const position = String(row.position || row.defaultPosition || row.pos || '').toUpperCase();
+  return toCanonicalShape({
+    id,
+    name: row.name,
+    position,
+    proTeamId: row.proTeamId ?? null,
+    teamAbbr: row.teamAbbr ?? row.proTeamAbbr ?? null, // may be null in roster payload
+    proj: null,
+    rank: null,
+    opponentAbbr: null,
+    defensiveRank: null,
+    byeWeek: row.byeWeek ?? row.bye ?? null,
+    fmv: null,
+    team: teamMeta || { type: 'TEAM', teamId: null, team_name: null }
+  });
+}
+
+// Merge canonical roster row with canonical FA row (FA provides projections),
+// but keep ownership from roster (TEAM).
+function enrichRosterWithFA(rosterCan, faCan) {
+  if (!faCan) return rosterCan;
+  return toCanonicalShape({
+    id: rosterCan.id,
+    name: rosterCan.name ?? faCan.name,
+    position: rosterCan.position ?? faCan.position,
+    proTeamId: rosterCan.proTeamId ?? faCan.proTeamId,
+    teamAbbr: rosterCan.teamAbbr ?? faCan.teamAbbr,
+    proj: faCan.proj,
+    rank: faCan.rank,
+    opponentAbbr: faCan.opponentAbbr,
+    defensiveRank: faCan.defensiveRank,
+    byeWeek: rosterCan.byeWeek ?? faCan.byeWeek,
+    fmv: faCan.fmv,
+    team: rosterCan.team // preserve TEAM ownership
+  });
+}
+
+/* ----------------------------- Route ----------------------------- */
+// GET /api/platforms/espn/free-agents-with-team?season=YYYY&leagueId=...&week=#
 router.get('/free-agents-with-team', async (req, res) => {
   try {
     const season   = Number(req.query.season);
@@ -50,118 +127,97 @@ router.get('/free-agents-with-team', async (req, res) => {
     const minProj      = Number(req.query.minProj ?? 0);
     const onlyEligible = String(req.query.onlyEligible ?? 'true') === 'true';
 
-    // Optional: restrict roster merge to specific teams
     const teamIdsFilter = (req.query.teamIds || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-      .map(n => Number(n))
-      .filter(n => Number.isFinite(n));
+      .split(',').map(s => s.trim()).filter(Boolean)
+      .map(Number).filter(n => Number.isFinite(n));
 
     if (!season || !leagueId) {
       return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
-    // -------- 1) Fetch league rosters (all teams by default) --------
+    /* 1) Fetch rosters — build playerId → TEAM meta */
     const rosterUrl = buildRosterUrl({ season, leagueId, week });
-    const { data: rosterData, used: rosterUsed } =
-      await fetchJsonWithCred(rosterUrl, req, { leagueId });
+    const { data: rosterData } = await fetchJsonWithCred(rosterUrl, req, { leagueId });
 
-    if (!rosterData || !rosterData.ok) {
-      // Still proceed; we can mark only free agents if roster fetch fails
-    }
-
-    // Build playerId -> team mapping
     const playerToTeam = new Map();
     if (rosterData?.teams?.length) {
       for (const t of rosterData.teams) {
         if (teamIdsFilter.length && !teamIdsFilter.includes(Number(t.teamId))) continue;
         const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
         for (const p of (t.players || [])) {
-          const pid = Number(p.playerId || p.id);
+          const pid = Number(p.playerId ?? p.id);
           if (Number.isFinite(pid)) playerToTeam.set(pid, teamMeta);
         }
       }
     } else if (Number.isFinite(rosterData?.teamId)) {
-      // single-team payload shape
       const teamMeta = { type:'TEAM', teamId: rosterData.teamId, team_name: rosterData.team_name };
       for (const p of (rosterData.players || [])) {
-        const pid = Number(p.playerId || p.id);
+        const pid = Number(p.playerId ?? p.id);
         if (Number.isFinite(pid)) playerToTeam.set(pid, teamMeta);
       }
     }
 
-    // -------- 2) Fetch free agents, paging by pos + page --------
-    const POS_LIST = (posInput === 'ALL')
-      ? ['QB','RB','WR','TE','DST','K']
-      : [posInput];
-
+    /* 2) Page FA by position; build canonical rows + projById map */
+    const POS_LIST = (posInput === 'ALL') ? ['QB','RB','WR','TE','DST','K'] : [posInput];
     const players = [];
-    const MAX_PAGES_PER_POS = 20; // safety
+    const projById = new Map();  // id -> canonical FA row (with projections)
+    const MAX_PAGES_PER_POS = 20;
+
     for (const pos of POS_LIST) {
       for (let page = 0; page < MAX_PAGES_PER_POS; page++) {
-        const faUrl = buildFreeAgentsUrl({
-          season, leagueId, week, pos, minProj, onlyEligible, page
-        });
-        const { data: faData, used: faUsed } =
-          await fetchJsonWithCred(faUrl, req, { leagueId });
+        const faUrl = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page });
+        const { data: faData } = await fetchJsonWithCred(faUrl, req, { leagueId });
 
-        // Mirror credential headers for debugging
-        //if (faUsed) {
-          res.set('X-ESPN-Cred-Source', faUsed.source || '');
-          res.set('X-ESPN-Cred-SWID',   faUsed.swidMasked || '');
-          res.set('X-ESPN-Cred-S2',     faUsed.s2Masked || '');
-        //}
-        //if (rosterUsed) {
-         // res.set('X-ESPN-Cred-Source-Roster', rosterUsed.source || '');
-        //}
-
-        // If worker returns shape { ok:true, players:[...] }
         const batch = Array.isArray(faData?.players) ? faData.players : [];
-        if (!batch.length) break; // done with this pos
+        if (!batch.length) break;
 
-        for (const p of batch) {
-          const pid = Number(p.playerId || p.id);
+        for (const raw of batch) {
+          const pid = Number(raw.playerId ?? raw.id);
+          if (!Number.isFinite(pid)) continue;
+
           const teamMeta = playerToTeam.get(pid) || { type:'FREE_AGENT' };
-          players.push({ ...p, team: teamMeta });
+          const canFA = normalizeFA(raw, teamMeta);
+
+          projById.set(pid, canFA);       // save for enriching roster-only players
+          players.push(canFA);            // include in outgoing list
         }
 
-        // If worker returns a known page size (<= 0 means last)
-        if (batch.length < 50) break; // heuristic: stop early if we didn’t fill a typical page
+        if (batch.length < 50) break; // heuristic page size guard
       }
     }
 
-    // -------- 3) Optionally add rostered players that match filters but weren’t in FA --------
-    // If you want rostered players included regardless of projections (to mirror “ALL”),
-    // flip this to true.
+    /* 3) Add rostered players not present in FA, enriched to SAME SHAPE */
     const INCLUDE_ROSTERED = true;
     if (INCLUDE_ROSTERED && playerToTeam.size) {
-      // Build a quick set of ids we already added (from FA loop)
-      const seen = new Set(players.map(p => Number(p.playerId || p.id)));
-      // Flatten roster players, apply lightweight filter by pos if present
-      const rosterTeams = rosterData?.teams || (rosterData?.players ? [{ players: rosterData.players, teamId: rosterData.teamId, team_name: rosterData.team_name }] : []);
+      const seen = new Set(players.map(p => p.id));
+      const rosterTeams = rosterData?.teams || (rosterData?.players ? [{
+        players: rosterData.players, teamId: rosterData.teamId, team_name: rosterData.team_name
+      }] : []);
+
       for (const t of rosterTeams) {
         if (teamIdsFilter.length && !teamIdsFilter.includes(Number(t.teamId))) continue;
+
         for (const rp of (t.players || [])) {
-          const pid = Number(rp.playerId || rp.id);
+          const pid = Number(rp.playerId ?? rp.id);
           if (!Number.isFinite(pid) || seen.has(pid)) continue;
 
-          // If a pos filter was set (not ALL), skip mismatches when possible
+          // Optional position narrowing
           if (posInput !== 'ALL') {
-            const rpPos = String(rp.pos || rp.defaultPosition || rp.position || '').toUpperCase();
+            const rpPos = String(rp.position || rp.defaultPosition || rp.pos || '').toUpperCase();
             if (rpPos && rpPos !== posInput) continue;
           }
 
-          players.push({
-            ...rp,
-            team: { type:'TEAM', teamId: t.teamId, team_name: t.team_name }
-          });
+          const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
+          const rosterCan = normalizeRoster(rp, teamMeta);
+          const faCan = projById.get(pid);
+
+          players.push(enrichRosterWithFA(rosterCan, faCan));
           seen.add(pid);
         }
       }
     }
 
-    // -------- 4) CORS/Cache & respond --------
+    /* 4) Respond */
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Cache-Control', 'no-store, private');
