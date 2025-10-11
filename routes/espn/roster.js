@@ -138,7 +138,7 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
   params.append('view','mTeam');
   params.append('view','mRoster');
   params.append('view','mSettings');
-  params.append('view','kona_player_info'); // <— gives projected stats
+  params.append('view','mBoxscore'); // <— gives projected stats
 
   const url = `${base}?${params.toString()}`;
 
