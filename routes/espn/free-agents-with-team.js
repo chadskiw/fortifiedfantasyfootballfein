@@ -6,7 +6,7 @@ const { fetchFromEspnWithCandidates } = require('./espnCred');
 // Keep these in sync with your existing free-agents route/env
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
-const FUNCTION_ROSTER_PATH = process.env.FUNCTION_ROSTER_PATH || '/api/platforms/espn/roster';
+const FUNCTION_ROSTER_PATH      = process.env.FUNCTION_ROSTER_PATH      || '/api/platforms/espn/roster';
 
 // Builders to hit your CF functions (mirrors your existing route style)
 function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page }) {
@@ -14,10 +14,10 @@ function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible
   u.searchParams.set('season', String(season));
   u.searchParams.set('leagueId', String(leagueId));
   u.searchParams.set('week',   String(week));
-  u.searchParams.set('pos',    String(pos || 'ALL'));    // expects worker to accept ALL/QB/RB/WR/TE/DST/K
+  u.searchParams.set('pos',    String(pos || 'ALL')); // ALL/QB/RB/WR/TE/DST/K
   u.searchParams.set('minProj', String(minProj ?? 0));
   u.searchParams.set('onlyEligible', String(onlyEligible ?? true));
-  if (page != null) u.searchParams.set('page', String(page)); // worker should accept this; we’ll loop pages
+  if (page != null) u.searchParams.set('page', String(page));
   return u;
 }
 
@@ -36,10 +36,43 @@ async function fetchJsonWithCred(url, req, ctx) {
   return { data, status, used, rawBody: body };
 }
 
-// GET /api/free-agents-with-team?season=2025&leagueId=...&week=1
+// Normalize a FA/roster row to a common shape we return downstream
+function normalizePlayerRow(raw, teamMetaFromMap) {
+  // Allow either FA payload ('playerId') or roster payload ('playerId'|'id')
+  const id = Number(raw.playerId ?? raw.id);
+  const teamAbbr = raw.teamAbbr || raw.proTeamAbbr || raw.proTeam || null;
+
+  // Projection-ish fields (FA payload usually has these)
+  const proj = (raw.proj != null) ? Number(raw.proj) : (raw.projectedPoints != null ? Number(raw.projectedPoints) : null);
+  const fmv  = (raw.fmv  != null) ? Number(raw.fmv)  : null;
+  const rank = (raw.rank != null) ? Number(raw.rank) : (raw.projRank != null ? Number(raw.projRank) : null);
+  const byeWeek = raw.byeWeek != null ? Number(raw.byeWeek) : (raw.bye != null ? Number(raw.bye) : null);
+
+  const pos = String(raw.position || raw.defaultPosition || raw.pos || '').toUpperCase().replace('DST', 'DST');
+  const opp = raw.opponentAbbr || raw.oppAbbr || null;
+
+  // Team ownership meta is provided externally for FA rows; for roster rows we inject it
+  const team = raw.team && raw.team.type ? raw.team : (teamMetaFromMap || { type: 'FREE_AGENT' });
+
+  return {
+    id,
+    name: raw.name,
+    position: pos,
+    teamAbbr: teamAbbr,
+    opponentAbbr: opp,
+    defensiveRank: raw.defensiveRank ?? null,
+    byeWeek,
+    proj,
+    fmv,
+    rank,
+    // pass the raw too if the client wants extra columns someday
+    team
+  };
+}
+
+// GET /api/platforms/espn/free-agents-with-team?season=2025&leagueId=...&week=1
 // Optional: pos=ALL|QB|RB|WR|TE|DST|K (default ALL), minProj, onlyEligible=true|false
-// Optional: teamIds=1,4 (if you want to include only these teams’ rosters in the merged set)
-// Response: { ok:true, season, leagueId, week, players:[{..., team:{...}}] }
+// Optional: teamIds=1,4 (limit roster merge to these teamIds)
 router.get('/free-agents-with-team', async (req, res) => {
   try {
     const season   = Number(req.query.season);
@@ -67,11 +100,7 @@ router.get('/free-agents-with-team', async (req, res) => {
     const { data: rosterData, used: rosterUsed } =
       await fetchJsonWithCred(rosterUrl, req, { leagueId });
 
-    if (!rosterData || !rosterData.ok) {
-      // Still proceed; we can mark only free agents if roster fetch fails
-    }
-
-    // Build playerId -> team mapping
+    // Build playerId -> TEAM meta from roster
     const playerToTeam = new Map();
     if (rosterData?.teams?.length) {
       for (const t of rosterData.teams) {
@@ -91,13 +120,15 @@ router.get('/free-agents-with-team', async (req, res) => {
       }
     }
 
-    // -------- 2) Fetch free agents, paging by pos + page --------
+    // -------- 2) Pull FA pages PER POSITION and build a projection map --------
     const POS_LIST = (posInput === 'ALL')
       ? ['QB','RB','WR','TE','DST','K']
       : [posInput];
 
     const players = [];
-    const MAX_PAGES_PER_POS = 20; // safety
+    const projById = new Map();  // id -> normalized FA row (with proj/rank/etc.)
+    const MAX_PAGES_PER_POS = 20;
+
     for (const pos of POS_LIST) {
       for (let page = 0; page < MAX_PAGES_PER_POS; page++) {
         const faUrl = buildFreeAgentsUrl({
@@ -106,7 +137,7 @@ router.get('/free-agents-with-team', async (req, res) => {
         const { data: faData, used: faUsed } =
           await fetchJsonWithCred(faUrl, req, { leagueId });
 
-        // Mirror credential headers for debugging
+        // mirror credential headers for debugging
         if (faUsed) {
           res.set('X-ESPN-Cred-Source', faUsed.source || '');
           res.set('X-ESPN-Cred-SWID',   faUsed.swidMasked || '');
@@ -116,52 +147,64 @@ router.get('/free-agents-with-team', async (req, res) => {
           res.set('X-ESPN-Cred-Source-Roster', rosterUsed.source || '');
         }
 
-        // If worker returns shape { ok:true, players:[...] }
         const batch = Array.isArray(faData?.players) ? faData.players : [];
-        if (!batch.length) break; // done with this pos
+        if (!batch.length) break;
 
         for (const p of batch) {
           const pid = Number(p.playerId || p.id);
+          if (!Number.isFinite(pid)) continue;
+
+          // Keep a normalized FA version with projections in a map for enrichment
+          const normFA = normalizePlayerRow(p, /* teamMetaFromMap */ null);
+          projById.set(pid, normFA);
+
+          // If this player is actually rostered in THIS league, mark it so;
+          // otherwise keep as FA.
           const teamMeta = playerToTeam.get(pid) || { type:'FREE_AGENT' };
-          players.push({ ...p, team: teamMeta });
+          const merged = { ...normFA, team: teamMeta };
+          players.push(merged);
         }
 
-        // If worker returns a known page size (<= 0 means last)
-        if (batch.length < 50) break; // heuristic: stop early if we didn’t fill a typical page
+        // heuristic: free-agents worker tends to deliver 50/page; break if shorter
+        if (batch.length < 50) break;
       }
     }
 
-    // -------- 3) Optionally add rostered players that match filters but weren’t in FA --------
-    // If you want rostered players included regardless of projections (to mirror “ALL”),
-    // flip this to true.
+    // -------- 3) Add rostered players not present in FA pages, ENRICH with projections --------
     const INCLUDE_ROSTERED = true;
     if (INCLUDE_ROSTERED && playerToTeam.size) {
-      // Build a quick set of ids we already added (from FA loop)
-      const seen = new Set(players.map(p => Number(p.playerId || p.id)));
-      // Flatten roster players, apply lightweight filter by pos if present
-      const rosterTeams = rosterData?.teams || (rosterData?.players ? [{ players: rosterData.players, teamId: rosterData.teamId, team_name: rosterData.team_name }] : []);
+      const seen = new Set(players.map(p => Number(p.id)));
+      const rosterTeams = rosterData?.teams || (rosterData?.players ? [{
+        players: rosterData.players, teamId: rosterData.teamId, team_name: rosterData.team_name
+      }] : []);
+
       for (const t of rosterTeams) {
         if (teamIdsFilter.length && !teamIdsFilter.includes(Number(t.teamId))) continue;
+
         for (const rp of (t.players || [])) {
           const pid = Number(rp.playerId || rp.id);
           if (!Number.isFinite(pid) || seen.has(pid)) continue;
 
-          // If a pos filter was set (not ALL), skip mismatches when possible
-          if (posInput !== 'ALL') {
-            const rpPos = String(rp.pos || rp.defaultPosition || rp.position || '').toUpperCase();
-            if (rpPos && rpPos !== posInput) continue;
-          }
+          // Normalize roster row (no projections yet)
+          const base = normalizePlayerRow(rp, { type:'TEAM', teamId: t.teamId, team_name: t.team_name });
 
-          players.push({
-            ...rp,
-            team: { type:'TEAM', teamId: t.teamId, team_name: t.team_name }
-          });
+          // Enrich from FA projection map if available
+          const fa = projById.get(pid);
+          const enriched = fa
+            ? {
+                ...fa,
+                // ensure ownership points to TEAM (not FA)
+                team: { type:'TEAM', teamId: t.teamId, team_name: t.team_name }
+              }
+            : base; // fallback: leave proj/rank null if we don’t have them
+
+          players.push(enriched);
           seen.add(pid);
         }
       }
     }
 
-    // -------- 4) CORS/Cache & respond --------
+    // -------- 4) Respond --------
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Cache-Control', 'no-store, private');
