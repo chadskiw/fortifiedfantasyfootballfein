@@ -138,24 +138,63 @@ router.get('/free-agents-with-team', async (req, res) => {
     /* 1) Fetch rosters — build playerId → TEAM meta */
     const rosterUrl = buildRosterUrl({ season, leagueId, week });
     const { data: rosterData } = await fetchJsonWithCred(rosterUrl, req, { leagueId });
+// after: const { data: rosterData } = await fetchJsonWithCred(rosterUrl, req, { leagueId });
+const rosterCanonById = new Map(); // id -> canonical row with proj/rank/etc.
 
     const playerToTeam = new Map();
-    if (rosterData?.teams?.length) {
-      for (const t of rosterData.teams) {
-        if (teamIdsFilter.length && !teamIdsFilter.includes(Number(t.teamId))) continue;
-        const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
-        for (const p of (t.players || [])) {
-          const pid = Number(p.playerId ?? p.id);
-          if (Number.isFinite(pid)) playerToTeam.set(pid, teamMeta);
-        }
-      }
-    } else if (Number.isFinite(rosterData?.teamId)) {
-      const teamMeta = { type:'TEAM', teamId: rosterData.teamId, team_name: rosterData.team_name };
-      for (const p of (rosterData.players || [])) {
-        const pid = Number(p.playerId ?? p.id);
-        if (Number.isFinite(pid)) playerToTeam.set(pid, teamMeta);
-      }
+   if (rosterData?.teams?.length) {
+  for (const t of rosterData.teams) {
+    if (teamIdsFilter.length && !teamIdsFilter.includes(Number(t.teamId))) continue;
+    const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
+    for (const p of (t.players || [])) {
+      const pid = Number(p.playerId ?? p.id);
+      if (!Number.isFinite(pid)) continue;
+
+      // existing ownership map
+      playerToTeam.set(pid, teamMeta);
+
+      // NEW: capture projections coming from /platforms/espn/roster
+      rosterCanonById.set(pid, toCanonicalShape({
+        id: pid,
+        name: p.name,
+        position: (p.position || '').toUpperCase(),
+        proTeamId: p.proTeamId ?? null,
+        teamAbbr:  p.teamAbbr || p.team || null,
+        proj:      p.proj ?? null,
+        rank:      p.rank ?? null,
+        opponentAbbr: p.opponentAbbr ?? null,
+        defensiveRank: p.defensiveRank ?? null,
+        byeWeek:   p.byeWeek ?? null,
+        fmv:       p.fmv ?? null,
+        team: teamMeta
+      }));
     }
+  }
+} else if (Number.isFinite(rosterData?.teamId)) {
+  const teamMeta = { type:'TEAM', teamId: rosterData.teamId, team_name: rosterData.team_name };
+  for (const p of (rosterData.players || [])) {
+    const pid = Number(p.playerId ?? p.id);
+    if (!Number.isFinite(pid)) continue;
+
+    playerToTeam.set(pid, teamMeta);
+
+    rosterCanonById.set(pid, toCanonicalShape({
+      id: pid,
+      name: p.name,
+      position: (p.position || '').toUpperCase(),
+      proTeamId: p.proTeamId ?? null,
+      teamAbbr:  p.teamAbbr || p.team || null,
+      proj:      p.proj ?? null,
+      rank:      p.rank ?? null,
+      opponentAbbr: p.opponentAbbr ?? null,
+      defensiveRank: p.defensiveRank ?? null,
+      byeWeek:   p.byeWeek ?? null,
+      fmv:       p.fmv ?? null,
+      team: teamMeta
+    }));
+  }
+}
+
 
     /* 2) Page FA by position; build canonical rows + projById map */
     const POS_LIST = (posInput === 'ALL') ? ['QB','RB','WR','TE','DST','K'] : [posInput];
@@ -209,7 +248,7 @@ router.get('/free-agents-with-team', async (req, res) => {
 
           const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
           const rosterCan = normalizeRoster(rp, teamMeta);
-          const faCan = projById.get(pid);
+const faCan = projById.get(pid) || rosterCanonById.get(pid);
 
           players.push(enrichRosterWithFA(rosterCan, faCan));
           seen.add(pid);
