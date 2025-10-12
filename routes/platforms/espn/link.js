@@ -1,36 +1,89 @@
 // routes/platforms/espn/link.js
 const express = require('express');
+const crypto  = require('crypto');
 const router  = express.Router();
+
+const sha256 = s => crypto.createHash('sha256').update(String(s)).digest('hex');
 
 function decodePlus(s){ try{ return decodeURIComponent(String(s||'').replace(/\+/g,'%20')); } catch { return String(s||''); } }
 function normalizeSwid(raw){
-  let v = decodePlus(raw||'').trim(); if (!v) return '';
+  let v = decodePlus(raw||'').trim();
+  if (!v) return '';
   v = v.replace(/^%7B/i,'{').replace(/%7D$/i,'}');
   if (!v.startsWith('{')) v = `{${v.replace(/^\{?/, '').replace(/\}?$/, '')}}`;
   return v.toUpperCase();
 }
+function absoluteOrigin(req) {
+  if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN;
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const host  = req.get('x-forwarded-host')  || req.get('host');
+  return host ? `${proto}://${host}` : 'https://fortifiedfantasy.com';
+}
+function memberFromCookies(req){
+  const c = req.cookies || {};
+  return (c.ff_member_id || c.ff_member || '').trim() || null;
+}
 
-// routes/espn/link.js (minimal)
 router.get('/link', async (req, res) => {
-  const { swid = '', s2 = '', season } = req.query;
-  // set cookies for browser use (front-end fetches)
-  res.cookie('espn_swid', swid, { httpOnly:false, sameSite:'Lax', secure:true, maxAge: 31536000000 });
-  res.cookie('espn_s2',   s2,   { httpOnly:false, sameSite:'Lax', secure:true, maxAge: 31536000000 });
+  try {
+    // --- read + normalize ---
+    const rawSwid = req.query.swid || req.query.SWID;
+    const swid = normalizeSwid(rawSwid);
+    const s2   = decodePlus(req.query.espn_s2 || req.query.ESPN_S2 || req.query.s2 || '');
 
-  // also trigger server-side ingest *with* creds
-  await fetch(`${absoluteOrigin(req)}/api/ingest/espn/fan/season?season=${season||new Date().getUTCFullYear()}`, {
-    method: 'POST',
-    headers: {
-      'x-espn-swid': swid,
-      'x-espn-s2'  : s2,
-      'accept'     : 'application/json'
+    // season target + redirect
+    const yr     = Number(req.query.season) || new Date().getUTCFullYear();
+    const to     = String(req.query.to || `${absoluteOrigin(req)}/fein/?season=${yr}`);
+    const origin = absoluteOrigin(req);
+
+    // --- set browser cookies (both canonical + compat aliases) ---
+    const oneYear = 31536000000;
+    const cookieOpts = { httpOnly:true, sameSite:'Lax', secure:true, maxAge:oneYear, domain:'fortifiedfantasy.com', path:'/' };
+    if (swid) res.cookie('SWID',    swid, cookieOpts);
+    if (s2)   res.cookie('espn_s2', s2,   cookieOpts);
+
+    // FE-readable convenience (optional)
+    res.cookie('ff_logged_in', '1', { httpOnly:false, sameSite:'Lax', secure:true, maxAge:oneYear });
+
+    // --- persist creds so server-side requests have them later ---
+    // only if we know who the member is
+    const pool = req.app.get('pg');
+    const member_id = memberFromCookies(req);
+    if (pool && member_id && swid) {
+      const swid_hash = sha256(swid);
+      const s2_hash   = s2 ? sha256(s2) : null;
+
+      await pool.query(`
+        INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
+        VALUES ($1,$2,$3,$4,$5, now(), now(), 'link')
+        ON CONFLICT (swid_hash) DO UPDATE
+           SET espn_s2  = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
+               s2_hash  = COALESCE(EXCLUDED.s2_hash, ff_espn_cred.s2_hash),
+               member_id= COALESCE(ff_espn_cred.member_id, EXCLUDED.member_id),
+               last_seen= now()
+      `, [swid, s2 || null, swid_hash, s2_hash, member_id]);
+
+      // also backfill quick_snap if empty
+      await pool.query(`
+        UPDATE ff_quickhitter
+           SET quick_snap = COALESCE(quick_snap, $2),
+               updated_at = now()
+         WHERE member_id = $1
+      `, [member_id, swid]);
     }
-  }).catch(()=>{ /* non-fatal */ });
 
-  const to = req.query.to || `${absoluteOrigin(req)}/fein/?season=${season||new Date().getUTCFullYear()}`;
-  res.redirect(to);
+    // --- kick off + AWAIT season ingest (so data exists on arrival) ---
+    // (You can pass a filter like &games=ffl to ingest only football; see next section)
+    const headers = { 'x-espn-swid': swid, 'x-espn-s2': s2, 'accept': 'application/json' };
+    await fetch(`${origin}/api/ingest/espn/fan/season?season=${yr}`, { method:'POST', headers });
+
+    // --- go to FEIN ---
+    return res.redirect(302, to);
+  } catch (e) {
+    console.error('[espn/link]', e);
+    const yr = new Date().getUTCFullYear();
+    return res.redirect(302, `/fein/?season=${yr}`);
+  }
 });
-
-
 
 module.exports = router;
