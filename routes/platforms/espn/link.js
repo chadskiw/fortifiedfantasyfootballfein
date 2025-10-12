@@ -10,29 +10,27 @@ function normalizeSwid(raw){
   return v.toUpperCase();
 }
 
-router.get('/api/espn/link', async (req, res) => {
-  const { swid, s2, to, season } = req.query;
-  if (!swid || !s2) return res.status(400).send('swid and s2 required');
+// routes/espn/link.js (minimal)
+router.get('/link', async (req, res) => {
+  const { swid = '', s2 = '', season } = req.query;
+  // set cookies for browser use (front-end fetches)
+  res.cookie('espn_swid', swid, { httpOnly:false, sameSite:'Lax', secure:true, maxAge: 31536000000 });
+  res.cookie('espn_s2',   s2,   { httpOnly:false, sameSite:'Lax', secure:true, maxAge: 31536000000 });
 
-  // set short/medium TTL cookies
-  res.cookie('espn_swid', swid, { httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7*24*3600e3 });
-  res.cookie('espn_s2',   s2,   { httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7*24*3600e3 });
-
-  // fire-and-forget ingest with headers (so it works even before FE requests arrive)
-  const origin = absoluteOrigin(req);
-  const body = JSON.stringify({ season: Number(season) || new Date().getUTCFullYear() });
-  fetch(`${origin}/api/ingest/espn/fan/season`, {
+  // also trigger server-side ingest *with* creds
+  await fetch(`${absoluteOrigin(req)}/api/ingest/espn/fan/season?season=${season||new Date().getUTCFullYear()}`, {
     method: 'POST',
     headers: {
-      'content-type': 'application/json',
       'x-espn-swid': swid,
-      'x-espn-s2': s2
-    },
-    body
-  }).catch(()=>{}); // don’t block redirect
+      'x-espn-s2'  : s2,
+      'accept'     : 'application/json'
+    }
+  }).catch(()=>{ /* non-fatal */ });
 
-  res.redirect(to || `${origin}/fein/?season=${encodeURIComponent(season||'')}`);
+  const to = req.query.to || `${absoluteOrigin(req)}/fein/?season=${season||new Date().getUTCFullYear()}`;
+  res.redirect(to);
 });
+
 
 
 module.exports = router;
