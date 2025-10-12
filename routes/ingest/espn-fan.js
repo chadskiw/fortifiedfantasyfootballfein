@@ -104,23 +104,39 @@ router.post('/season', async (req, res) => {
         const losses= Number(t.losses ?? t.record?.losses ?? 0) || 0;
         const ties  = Number(t.ties   ?? t.record?.ties   ?? 0) || 0;
 
-        // ff_team UPSERT
-        await pool.query(`
-          INSERT INTO ff_team (league_id, team_id, team_name, updated_at)
-          VALUES ($1,$2,$3,now())
-          ON CONFLICT (league_id, team_id)
-          DO UPDATE SET team_name=EXCLUDED.team_name, updated_at=now()
-        `, [leagueId, teamId, teamName]);
+// ff_team UPSERT (matches your schema)
+const logo   = t.logo || t.teamLogoUrl || null;
+const record = `${wins}-${losses}${ties ? `-${ties}` : ''}`;
+const game   = 'ffl'; // you said FFL is the template
+
+await pool.query(`
+  INSERT INTO ff_team (platform, season, league_id, team_id, name, logo, record, owner_guid, game, updated_at)
+  VALUES ('espn', $1, $2, $3, $4, $5, $6, $7, $8, now())
+  ON CONFLICT (platform, season, league_id, team_id)
+  DO UPDATE SET name       = EXCLUDED.name,
+                logo       = EXCLUDED.logo,
+                record     = EXCLUDED.record,
+                owner_guid = COALESCE(EXCLUDED.owner_guid, ff_team.owner_guid),
+                game       = EXCLUDED.game,
+                updated_at = now()
+`, [season, leagueId, teamId, teamName, logo, record, ownerId || null, game]);
+
 
         // ff_team_owner UPSERT
-        await pool.query(`
-          INSERT INTO ff_team_owner (league_id, team_id, member_id, owner_handle, updated_at)
-          VALUES ($1,$2,$3,$4,now())
-          ON CONFLICT (league_id, team_id)
-          DO UPDATE SET member_id   = COALESCE(EXCLUDED.member_id, ff_team_owner.member_id),
-                        owner_handle= COALESCE(EXCLUDED.owner_handle, ff_team_owner.owner_handle),
-                        updated_at  = now()
-        `, [leagueId, teamId, ownerId, ownerHdl]);
+// ff_team_owner (best effort; don't block ingest if schema differs)
+try {
+  await pool.query(`
+    INSERT INTO ff_team_owner (league_id, team_id, member_id, owner_handle, updated_at)
+    VALUES ($1,$2,$3,$4,now())
+    ON CONFLICT (league_id, team_id)
+    DO UPDATE SET member_id   = COALESCE(EXCLUDED.member_id, ff_team_owner.member_id),
+                  owner_handle= COALESCE(EXCLUDED.owner_handle, ff_team_owner.owner_handle),
+                  updated_at  = now()
+  `, [leagueId, teamId, ownerId, ownerHdl]);
+} catch (e) {
+  console.warn('[ff_team_owner] non-fatal:', e.message || e);
+}
+
 
         // ff_team_weekly_points (week=1 as season totals) UPSERT
         await pool.query(`
