@@ -48,13 +48,6 @@ router.post('/season', async (req, res) => {
 
     const leagueIds = getLeagueIdsFromPoll(poll);
 
-    // Optional: quick telemetry
-    console.log('[fan/season]', {
-      season,
-      shapes: { hasData:Array.isArray(poll?.data), hasLeagues:Array.isArray(poll?.leagues) },
-      leagueIds
-    });
-
     if (!leagueIds.length) {
       return res.json({ ok:true, season, leaguesCount: 0 });
     }
@@ -63,12 +56,28 @@ router.post('/season', async (req, res) => {
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
 
-      // raw snapshot
-      await pool.query(`
-        INSERT INTO ff_espn_fan (season, league_id, kind, payload)
-        VALUES ($1,$2,'league',$3::jsonb)
-        ON CONFLICT DO NOTHING
-      `, [season, leagueId, league]);
+// when journaling the POLL
+await pool.query(
+  `INSERT INTO ff_espn_fan (swid, espn_s2, raw, updated_at)
+   VALUES ($1,$2,$3::jsonb, now())`,
+  [
+    req.headers['x-espn-swid'] || '',
+    req.headers['x-espn-s2'] || '',
+    JSON.stringify({ kind: 'poll', season, payload: poll }) // keep season inside raw
+  ]
+);
+
+// when journaling each LEAGUE snapshot
+await pool.query(
+  `INSERT INTO ff_espn_fan (swid, espn_s2, raw, updated_at)
+   VALUES ($1,$2,$3::jsonb, now())`,
+  [
+    req.headers['x-espn-swid'] || '',
+    req.headers['x-espn-s2'] || '',
+    JSON.stringify({ kind: 'league', season, leagueId, payload: league })
+  ]
+);
+
 
       // 3) upsert league
       await pool.query(`
