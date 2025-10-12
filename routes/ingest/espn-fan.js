@@ -79,7 +79,7 @@ router.post('/season', async (req, res) => {
       return res.json({ ok:true, season, leaguesCount: 0 });
     }
 
-    // 2) hydrate each league and UPSERT
+    // 2) hydrate each league and UPSERT team-related tables
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
 
@@ -89,20 +89,7 @@ router.post('/season', async (req, res) => {
         payload: { kind:'league', season, leagueId, payload: league }
       });
 
-      const leagueName = league?.name || league?.leagueName || league?.groupName || '';
-      const leagueSize = Number(
-        league?.size ?? league?.leagueSize ?? league?.groupSize ?? (Array.isArray(league?.teams) ? league.teams.length : NaN)
-      ) || null;
-
-      // ff_league UPSERT
-      await pool.query(`
-        INSERT INTO ff_league (season, league_id, name, size, updated_at)
-        VALUES ($1,$2,$3,$4, now())
-        ON CONFLICT (season, league_id)
-        DO UPDATE SET name=EXCLUDED.name, size=EXCLUDED.size, updated_at=now()
-      `, [season, leagueId, leagueName, leagueSize]);
-
-      // teams
+      // -------- teams / owners / season totals (week=1) --------
       const teams = Array.isArray(league?.teams) ? league.teams : [];
       for (const t of teams) {
         const teamId   = Number(t.teamId ?? t.id);
