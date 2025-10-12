@@ -140,36 +140,41 @@ async function journalFan(pool, { swid, s2, payload }) {
 }
 /* ---------------------- end helpers ---------------------- */
 // put near helpers
+// replace your current getLeagueIdsForUser with this
 async function getLeagueIdsForUser(pool, swid, season, poll) {
   const fromPoll = new Set(getLeagueIdsFromPoll(poll));
 
-  // from ff_team_owner, owner GUIDs array contains SWID
-  const rows1 = await pool.query(`
-    SELECT DISTINCT league_id
-      FROM ff_team_owner
-     WHERE platform='espn'
-       AND season=$1
-       AND espn_owner_guids @> ARRAY[$2]::text[]
-  `, [season, String(swid || '')]);
+  const swidStr = String(swid || '');
 
-  // optional: from existing ff_team rows where this swid is the owner
-  const rows2 = await pool.query(`
-    SELECT DISTINCT t.league_id
+  // from ff_team_owner (league_id might be int/bigint; normalize to text)
+  const q1 = await pool.query(`
+    SELECT DISTINCT league_id::text AS league_id
+      FROM ff_team_owner
+     WHERE platform = 'espn'
+       AND season   = $1
+       AND espn_owner_guids @> ARRAY[$2]::text[]
+  `, [season, swidStr]);
+
+  // optional: from existing ff_team joined to owner mapping (normalize join keys to text)
+  const q2 = await pool.query(`
+    SELECT DISTINCT t.league_id::text AS league_id
       FROM ff_team t
       JOIN ff_team_owner o
-        ON o.platform=t.platform
-       AND o.season=t.season
-       AND o.league_id=t.league_id
-       AND o.team_id=t.team_id
-     WHERE t.platform='espn'
-       AND t.season=$1
+        ON  o.platform = t.platform
+        AND o.season   = t.season
+        AND o.league_id::text = t.league_id::text
+        AND o.team_id::text   = t.team_id::text
+     WHERE t.platform = 'espn'
+       AND t.season   = $1
        AND o.espn_owner_guids @> ARRAY[$2]::text[]
-  `, [season, String(swid || '')]);
+  `, [season, swidStr]);
 
-  for (const r of rows1.rows) fromPoll.add(String(r.league_id));
-  for (const r of rows2.rows) fromPoll.add(String(r.league_id));
+  for (const r of q1.rows) fromPoll.add(r.league_id);
+  for (const r of q2.rows) fromPoll.add(r.league_id);
+
   return [...fromPoll];
 }
+
 
 /* ======================= /season ======================== */
 router.post('/season', async (req, res) => {
