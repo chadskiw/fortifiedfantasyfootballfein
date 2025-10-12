@@ -109,7 +109,7 @@ async function resolveCurrentWeek({ season, leagueId, req, debug }) {
     let week = readWeekOrNull(req);
     if (!Number.isFinite(week)) {
       week = await resolveCurrentWeek({ season, leagueId, req });
-    }
++    }
 
      const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
 
