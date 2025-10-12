@@ -139,6 +139,37 @@ async function journalFan(pool, { swid, s2, payload }) {
   }
 }
 /* ---------------------- end helpers ---------------------- */
+// put near helpers
+async function getLeagueIdsForUser(pool, swid, season, poll) {
+  const fromPoll = new Set(getLeagueIdsFromPoll(poll));
+
+  // from ff_team_owner, owner GUIDs array contains SWID
+  const rows1 = await pool.query(`
+    SELECT DISTINCT league_id
+      FROM ff_team_owner
+     WHERE platform='espn'
+       AND season=$1
+       AND espn_owner_guids @> ARRAY[$2]::text[]
+  `, [season, String(swid || '')]);
+
+  // optional: from existing ff_team rows where this swid is the owner
+  const rows2 = await pool.query(`
+    SELECT DISTINCT t.league_id
+      FROM ff_team t
+      JOIN ff_team_owner o
+        ON o.platform=t.platform
+       AND o.season=t.season
+       AND o.league_id=t.league_id
+       AND o.team_id=t.team_id
+     WHERE t.platform='espn'
+       AND t.season=$1
+       AND o.espn_owner_guids @> ARRAY[$2]::text[]
+  `, [season, String(swid || '')]);
+
+  for (const r of rows1.rows) fromPoll.add(String(r.league_id));
+  for (const r of rows2.rows) fromPoll.add(String(r.league_id));
+  return [...fromPoll];
+}
 
 /* ======================= /season ======================== */
 router.post('/season', async (req, res) => {
@@ -155,7 +186,8 @@ router.post('/season', async (req, res) => {
       payload: { kind:'poll', season, payload: poll }
     });
 
-    const leagueIds = getLeagueIdsFromPoll(poll);
+const swid = (req.headers['x-espn-swid'] || '').trim();
+const leagueIds = await getLeagueIdsForUser(pool, swid, season, poll);
     if (!leagueIds.length) {
       return res.json({ ok:true, season, leaguesCount: 0 });
     }
@@ -200,19 +232,21 @@ router.post('/season', async (req, res) => {
         const ownerGuid  = t.ownerGuid || t.memberGuid || t.memberId || null;
 
         // ---- ff_team (UPSERT) ----
-        await pool.query(`
-          INSERT INTO ff_team
-            (platform, season, league_id, team_id, name, logo, record, owner_guid, game, updated_at)
-          VALUES
-            ('espn', $1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
-          ON CONFLICT (platform, season, league_id, team_id)
-          DO UPDATE SET name       = EXCLUDED.name,
-                        logo       = EXCLUDED.logo,
-                        record     = EXCLUDED.record,
-                        owner_guid = COALESCE(EXCLUDED.owner_guid, ff_team.owner_guid),
-                        game       = EXCLUDED.game,
-                        updated_at = now()
-        `, [season, leagueId, teamId, teamName, logo, JSON.stringify(recordJson), ownerGuid, game]);
+await pool.query(`
+  INSERT INTO ff_team
+    (platform, season, league_id, team_id, name, logo, record, owner_guid, game, updated_at)
+  VALUES
+    ('espn', $1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
+  ON CONFLICT (platform, season, league_id, team_id)
+  DO UPDATE SET
+    name       = EXCLUDED.name,
+    logo       = COALESCE(EXCLUDED.logo, ff_team.logo), -- 👈 preserve when null
+    record     = EXCLUDED.record,
+    owner_guid = COALESCE(EXCLUDED.owner_guid, ff_team.owner_guid),
+    game       = EXCLUDED.game,
+    updated_at = now()
+`, [season, leagueId, teamId, teamName, logo, JSON.stringify(recordJson), ownerGuid, game]);
+
 
         // ---- ff_team_owner (update-then-insert; schema has no owner_handle) ----
         try {
