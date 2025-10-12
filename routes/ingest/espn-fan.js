@@ -182,8 +182,14 @@ router.post('/season', async (req, res) => {
         const teamId   = Number(t.teamId ?? t.id);
         if (!Number.isFinite(teamId)) continue;
 
-        const teamName = t.teamName || t.name || '';
-        const pf       = Number(t.pointsFor ?? t.points ?? 0) || 0;
+const teamName =
+  t.teamName ||
+  t.name ||
+  [t.location, t.nickname].filter(Boolean).join(' ') ||
+  t.team?.nickname ||
+  t.abbrev ||
+  `Team ${teamId}`;
+        let pf       = Number(t.pointsFor ?? t.points ?? 0) || 0;
 
         const logo       = t.logo || t.teamLogoUrl || null;
         const recordJson = buildTeamRecord(t);
@@ -236,6 +242,16 @@ router.post('/season', async (req, res) => {
         const scoring  = mapScoring(league);
         const starters = await tryGetSeasonStarters(req, season, leagueId, teamId);
         const startersJson = starters ? JSON.stringify(starters) : null;
+// before: const pf = Number(t.pointsFor ?? t.points ?? 0) || 0;
+pf = Number(t.pointsFor ?? t.points ?? 0);
+if (!Number.isFinite(pf) || pf <= 0) {
+  // use starters if present
+  if (Array.isArray(starters) && starters.length) {
+    pf = starters.reduce((s, x) => s + (Number(x.pts) || 0), 0);
+  } else {
+    pf = 0;
+  }
+}
 
         // Update-if-exists, else insert (key includes scoring)
         const updWk = await pool.query(`
