@@ -280,27 +280,20 @@ router.post('/season', async (req, res) => {
         const weekPts   = Number(ptRows?.[0]?.week_pts ?? pf); // fallback to pf
 
         // Try update first
-        const updCache = await pool.query(`
-          UPDATE ff_team_points_cache
-             SET team_name  = $4,
-                 scoring    = $5,
-                 week       = $6,
-                 week_pts   = $7,
-                 season_pts = $8,
-                 updated_at = now()
-           WHERE season    = $1
-             AND league_id = $2
-             AND team_id   = $3
-        `, [season, leagueId, teamId, teamName, scoring, targetWeek, weekPts, seasonPts]);
+// ---- ff_team_points_cache (UPSERT on full PK: season, league_id, team_id, scoring, week) ----
+await pool.query(`
+  INSERT INTO ff_team_points_cache
+    (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
+  VALUES
+    ($1,     $2,       $3,      $4,        $5,      $6,   $7,       $8,         now())
+  ON CONFLICT (season, league_id, team_id, scoring, week)
+  DO UPDATE SET
+    team_name  = EXCLUDED.team_name,
+    week_pts   = EXCLUDED.week_pts,
+    season_pts = EXCLUDED.season_pts,
+    updated_at = now()
+`, [season, leagueId, teamId, teamName, scoring, targetWeek, weekPts, seasonPts]);
 
-        if (updCache.rowCount === 0) {
-          await pool.query(`
-            INSERT INTO ff_team_points_cache
-              (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
-            VALUES
-              ($1,     $2,       $3,      $4,        $5,      $6,   $7,       $8,         now())
-          `, [season, leagueId, teamId, teamName, scoring, targetWeek, weekPts, seasonPts]);
-        }
       } // teams
     } // leagues
 
