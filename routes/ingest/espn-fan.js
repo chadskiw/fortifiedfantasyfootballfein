@@ -175,27 +175,45 @@ await pool.query(`
 
         // ff_team_owner UPSERT
 // ff_team_owner (best effort; don't block ingest if schema differs)
+
+// --- ff_team_owner (schema: platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids[]) ---
 try {
-  await pool.query(`
-    INSERT INTO ff_team_owner (league_id, team_id, member_id, owner_handle, updated_at)
-    VALUES ($1,$2,$3,$4,now())
-    ON CONFLICT (league_id, team_id)
-    DO UPDATE SET member_id   = COALESCE(EXCLUDED.member_id, ff_team_owner.member_id),
-                  owner_handle= COALESCE(EXCLUDED.owner_handle, ff_team_owner.owner_handle),
-                  updated_at  = now()
-  `, [leagueId, teamId, ownerId, ownerHdl]);
+  const ownerGuid = ownerId ? String(ownerId) : null;
+
+  // Only write when we actually know the ESPN owner GUID
+  if (ownerGuid) {
+    await pool.query(`
+      INSERT INTO ff_team_owner
+        (platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids, updated_at)
+      VALUES
+        ('espn', $1, $2, $3, $4, 'real', ARRAY[$5]::text[], now())
+      ON CONFLICT (platform, season, league_id, team_id)
+      DO UPDATE SET
+        member_id        = COALESCE(EXCLUDED.member_id, ff_team_owner.member_id),
+        owner_kind       = 'real',
+        espn_owner_guids = EXCLUDED.espn_owner_guids,
+        updated_at       = now()
+    `, [season, leagueId, teamId, ownerGuid, ownerGuid]);
+  }
 } catch (e) {
   console.warn('[ff_team_owner] non-fatal:', e.message || e);
 }
 
 
+
         // ff_team_weekly_points (week=1 as season totals) UPSERT
-        await pool.query(`
-          INSERT INTO ff_team_weekly_points (season, league_id, team_id, week, points, wins, losses, ties, updated_at)
-          VALUES ($1,$2,$3, 1, $4,$5,$6,$7, now())
-          ON CONFLICT (season, league_id, team_id, week)
-          DO UPDATE SET points=EXCLUDED.points, wins=EXCLUDED.wins, losses=EXCLUDED.losses, ties=EXCLUDED.ties, updated_at=now()
-        `, [season, leagueId, teamId, pf, wins, losses, ties]);
+// --- season totals as week=1 (table has no wins/losses/ties) ---
+await pool.query(`
+  INSERT INTO ff_team_weekly_points
+    (season, league_id, team_id, week, points, updated_at)
+  VALUES
+    ($1, $2, $3, 1, $4, now())
+  ON CONFLICT (season, league_id, team_id, week)
+  DO UPDATE SET
+    points     = EXCLUDED.points,
+    updated_at = now()
+`, [season, leagueId, teamId, pf]);
+
       }
 
       // ff_team_points_cache UPSERT (INSERT…SELECT)
