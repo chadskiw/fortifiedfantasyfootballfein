@@ -172,43 +172,8 @@ app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', kon
 app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
 // /api/espn/link
-app.get('/api/espn/link', async (req, res) => {
-  const { swid, s2, to } = req.query;
-  if (!swid || !s2) return res.status(400).send('missing swid/s2');
+app.use('/api/espn', require('./routes/platforms/espn/link'));
 
-  // 1) Normalize values (store raw braces for SWID)
-  const SWID = decodeURIComponent(String(swid)).toUpperCase(); // "{ABCD-...}"
-  const S2   = decodeURIComponent(String(s2));
-
-  // 2) Upsert creds
-  const memberId = req.session?.member_id || null;
-  await pool.query(`
-    INSERT INTO ff_espn_cred (member_id, swid, s2, is_active, last_seen_at, user_agent, ip_hash)
-    VALUES ($1,$2,$3,true, now(), $4, md5($5))
-    ON CONFLICT (member_id) DO UPDATE
-      SET swid=$2, s2=$3, is_active=true, last_seen_at=now()
-  `, [memberId, SWID, S2, req.get('user-agent')||'', req.ip||'']);
-
-  await pool.query(
-    `INSERT INTO ff_espn_cred_history (member_id, swid, s2, seen_at) VALUES ($1,$2,$3, now())`,
-    [memberId, SWID, S2]
-  );
-
-  // 3) Clear any stale dup cookies, then set fresh ones
-  const cookieBase = { httpOnly:true, sameSite:'lax', secure:true, domain:'.fortifiedfantasy.com', path:'/' };
-  res.cookie('SWID', '', { ...cookieBase, maxAge:0 });     // nuke
-  res.cookie('espn_s2', '', { ...cookieBase, maxAge:0 });  // nuke
-  res.cookie('SWID', SWID, { ...cookieBase, maxAge:31536000*1000 });
-  res.cookie('espn_s2', S2,   { ...cookieBase, maxAge:31536000*1000 });
-  res.cookie('fein_has_espn', '1', { sameSite:'lax', secure:true, domain:'.fortifiedfantasy.com', path:'/' });
-
-  // 4) Safe redirect (same-origin only)
-  const fallback = '/fein/index.html';
-  const dest = String(to||fallback);
-  const url  = new URL(dest, 'https://fortifiedfantasy.com');
-  if (url.origin !== 'https://fortifiedfantasy.com') return res.redirect(fallback);
-  res.redirect(url.toString());
-});
 
 
 
