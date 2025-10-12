@@ -25,7 +25,7 @@ async function espnGet(req, path, qs = {}) {
   };
 
   const r = await fetch(url.toString(), { headers });
-  if (r.status === 304) return {}; // defensive for conditional cache hits
+  if (r.status === 304) return {};
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
 }
@@ -40,7 +40,7 @@ function getLeagueIdsFromPoll(poll) {
   return [];
 }
 
-// safe journal helper
+// UPSERT journal to ff_espn_fan
 async function journalFan(pool, { swid, s2, payload }) {
   try {
     await pool.query(
@@ -66,10 +66,8 @@ router.post('/season', async (req, res) => {
   if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'season required' });
 
   try {
-    // 1) poll
+    // 1) poll (+ journal once)
     const poll = await espnGet(req, 'poll', { season });
-
-    // journal poll ONCE (outside loop)
     await journalFan(pool, {
       swid: req.headers['x-espn-swid'],
       s2  : req.headers['x-espn-s2'],
@@ -81,23 +79,22 @@ router.post('/season', async (req, res) => {
       return res.json({ ok:true, season, leaguesCount: 0 });
     }
 
-    // 2) hydrate each league and upsert
+    // 2) hydrate each league and UPSERT
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
 
-      // journal league snapshot (non-fatal)
       await journalFan(pool, {
         swid: req.headers['x-espn-swid'],
         s2  : req.headers['x-espn-s2'],
         payload: { kind:'league', season, leagueId, payload: league }
       });
 
-      // -------- upsert league (use safe fallbacks for name/size) --------
       const leagueName = league?.name || league?.leagueName || league?.groupName || '';
       const leagueSize = Number(
         league?.size ?? league?.leagueSize ?? league?.groupSize ?? (Array.isArray(league?.teams) ? league.teams.length : NaN)
       ) || null;
 
+      // ff_league UPSERT
       await pool.query(`
         INSERT INTO ff_league (season, league_id, name, size, updated_at)
         VALUES ($1,$2,$3,$4, now())
@@ -105,7 +102,7 @@ router.post('/season', async (req, res) => {
         DO UPDATE SET name=EXCLUDED.name, size=EXCLUDED.size, updated_at=now()
       `, [season, leagueId, leagueName, leagueSize]);
 
-      // -------- teams / owners / season totals (week=1) --------
+      // teams
       const teams = Array.isArray(league?.teams) ? league.teams : [];
       for (const t of teams) {
         const teamId   = Number(t.teamId ?? t.id);
@@ -120,7 +117,7 @@ router.post('/season', async (req, res) => {
         const losses= Number(t.losses ?? t.record?.losses ?? 0) || 0;
         const ties  = Number(t.ties   ?? t.record?.ties   ?? 0) || 0;
 
-        // ff_team
+        // ff_team UPSERT
         await pool.query(`
           INSERT INTO ff_team (league_id, team_id, team_name, updated_at)
           VALUES ($1,$2,$3,now())
@@ -128,7 +125,7 @@ router.post('/season', async (req, res) => {
           DO UPDATE SET team_name=EXCLUDED.team_name, updated_at=now()
         `, [leagueId, teamId, teamName]);
 
-        // ff_team_owner
+        // ff_team_owner UPSERT
         await pool.query(`
           INSERT INTO ff_team_owner (league_id, team_id, member_id, owner_handle, updated_at)
           VALUES ($1,$2,$3,$4,now())
@@ -138,7 +135,7 @@ router.post('/season', async (req, res) => {
                         updated_at  = now()
         `, [leagueId, teamId, ownerId, ownerHdl]);
 
-        // season totals as week=1
+        // ff_team_weekly_points (week=1 as season totals) UPSERT
         await pool.query(`
           INSERT INTO ff_team_weekly_points (season, league_id, team_id, week, points, wins, losses, ties, updated_at)
           VALUES ($1,$2,$3, 1, $4,$5,$6,$7, now())
@@ -147,13 +144,15 @@ router.post('/season', async (req, res) => {
         `, [season, leagueId, teamId, pf, wins, losses, ties]);
       }
 
-      // -------- cache table (run as two statements for safety) --------
-      await pool.query(`DELETE FROM ff_team_points_cache WHERE season=$1 AND league_id=$2`, [season, leagueId]);
+      // ff_team_points_cache UPSERT (INSERT…SELECT)
       await pool.query(`
         INSERT INTO ff_team_points_cache (season, league_id, team_id, season_points, updated_at)
         SELECT season, league_id, team_id, points, now()
-        FROM ff_team_weekly_points
-        WHERE season=$1 AND league_id=$2 AND week=1
+          FROM ff_team_weekly_points
+         WHERE season=$1 AND league_id=$2 AND week=1
+        ON CONFLICT (season, league_id, team_id)
+        DO UPDATE SET season_points = EXCLUDED.season_points,
+                      updated_at    = now()
       `, [season, leagueId]);
     }
 
