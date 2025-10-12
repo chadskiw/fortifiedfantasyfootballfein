@@ -52,7 +52,7 @@ function mapGameFromLeague(league) {
   if (s.includes('fhl') || s.includes('hockey'))   return 'fhl';
   if (s.includes('fba') || s.includes('basket'))   return 'fba';
   if (s.includes('fwnba')|| s.includes('wnba'))    return 'fwnba';
-  return 'ffl'; // default safe
+  return 'ffl'; // safe default
 }
 
 // map ESPN scoring labels to table column (STD/HALF/PPR)
@@ -67,11 +67,18 @@ function mapScoring(league) {
   return 'STD';
 }
 
-// best-effort pull of “season starters” for team; safe to fail
-async function tryGetSeasonStarters(req, season, leagueId, teamId) {
+// best-effort pull of “season/most-recent-week starters” (safe to fail)
+async function tryGetStarters(req, season, leagueId, teamId, week) {
   try {
-    const roster = await espnGet(req, 'roster', { season, leagueId, teamId, scope: 'season' });
-    const items = Array.isArray(roster?.starters) ? roster.starters : Array.isArray(roster) ? roster : [];
+    // Prefer week roster if week>0; otherwise try season scope
+    const roster = week
+      ? await espnGet(req, 'roster', { season, leagueId, teamId, week })
+      : await espnGet(req, 'roster', { season, leagueId, teamId, scope: 'season' });
+
+    const items = Array.isArray(roster?.starters)
+      ? roster.starters
+      : Array.isArray(roster) ? roster
+      : [];
     return items.map(x => ({
       id: x.id ?? x.playerId ?? null,
       name: x.name ?? x.playerName ?? x.fullName ?? null,
@@ -162,7 +169,7 @@ router.post('/season', async (req, res) => {
       const scoring_type = (league?.scoringTypeName || league?.scoringType || league?.settings?.scoringType || 'H2H')
                             .toString().toUpperCase();
 
-      // ---- ff_league (UPSERT on PK/unique platform+league_id+season) ----
+      // ---- ff_league (UPSERT on platform+league_id+season) ----
       await pool.query(`
         INSERT INTO ff_league (platform, league_id, season, name, scoring_type, game, updated_at)
         VALUES ('espn', $1, $2, $3, $4, $5, now())
@@ -173,7 +180,7 @@ router.post('/season', async (req, res) => {
                       updated_at   = now()
       `, [leagueId, season, leagueName, scoring_type, game]);
 
-      // -------- teams / owners / season totals (week=1) --------
+      // -------- teams / owners / points (latest week only) --------
       const teams = Array.isArray(league?.teams) ? league.teams : [];
       for (const t of teams) {
         const teamId   = Number(t.teamId ?? t.id);
@@ -204,7 +211,7 @@ router.post('/season', async (req, res) => {
         // ---- ff_team_owner (update-then-insert; schema has no owner_handle) ----
         try {
           if (ownerGuid) {
-            const updOwner = await pool.query(`
+            const updated = await pool.query(`
               UPDATE ff_team_owner
                  SET member_id        = COALESCE($5, member_id),
                      owner_kind       = 'real',
@@ -214,9 +221,8 @@ router.post('/season', async (req, res) => {
                  AND season   = $1
                  AND league_id= $2
                  AND team_id  = $3
-            `, [season, leagueId, teamId, 'espn', String(ownerGuid)]); // 'espn' placeholder for clarity
-
-            if (updOwner.rowCount === 0) {
+            `, [season, leagueId, teamId, 'espn', String(ownerGuid)]);
+            if (updated.rowCount === 0) {
               await pool.query(`
                 INSERT INTO ff_team_owner
                   (platform, season, league_id, team_id, member_id, owner_kind, espn_owner_guids, updated_at)
@@ -229,56 +235,51 @@ router.post('/season', async (req, res) => {
           console.warn('[ff_team_owner] non-fatal:', e.message || e);
         }
 
-        // ---- ff_team_weekly_points (week=1 totals; include team_name/scoring/starters) ----
-        const week     = 1;
-        const scoring  = mapScoring(league);
-        const starters = await tryGetSeasonStarters(req, season, leagueId, teamId);
+        // ---- LATEST-WEEK ONLY logic for ff_team_weekly_points ----
+        // If the team already has any rows for this season/league, only touch the most recent week.
+        // Otherwise seed week=1 (season totals snapshot).
+        const { rows: wkRows } = await pool.query(`
+          SELECT COALESCE(MAX(week), 0) AS max_week
+            FROM ff_team_weekly_points
+           WHERE season=$1 AND league_id=$2 AND team_id=$3
+        `, [season, leagueId, teamId]);
+
+        const latestWeek = Number(wkRows?.[0]?.max_week || 0);
+        const targetWeek = latestWeek > 0 ? latestWeek : 1;
+
+        const scoring = mapScoring(league);
+        const starters = await tryGetStarters(req, season, leagueId, teamId, targetWeek);
         const startersJson = starters ? JSON.stringify(starters) : null;
 
-        const updWk = await pool.query(`
-          UPDATE ff_team_weekly_points
-             SET team_name = $5,
-                 points    = $6,
-                 starters  = $7::jsonb,
-                 scoring   = $8,
-                 updated_at= now()
-           WHERE season    = $1
-             AND league_id = $2
-             AND team_id   = $3
-             AND week      = $4
-        `, [season, leagueId, teamId, week, teamName, pf, startersJson, scoring]);
+        // Proper UPSERT on PK (season, league_id, team_id, week, scoring)
+        await pool.query(`
+          INSERT INTO ff_team_weekly_points
+            (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
+          VALUES
+            ($1,     $2,       $3,      $4,   $5,        $6,     $7::jsonb, $8,      now(),     now())
+          ON CONFLICT (season, league_id, team_id, week, scoring)
+          DO UPDATE SET
+            team_name = EXCLUDED.team_name,
+            points    = EXCLUDED.points,
+            starters  = EXCLUDED.starters,
+            updated_at= now()
+        `, [season, leagueId, teamId, targetWeek, teamName, pf, startersJson, scoring]);
 
-        if (updWk.rowCount === 0) {
-          await pool.query(`
-            INSERT INTO ff_team_weekly_points
-              (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
-            VALUES
-              ($1,     $2,       $3,      $4,   $5,        $6,     $7::jsonb, $8,      now(),     now())
-          `, [season, leagueId, teamId, week, teamName, pf, startersJson, scoring]);
-        }
-      } // teams
-// ---- ff_team_weekly_points (week=1 totals; include team_name/scoring/starters) ----
-const week     = 1;
-const scoring  = mapScoring(league);
-const starters = await tryGetSeasonStarters(req, season, leagueId, teamId);
-const startersJson = starters ? JSON.stringify(starters) : null;
+        // ---- ff_team_points_cache (single row per season/league/team) ----
+        // week = latest (targetWeek), week_pts = points at targetWeek
+        // season_pts = SUM(points) across season for this team
+        const { rows: ptRows } = await pool.query(`
+          SELECT
+            COALESCE(SUM(points), 0) AS season_pts,
+            MAX(CASE WHEN week=$4 AND scoring=$5 THEN points END) AS week_pts
+          FROM ff_team_weekly_points
+          WHERE season=$1 AND league_id=$2 AND team_id=$3
+        `, [season, leagueId, teamId, targetWeek, scoring]);
 
-await pool.query(`
-  INSERT INTO ff_team_weekly_points
-    (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
-  VALUES
-    ($1,     $2,       $3,      $4,   $5,        $6,     $7::jsonb, $8,      now(),     now())
-  ON CONFLICT (season, league_id, team_id, week, scoring)
-  DO UPDATE SET
-    team_name = EXCLUDED.team_name,
-    points    = EXCLUDED.points,
-    starters  = EXCLUDED.starters,
-    updated_at= now()
-`, [season, leagueId, teamId, week, teamName, pf, startersJson, scoring]);
+        const seasonPts = Number(ptRows?.[0]?.season_pts || 0);
+        const weekPts   = Number(ptRows?.[0]?.week_pts ?? pf); // fallback to pf
 
-
-      for (const r of rows.rows) {
-        const season_pts = r.week_pts; // season==week1 totals match your existing cache pattern
+        // Try update first
         const updCache = await pool.query(`
           UPDATE ff_team_points_cache
              SET team_name  = $4,
@@ -290,7 +291,7 @@ await pool.query(`
            WHERE season    = $1
              AND league_id = $2
              AND team_id   = $3
-        `, [r.season, r.league_id, r.team_id, r.team_name, r.scoring, r.week, r.week_pts, season_pts]);
+        `, [season, leagueId, teamId, teamName, scoring, targetWeek, weekPts, seasonPts]);
 
         if (updCache.rowCount === 0) {
           await pool.query(`
@@ -298,9 +299,9 @@ await pool.query(`
               (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
             VALUES
               ($1,     $2,       $3,      $4,        $5,      $6,   $7,       $8,         now())
-          `, [r.season, r.league_id, r.team_id, r.team_name, r.scoring, r.week, r.week_pts, season_pts]);
+          `, [season, leagueId, teamId, teamName, scoring, targetWeek, weekPts, seasonPts]);
         }
-      }
+      } // teams
     } // leagues
 
     return res.json({ ok:true, season, leaguesCount: leagueIds.length });
