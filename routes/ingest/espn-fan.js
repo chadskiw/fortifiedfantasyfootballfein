@@ -2,48 +2,29 @@
 const express = require('express');
 const router  = express.Router();
 // put near top of routes/ingest/espn-fan.js
+// --- helpers (add once in the same file) ---
 function absoluteOrigin(req) {
-  // 1) allow override in env (Render/CF friendly)
   if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN;
-
-  // 2) try forwarded proto + host
   const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
   const host  = req.get('x-forwarded-host')  || req.get('host');
-  if (host) return `${proto}://${host}`;
-
-  // 3) final fallback (your real host)
-  return 'https://fortifiedfantasy.com';
+  return host ? `${proto}://${host}` : 'https://fortifiedfantasy.com';
 }
 
-// replace your espnGet with this
 async function espnGet(req, path, qs = {}) {
   const origin = absoluteOrigin(req);
-  const clean  = String(path).replace(/^\/+/, ''); // no leading slash
-  const url    = new URL(`${origin}/api/platforms/espn/${clean}`);
-  Object.entries(qs).forEach(([k, v]) => url.searchParams.set(k, String(v)));
-
+  const url    = new URL(`${origin}/api/platforms/espn/${String(path).replace(/^\/+/, '')}`);
+  Object.entries(qs).forEach(([k,v]) => url.searchParams.set(k, String(v)));
   const headers = {
     'accept'      : 'application/json',
     'x-espn-swid' : req.headers['x-espn-swid'] || '',
-    'x-espn-s2'   : req.headers['x-espn-s2']   || '',
+    'x-espn-s2'   : req.headers['x-espn-s2']   || ''
   };
-
-  // Node 18+ has global fetch. If not, require('node-fetch')
-  const res = await fetch(url.toString(), { method: 'GET', headers });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  const r = await fetch(url.toString(), { headers });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
 }
 
-
-router.post('/season', async (req, res) => {
-  const pool   = req.app.get('pg');
-  const season = Number(req.body?.season || req.query?.season || new Date().getUTCFullYear());
-  if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'season required' });
-
-
-  try {
- 
-const leagueIds = (() => {
+function getLeagueIdsFromPoll(poll) {
   if (Array.isArray(poll?.data))
     return [...new Set(poll.data.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
   if (Array.isArray(poll?.leagues))
@@ -51,9 +32,34 @@ const leagueIds = (() => {
   if (Array.isArray(poll))
     return [...new Set(poll.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
   return [];
-})();
-    if (!leagueIds.length) return res.json({ ok:true, season, leaguesCount: 0 });
+}
+// --- end helpers ---
 
+
+
+router.post('/season', async (req, res) => {
+  const pool   = req.app.get('pg');
+  const season = Number(req.body?.season || req.query?.season || new Date().getUTCFullYear());
+  if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'season required' });
+
+  try {
+    // ✅ define poll before using it
+    const poll = await espnGet(req, 'poll', { season });
+
+    const leagueIds = getLeagueIdsFromPoll(poll);
+
+    // Optional: quick telemetry
+    console.log('[fan/season]', {
+      season,
+      shapes: { hasData:Array.isArray(poll?.data), hasLeagues:Array.isArray(poll?.leagues) },
+      leagueIds
+    });
+
+    if (!leagueIds.length) {
+      return res.json({ ok:true, season, leaguesCount: 0 });
+    }
+
+    // Hydrate each league (PUT YOUR EXISTING UPSERTS INSIDE THIS LOOP)
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
 
