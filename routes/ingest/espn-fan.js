@@ -1,16 +1,39 @@
 // routes/ingest/espn-fan.js
 const express = require('express');
 const router  = express.Router();
+// put near top of routes/ingest/espn-fan.js
+function absoluteOrigin(req) {
+  // 1) allow override in env (Render/CF friendly)
+  if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN;
 
-async function espnGet(app, path, qs={}) {
-  // Reuse your existing platform router (uses ff_espn_cred under the hood)
-  const base = app.get('origin') || ''; // not required; use your internal fetch helper if you have one
-  const url  = new URL(`/api/platforms/espn/${path}`, base);
-  Object.entries(qs).forEach(([k,v])=>url.searchParams.set(k, v));
-  const res  = await fetch(url, { credentials:'include' });
-  if (!res.ok) throw new Error(await res.text());
+  // 2) try forwarded proto + host
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const host  = req.get('x-forwarded-host')  || req.get('host');
+  if (host) return `${proto}://${host}`;
+
+  // 3) final fallback (your real host)
+  return 'https://fortifiedfantasy.com';
+}
+
+// replace your espnGet with this
+async function espnGet(req, path, qs = {}) {
+  const origin = absoluteOrigin(req);
+  const clean  = String(path).replace(/^\/+/, ''); // no leading slash
+  const url    = new URL(`${origin}/api/platforms/espn/${clean}`);
+  Object.entries(qs).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+
+  const headers = {
+    'accept'      : 'application/json',
+    'x-espn-swid' : req.headers['x-espn-swid'] || '',
+    'x-espn-s2'   : req.headers['x-espn-s2']   || '',
+  };
+
+  // Node 18+ has global fetch. If not, require('node-fetch')
+  const res = await fetch(url.toString(), { method: 'GET', headers });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
+
 
 router.post('/season', async (req, res) => {
   const pool   = req.app.get('pg');
@@ -20,32 +43,15 @@ router.post('/season', async (req, res) => {
   try {
     const poll = await espnGet(req, 'poll', { season });
 
-    // Robust leagueId extraction (handles {data:[]}, {leagues:[]}, or bare array)
     const leagueIds = (() => {
-      if (Array.isArray(poll?.data)) {
-        return [...new Set(poll.data.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
-      }
-      if (Array.isArray(poll?.leagues)) {
-        return [...new Set(poll.leagues.map(x => String(x)).filter(Boolean))];
-      }
-      if (Array.isArray(poll)) {
-        return [...new Set(poll.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
-      }
+      if (Array.isArray(poll?.data)) return [...new Set(poll.data.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
+      if (Array.isArray(poll?.leagues)) return [...new Set(poll.leagues.map(x => String(x)).filter(Boolean))];
+      if (Array.isArray(poll)) return [...new Set(poll.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
       return [];
     })();
 
-    // (Optional) log for sanity
-    console.log('[fan/season] poll shapes:', {
-      hasData: Array.isArray(poll?.data),
-      hasLeagues: Array.isArray(poll?.leagues),
-      countInData: poll?.data?.length || 0,
-      leagueIds
-    });
-
-    // Short-circuit if nothing found
     if (!leagueIds.length) return res.json({ ok:true, season, leaguesCount: 0 });
 
-    // Hydrate each league and upsert
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
 
@@ -113,10 +119,11 @@ router.post('/season', async (req, res) => {
       `, [season, leagueId]);
     }
   }
-  return res.json({ ok:true, season, leaguesCount: leagueIds.length });
+
+    res.json({ ok:true, season, leaguesCount: leagueIds.length });
   } catch (e) {
     console.error('[ingest/fan]', e);
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
+    res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
 
