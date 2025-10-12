@@ -5,12 +5,12 @@ const { resolveEspnCredCandidates } = require('./_cred');
 const { fetchJsonWithCred } = require('./_fetch');
 
 const NFL_MAX_WEEK = 18;
-
+const CURRENT_WEEK = 6;
 function safeWeek(req){
   const w = Number(req.query.week);
   if (Number.isFinite(w) && w >= 1) return Math.min(w, NFL_MAX_WEEK);
   // very safe fallback if no param
-  return 1;
+  return CURRENT_WEEK;
 }
 
 const TEAM_ABBR = {
