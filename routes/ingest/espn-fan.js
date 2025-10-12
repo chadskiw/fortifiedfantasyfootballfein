@@ -169,9 +169,21 @@ router.post('/season', async (req, res) => {
     }
 
     // 2) hydrate each league and write
-    for (const leagueId of leagueIds) {
-      const league = await espnGet(req, 'league', { season, leagueId });
+ const allowGames = String(req.query.games || '').toLowerCase().split(',').filter(Boolean); // e.g. ['ffl']
+// ...
+for (const leagueId of leagueIds) {
+  const league = await espnGet(req, 'league', { season, leagueId });
 
+  // filter here if games filter provided
+  if (allowGames.length) {
+    const g = (league?.gameAbbrev || league?.game || '').toString().toLowerCase();
+    const short = g.includes('football') || g.includes('ffl') ? 'ffl'
+               : g.includes('baseball') || g.includes('flb') ? 'flb'
+               : g.includes('hockey')   || g.includes('fhl') ? 'fhl'
+               : g.includes('basket')   || g.includes('fba') ? 'fba'
+               : 'ffl';
+    if (!allowGames.includes(short)) continue; // skip non-allowed games
+  }
       await journalFan(pool, { swid, s2, payload: { kind:'league', season, leagueId, payload: league } });
 
       const game         = mapGameFromLeague(league);
