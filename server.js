@@ -182,14 +182,14 @@ app.get('/api/espn/link', async (req, res) => {
 
   // 2) Upsert creds
   const memberId = req.session?.member_id || null;
-  await pg.query(`
+  await pool.query(`
     INSERT INTO ff_espn_cred (member_id, swid, s2, is_active, last_seen_at, user_agent, ip_hash)
     VALUES ($1,$2,$3,true, now(), $4, md5($5))
     ON CONFLICT (member_id) DO UPDATE
       SET swid=$2, s2=$3, is_active=true, last_seen_at=now()
   `, [memberId, SWID, S2, req.get('user-agent')||'', req.ip||'']);
 
-  await pg.query(
+  await pool.query(
     `INSERT INTO ff_espn_cred_history (member_id, swid, s2, seen_at) VALUES ($1,$2,$3, now())`,
     [memberId, SWID, S2]
   );
