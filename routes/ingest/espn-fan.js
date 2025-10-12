@@ -10,18 +10,23 @@ function absoluteOrigin(req) {
   return host ? `${proto}://${host}` : 'https://fortifiedfantasy.com';
 }
 
+// inside routes/ingest/espn-fan.js
+function readCred(req, key) {
+  // prefer header, else cookie
+  return req.headers[key] || (req.cookies && req.cookies[key.replace('x-','')]) || '';
+}
+
 async function espnGet(req, path, qs = {}) {
   const origin = absoluteOrigin(req);
-  const clean  = String(path).replace(/^\/+/, '');
-  const url    = new URL(`${origin}/api/platforms/espn/${clean}`);
+  const url = new URL(`${origin}/api/platforms/espn/${String(path).replace(/^\/+/, '')}`);
   Object.entries(qs).forEach(([k,v]) => url.searchParams.set(k, String(v)));
-  url.searchParams.set('_t', Date.now()); // cache-bust
+  url.searchParams.set('_t', Date.now());
 
   const headers = {
-    'accept'        : 'application/json',
-    'cache-control' : 'no-cache',
-    'x-espn-swid'   : req.headers['x-espn-swid'] || '',
-    'x-espn-s2'     : req.headers['x-espn-s2']   || ''
+    accept: 'application/json',
+    'cache-control': 'no-cache',
+    'x-espn-swid': readCred(req, 'x-espn-swid'),
+    'x-espn-s2'  : readCred(req, 'x-espn-s2')
   };
 
   const r = await fetch(url.toString(), { headers });
@@ -29,6 +34,7 @@ async function espnGet(req, path, qs = {}) {
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
 }
+
 
 function getLeagueIdsFromPoll(poll) {
   if (Array.isArray(poll?.data))

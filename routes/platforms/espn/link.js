@@ -10,36 +10,29 @@ function normalizeSwid(raw){
   return v.toUpperCase();
 }
 
-router.get('/link', async (req, res) => {
-  const pool = req.app.get('pg');
-  const swid = normalizeSwid(req.query.swid || req.query.SWID);
-  const s2   = decodePlus(req.query.espn_s2 || req.query.ESPN_S2 || req.query.s2);
-  if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing swid/s2' });
+router.get('/api/espn/link', async (req, res) => {
+  const { swid, s2, to, season } = req.query;
+  if (!swid || !s2) return res.status(400).send('swid and s2 required');
 
-  // 1) persist creds
-  const memberId = req.session?.member_id || null;
-  await pool.query(`
-    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, first_seen, last_seen)
-    VALUES ($1,$2,$3, now(), now())
-    ON CONFLICT (member_id) DO UPDATE
-      SET swid=$2, espn_s2=$3, last_seen=now()
-  `, [memberId, swid, s2]);
+  // set short/medium TTL cookies
+  res.cookie('espn_swid', swid, { httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7*24*3600e3 });
+  res.cookie('espn_s2',   s2,   { httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7*24*3600e3 });
 
-  // 2) kick multi-sport ingest (fire-and-forget)
-  const season = Number(req.query.season) || new Date().getUTCFullYear();
-  fetch(`${req.protocol}://${req.get('host')}/api/ingest/espn/fan/all-sports`, {
-    method:'POST',
-    headers:{
-      'content-type':'application/json',
+  // fire-and-forget ingest with headers (so it works even before FE requests arrive)
+  const origin = absoluteOrigin(req);
+  const body = JSON.stringify({ season: Number(season) || new Date().getUTCFullYear() });
+  fetch(`${origin}/api/ingest/espn/fan/season`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
       'x-espn-swid': swid,
       'x-espn-s2': s2
     },
-    body: JSON.stringify({ season })
-  }).catch(()=>{});
+    body
+  }).catch(()=>{}); // don’t block redirect
 
-  // 3) redirect (optional)
-  const to = req.query.to || `/fein/index.html?season=${season}`;
-  res.redirect(to);
+  res.redirect(to || `${origin}/fein/?season=${encodeURIComponent(season||'')}`);
 });
+
 
 module.exports = router;
