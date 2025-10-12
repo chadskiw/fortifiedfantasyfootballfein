@@ -136,6 +136,19 @@ const recordJson = buildTeamRecord(t);
 
 // Prefer a stable GUID if ESPN provides one; fall back to memberId
 const ownerGuid = t.ownerGuid || t.memberGuid || t.memberId || null;
+// --- ff_league UPSERT (matches your schema) ---
+const leagueName   = league?.name || league?.leagueName || league?.groupName || '';
+const scoring_type = (league?.scoringTypeName || league?.scoringType || league?.settings?.scoringType || 'H2H').toString().toUpperCase();
+
+await pool.query(`
+  INSERT INTO ff_league (platform, league_id, season, name, scoring_type, game, updated_at)
+  VALUES ('espn', $1, $2, $3, $4, $5, now())
+  ON CONFLICT (platform, league_id, season)
+  DO UPDATE SET name         = EXCLUDED.name,
+                scoring_type = EXCLUDED.scoring_type,
+                game         = EXCLUDED.game,
+                updated_at   = now()
+`, [leagueId, season, leagueName, scoring_type, game]);
 
 await pool.query(`
   INSERT INTO ff_team (platform, season, league_id, team_id, name, logo, record, owner_guid, game, updated_at)
