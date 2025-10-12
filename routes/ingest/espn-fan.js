@@ -257,13 +257,25 @@ router.post('/season', async (req, res) => {
           `, [season, leagueId, teamId, week, teamName, pf, startersJson, scoring]);
         }
       } // teams
+// ---- ff_team_weekly_points (week=1 totals; include team_name/scoring/starters) ----
+const week     = 1;
+const scoring  = mapScoring(league);
+const starters = await tryGetSeasonStarters(req, season, leagueId, teamId);
+const startersJson = starters ? JSON.stringify(starters) : null;
 
-      // ---- ff_team_points_cache (refresh from week=1 totals; update-then-insert) ----
-      const rows = await pool.query(`
-        SELECT season, league_id, team_id, team_name, scoring, week, points AS week_pts
-          FROM ff_team_weekly_points
-         WHERE season=$1 AND league_id=$2 AND week=1
-      `, [season, leagueId]);
+await pool.query(`
+  INSERT INTO ff_team_weekly_points
+    (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
+  VALUES
+    ($1,     $2,       $3,      $4,   $5,        $6,     $7::jsonb, $8,      now(),     now())
+  ON CONFLICT (season, league_id, team_id, week, scoring)
+  DO UPDATE SET
+    team_name = EXCLUDED.team_name,
+    points    = EXCLUDED.points,
+    starters  = EXCLUDED.starters,
+    updated_at= now()
+`, [season, leagueId, teamId, week, teamName, pf, startersJson, scoring]);
+
 
       for (const r of rows.rows) {
         const season_pts = r.week_pts; // season==week1 totals match your existing cache pattern
