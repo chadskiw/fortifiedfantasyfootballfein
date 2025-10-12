@@ -57,6 +57,31 @@ async function journalFan(pool, { swid, s2, payload }) {
   }
 }
 /* ---------------------- end helpers ---------------------- */
+function buildTeamRecord(t) {
+  // If ESPN already gave us a structured record object, use it as-is.
+  if (t?.record && typeof t.record === 'object') return t.record;
+  if (t?.records && typeof t.records === 'object') return t.records;
+
+  // Otherwise construct a minimal "overall" record that matches your schema style.
+  const wins   = Number(t?.wins   ?? t?.record?.wins   ?? 0) || 0;
+  const losses = Number(t?.losses ?? t?.record?.losses ?? 0) || 0;
+  const ties   = Number(t?.ties   ?? t?.record?.ties   ?? 0) || 0;
+  const pointsFor     = Number(t?.pointsFor ?? t?.points ?? 0) || 0;
+  const pointsAgainst = Number(t?.pointsAgainst ?? 0) || 0;
+  const percentage = (wins + losses + ties) ? wins / (wins + losses + ties) : 0;
+
+  const overall = {
+    wins, losses, ties,
+    gamesBack: 0,
+    pointsFor, pointsAgainst,
+    percentage,
+    streakType: 'NONE',
+    streakLength: 0
+  };
+
+  // Your existing rows show { home, away, overall, division }
+  return { overall, home: overall, away: overall, division: overall };
+}
 
 
 /* ======================= /season ======================== */
@@ -104,14 +129,17 @@ router.post('/season', async (req, res) => {
         const losses= Number(t.losses ?? t.record?.losses ?? 0) || 0;
         const ties  = Number(t.ties   ?? t.record?.ties   ?? 0) || 0;
 
-// ff_team UPSERT (matches your schema)
-const logo   = t.logo || t.teamLogoUrl || null;
-const record = `${wins}-${losses}${ties ? `-${ties}` : ''}`;
-const game   = 'ffl'; // you said FFL is the template
+// ff_team UPSERT (record is JSONB; accept ESPN shapes or synthesize)
+const logo       = t.logo || t.teamLogoUrl || null;
+const game       = 'ffl';
+const recordJson = buildTeamRecord(t);
+
+// Prefer a stable GUID if ESPN provides one; fall back to memberId
+const ownerGuid = t.ownerGuid || t.memberGuid || t.memberId || null;
 
 await pool.query(`
   INSERT INTO ff_team (platform, season, league_id, team_id, name, logo, record, owner_guid, game, updated_at)
-  VALUES ('espn', $1, $2, $3, $4, $5, $6, $7, $8, now())
+  VALUES ('espn', $1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
   ON CONFLICT (platform, season, league_id, team_id)
   DO UPDATE SET name       = EXCLUDED.name,
                 logo       = EXCLUDED.logo,
@@ -119,7 +147,17 @@ await pool.query(`
                 owner_guid = COALESCE(EXCLUDED.owner_guid, ff_team.owner_guid),
                 game       = EXCLUDED.game,
                 updated_at = now()
-`, [season, leagueId, teamId, teamName, logo, record, ownerId || null, game]);
+`, [
+  season,
+  leagueId,
+  teamId,
+  teamName,
+  logo,
+  JSON.stringify(recordJson),
+  ownerGuid,
+  game
+]);
+
 
 
         // ff_team_owner UPSERT
