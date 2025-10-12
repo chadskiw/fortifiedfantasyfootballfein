@@ -40,24 +40,22 @@ router.post('/season', async (req, res) => {
   const season = Number(req.body?.season || req.query?.season || new Date().getUTCFullYear());
   if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'season required' });
 
+
   try {
-    const poll = await espnGet(req, 'poll', { season });
-
-    const leagueIds = (() => {
-      if (Array.isArray(poll?.data)) return [...new Set(poll.data.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
-      if (Array.isArray(poll?.leagues)) return [...new Set(poll.leagues.map(x => String(x)).filter(Boolean))];
-      if (Array.isArray(poll)) return [...new Set(poll.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
-      return [];
-    })();
-
+ 
+const leagueIds = (() => {
+  if (Array.isArray(poll?.data))
+    return [...new Set(poll.data.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
+  if (Array.isArray(poll?.leagues))
+    return [...new Set(poll.leagues.map(x => String(x)).filter(Boolean))];
+  if (Array.isArray(poll))
+    return [...new Set(poll.map(x => String(x.leagueId || x.league_id)).filter(Boolean))];
+  return [];
+})();
     if (!leagueIds.length) return res.json({ ok:true, season, leaguesCount: 0 });
 
     for (const leagueId of leagueIds) {
       const league = await espnGet(req, 'league', { season, leagueId });
-
-    for (const leagueId of leagues) {
-      // 2) league meta + teams (mTeam + mSettings)
-      const league = await espnGet(req.app, 'league', { season, leagueId });
 
       // raw snapshot
       await pool.query(`
@@ -117,7 +115,7 @@ router.post('/season', async (req, res) => {
         FROM ff_team_weekly_points
         WHERE season=$1 AND league_id=$2 AND week=1;
       `, [season, leagueId]);
-    }
+    
   }
 
     res.json({ ok:true, season, leaguesCount: leagueIds.length });
