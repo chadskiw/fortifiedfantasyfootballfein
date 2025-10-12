@@ -174,6 +174,7 @@ app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leag
 // server.js
 app.use('/api/platforms/espn', require('./routes/espn/free-agents'));
 app.use('/api/platforms/espn', require('./routes/espn/free-agents-with-team'));
+app.use('/api/ingest/espn/fan', require('./routes/ingest/espn-fan'));
 
 // ✅ Kona passthrough (the path your browser is hitting)
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', async (req, res) => {
