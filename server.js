@@ -3,6 +3,7 @@ require('dotenv').config();
 console.log('[R2] using bucket =', process.env.R2_BUCKET);
 console.log('[R2] endpoint =', process.env.R2_ENDPOINT);
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
+const espnLink = require('./routes/espn/link');
 
 const express      = require('express');
 const morgan       = require('morgan');
@@ -171,8 +172,8 @@ async function konaHandler(req, res) {
 app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
-// /api/espn/link
-app.use('/api/espn', require('./routes/platforms/espn/link'));
+// server.js (or index.js where your Express app is created)
+app.use('/api/espn', espnLink);
 
 
 
