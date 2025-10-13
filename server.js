@@ -327,7 +327,7 @@ app.use('/api/espn',           espnRouter); // legacy short base
 // Direct link alias → /api/espn/link (preserves query)
 app.get('/link', (req, res) => {
   const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
-  res.redirect(302, `/api/espn/link${qs}`);
+  res.redirect(302, `/api/platforms/espn/link${qs}`);
 });
 
 // ===== PP & identity/session routes =====
