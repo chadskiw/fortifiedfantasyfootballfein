@@ -65,6 +65,7 @@ app.get('/status', (req, res) => {
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
 
+app.use('/api/espn', espnLink);
 
 // Mount under your platform namespace
  app.use('/api/platforms/espn', espnAuthRouter({
@@ -173,7 +174,6 @@ app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', kon
 app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
 // server.js (or index.js where your Express app is created)
-app.use('/api/espn', espnLink);
 
 
 
