@@ -42,15 +42,17 @@ linkRouter.get('/link', async (req, res) => {
       const swid_hash = sha256(swid);
       const s2_hash   = s2 ? sha256(s2) : null;
 
-      await pool.query(`
-        INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-        VALUES ($1,$2,$3,$4,$5, now(), now(), 'link')
-        ON CONFLICT (swid_hash) DO UPDATE
-           SET espn_s2  = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
-               s2_hash  = COALESCE(EXCLUDED.s2_hash, ff_espn_cred.s2_hash),
-               member_id= COALESCE(ff_espn_cred.member_id, EXCLUDED.member_id),
-               last_seen= now()
-      `, [swid, s2 || null, swid_hash, s2_hash, member_id]);
+await pool.query(`
+  INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
+  VALUES ($1,$2, encode(digest($1,'sha256'),'hex'), NULLIF(encode(digest($2,'sha256'),'hex'),''), $3, now(), now(), $4)
+  ON CONFLICT (swid_hash) DO UPDATE
+    SET espn_s2  = COALESCE(EXCLUDED.espn_s2, ff_espn_cred.espn_s2),
+        s2_hash  = COALESCE(EXCLUDED.s2_hash, ff_espn_cred.s2_hash),
+        member_id= COALESCE(ff_espn_cred.member_id, EXCLUDED.member_id),
+        last_seen= now(),
+        ref      = EXCLUDED.ref;
+`, [canonicalSwid, rawS2, memberId, 'link']);
+
 
       // also backfill quick_snap if empty
       await pool.query(`
