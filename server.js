@@ -31,6 +31,45 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
+function normalizeSwid(raw){
+  try{
+    let v = decodeURIComponent(String(raw||'')).trim();
+    if (!v) return '';
+    v = v.replace(/^%7B/i,'{').replace(/%7D$/i,'}');
+    if (!v.startsWith('{')) v = `{${v.replace(/^\{?/, '').replace(/\}?$/, '')}}`;
+    return v.toUpperCase();
+  }catch{ return String(raw||''); }
+}
+
+async function fanProxyHandler(req, res){
+  try {
+    const swid = normalizeSwid(req.params?.id || req.query?.SWID || req.query?.swid || req.cookies?.SWID || '');
+    const s2   = req.cookies?.espn_s2 || req.query?.s2 || req.query?.espn_s2 || '';
+    if (!swid || !s2) return res.status(400).json({ ok:false, error:'missing_swid_or_s2' });
+
+    const url = `https://fan.api.espn.com/apis/v2/fans/${encodeURIComponent(swid)}`;
+    const r = await fetch(url, {
+      headers: {
+        accept: 'application/json, text/plain, */*',
+        cookie: `SWID=${swid}; espn_s2=${s2}`,
+        referer: 'https://www.espn.com/'
+      }
+    });
+
+    const text = await r.text(); // pass-through
+    res.status(r.status)
+       .set('Content-Type','application/json; charset=utf-8')
+       .set('Cache-Control','no-store')
+       .send(text);
+  } catch (e) {
+    console.error('[espn/fan proxy]', e);
+    res.status(502).json({ ok:false, error:'espn_fan_upstream_failed' });
+  }
+}
+
+app.get('/api/platforms/espn/fan/me', fanProxyHandler);
+app.get('/api/platforms/espn/fan/:id', fanProxyHandler);
 
 // ===== CORS (CF fronted) =====
 const allow = {
