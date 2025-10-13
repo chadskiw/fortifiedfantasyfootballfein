@@ -48,39 +48,43 @@ function setCredCookies(res, { swid, s2 }) {
   if (s2)   res.cookie('espn_s2', s2, opts);
 }
 
-// ---------- DB upserts ----------
+// ---------- DB upserts (fixed: do not rewrite ref) ----------
 async function upsertCred(pool, { swid, s2, memberId = null, ref = 'espnconnect' }) {
   if (!swid || !s2) return { inserted: 0, updated: 0 };
+
   const swidHash = sha256(swid);
   const s2Hash   = sha256(s2);
 
-  // existence check avoids assuming a specific unique index
+  // Is there already a row for this SWID?
   const { rows } = await pool.query(
-    'select cred_id from ff_espn_cred where swid_hash = $1 limit 1',
+    'select cred_id, ref from ff_espn_cred where swid_hash = $1 limit 1',
     [swidHash]
   );
 
   if (rows.length) {
+    // UPDATE: do not touch ref; only backfill it if it’s NULL
     await pool.query(
       `update ff_espn_cred
-         set espn_s2   = $1,
-             s2_hash   = $2,
-             last_seen = now(),
-             ref       = $3
-       where swid_hash = $4`,
+          set espn_s2   = $1,
+              s2_hash   = $2,
+              last_seen = now(),
+              ref       = coalesce(ref, $3)  -- write-once: fill only if NULL
+        where swid_hash = $4`,
       [s2, s2Hash, ref, swidHash]
     );
     return { inserted: 0, updated: 1 };
   }
 
+  // INSERT: include ref
   await pool.query(
     `insert into ff_espn_cred
       (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-      values ($1, $2, $3, $4, $5, now(), now(), $6)`,
+     values ($1, $2, $3, $4, $5, now(), now(), $6)`,
     [swid, s2, swidHash, s2Hash, memberId, ref]
   );
   return { inserted: 1, updated: 0 };
 }
+
 
 function buildLeagueUrls({ season, leagueId, teamId }) {
   const id = Number(leagueId);
