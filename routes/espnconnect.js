@@ -91,7 +91,7 @@ function buildFanMapForSeason(fanJson, season) {
   }
   return out;
 }
-const { fetchFromEspnWithCandidates } = require('../espn/espnCred');
+const { fetchFromEspnWithCandidates } = require('./espn/espnCred');
 
 async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
   try {
