@@ -3,6 +3,10 @@ const express = require('express');
 const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
 const { fetchJsonWithCred } = require('./_fetch');
+// routes/espn/roster.js (top of handler)
+const season = Number(req.query.season);
+const leagueId = String(req.query.leagueId || '');
+if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
 const NFL_MAX_WEEK = 18;
 const CURRENT_WEEK = 6;
