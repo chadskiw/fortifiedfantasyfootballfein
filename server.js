@@ -8,6 +8,7 @@ const express       = require('express');
 const morgan        = require('morgan');
 const cookieParser  = require('cookie-parser');
 const path          = require('path');
+const espnConnectRouter = require('./routes/espnconnect');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -108,6 +109,7 @@ app.use('/api/espn', espnLink); // serves GET /api/espn/link page + POST /api/es
 
 // ===== ESPN auth/platform namespace =====
 app.use('/api/platforms/espn', espnAuthRouter({ pool, cookieDomain: 'fortifiedfantasy.com' }));
+app.use('/api/espnconnect', espnConnectRouter);
 
 // ===== Kona passthrough (ESPN reads) with masked-cred headers =====
 async function konaHandler(req, res) {
