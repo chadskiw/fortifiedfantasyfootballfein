@@ -103,6 +103,34 @@ app.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok:true, name:'ff-platform-service', ts:new Date().toISOString(), espn:{ hasCookies: !!(swid && s2) } });
 });
+// --- ESPN Connect static (UI) ---
+const ESPN_CONNECT_DIR = path.join(__dirname, 'public', 'espnconnect');
+app.use('/espnconnect', express.static(ESPN_CONNECT_DIR, {
+  index: 'index.html',
+  maxAge: '0'
+}));
+
+// --- ESPN Connect API (fan + ingest) ---
+const espnConnectRouter = require('./espnconnect'); // adjust path if you put it under routes/
+app.use('/api/espnconnect', espnConnectRouter);
+// expose the Fan endpoint under the platforms namespace too, so FE can use one base:
+app.use('/api/platforms/espn', espnConnectRouter);
+
+// --- CSP: allow same-origin scripts and inline styles for the page ---
+app.use((req, res, next) => {
+  res.set('Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "connect-src 'self' https://fortifiedfantasy.com",
+      "img-src 'self' data: https://img.fortifiedfantasy.com https://a.espncdn.com https://g.espncdn.com",
+      "frame-ancestors 'self'",
+      "base-uri 'self'"
+    ].join('; ')
+  );
+  next();
+});
 
 // ===== Mount the ESPN Link UI (must be before generic espnRouter/catch-alls) =====
 app.use('/api/espn', espnLink); // serves GET /api/espn/link page + POST /api/espn/link/ingest
