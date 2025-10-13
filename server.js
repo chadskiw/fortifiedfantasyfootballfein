@@ -114,7 +114,7 @@ async function konaHandler(req, res) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
-app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', kona , farHandler);
+app.get('/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leagues/:leagueId', konaHandler);
 
 // ===== Free agents + ingest + poll/roster/league endpoints your FE expects =====
