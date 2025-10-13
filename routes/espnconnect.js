@@ -131,7 +131,6 @@ async function upsertCred(pool, { swid, s2, memberId = null, ref = 'espnconnect'
 }
 
 async function upsertFfl(pool, item) {
-  // item: { season, leagueId, teamId, leagueName, leagueSize, teamName, teamLogo, urls:{...} }
   const {
     season, leagueId, teamId,
     leagueName = null, leagueSize = null,
@@ -144,10 +143,37 @@ async function upsertFfl(pool, item) {
   const entry_url       = urls.entryURL || null;
   const league_url      = urls.leagueURL || null;
   const fantasycast_url = urls.fantasyCastHref || null;
-  const scoreboard_url  = urls.scoreboardFeed  || null;
+  const scoreboard_url  = urls.scoreboardFeed || null;
 
-  // We only set a minimal, safe subset of columns you showed in your sample row.
-  const sql = `
+  // 1) Try UPDATE first (robust to column types by casting)
+  const updSql = `
+    update ff_sport_ffl
+       set league_name     = coalesce($4, league_name),
+           league_size     = coalesce($5, league_size),
+           team_name       = coalesce($6, team_name),
+           team_logo_url   = coalesce($7, team_logo_url),
+           entry_url       = coalesce($8, entry_url),
+           league_url      = coalesce($9, league_url),
+           fantasycast_url = coalesce($10, fantasycast_url),
+           scoreboard_url  = coalesce($11, scoreboard_url),
+           last_seen_at    = now()
+     where season = $1
+       and league_id::text = $2::text
+       and team_id::int    = $3::int
+     returning 1;
+  `;
+  const upd = await pool.query(updSql, [
+    Number(season), String(leagueId), Number(teamId),
+    leagueName, leagueSize, teamName, teamLogo,
+    entry_url, league_url, fantasycast_url, scoreboard_url
+  ]);
+
+  if (upd.rowCount > 0) {
+    return { inserted: 0, updated: 1, skipped: false };
+  }
+
+  // 2) If no row updated, INSERT a new one
+  const insSql = `
     insert into ff_sport_ffl
       (char_code, season, num_code, platform, league_id, team_id,
        league_name, league_size, team_name, team_logo_url,
@@ -160,20 +186,7 @@ async function upsertFfl(pool, item) {
        $8, $9, $10, $11,
        null, null, null,
        now(), now(), 'public', 'active', $12)
-    on conflict (season, league_id, team_id)
-    do update set
-      league_name     = excluded.league_name,
-      league_size     = excluded.league_size,
-      team_name       = excluded.team_name,
-      team_logo_url   = excluded.team_logo_url,
-      entry_url       = excluded.entry_url,
-      league_url      = excluded.league_url,
-      fantasycast_url = excluded.fantasycast_url,
-      scoreboard_url  = excluded.scoreboard_url,
-      last_seen_at    = now()
-    returning (xmax = 0) as inserted;
   `;
-
   const payload = {
     season,
     leagueId,
@@ -184,18 +197,16 @@ async function upsertFfl(pool, item) {
     teamLogo,
     urls
   };
-
-  const { rows } = await pool.query(sql, [
-    season, String(leagueId), Number(teamId),
+  await pool.query(insSql, [
+    Number(season), String(leagueId), Number(teamId),
     leagueName, leagueSize, teamName, teamLogo,
     entry_url, league_url, fantasycast_url, scoreboard_url,
     payload
   ]);
 
-  const inserted = rows?.[0]?.inserted ? 1 : 0;
-  const updated  = inserted ? 0 : 1;
-  return { inserted, updated, skipped: false };
+  return { inserted: 1, updated: 0, skipped: false };
 }
+
 
 // ---------- ingest handler ----------
 
