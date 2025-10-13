@@ -111,7 +111,6 @@ app.use('/espnconnect', express.static(ESPN_CONNECT_DIR, {
 }));
 
 // --- ESPN Connect API (fan + ingest) ---
-const espnConnectRouter = require('./espnconnect'); // adjust path if you put it under routes/
 app.use('/api/espnconnect', espnConnectRouter);
 // expose the Fan endpoint under the platforms namespace too, so FE can use one base:
 app.use('/api/platforms/espn', espnConnectRouter);
