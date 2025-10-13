@@ -3,10 +3,6 @@ const express = require('express');
 const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
 const { fetchJsonWithCred } = require('./_fetch');
-// routes/espn/roster.js (top of handler)
-const season = Number(req.query.season);
-const leagueId = String(req.query.leagueId || '');
-if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
 const NFL_MAX_WEEK = 18;
 const CURRENT_WEEK = 6;
@@ -255,6 +251,8 @@ router.get('/roster', async (req, res) => {
     const leagueId = String(req.query.leagueId || '');
     const teamId   = req.query.teamId != null ? Number(req.query.teamId) : null;
     const week     = safeWeek(req);
+
+if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
     const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
 
