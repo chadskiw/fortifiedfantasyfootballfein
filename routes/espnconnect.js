@@ -1,25 +1,17 @@
-// routes/espnconnect.js
+// routes/espnconnect.js  — CommonJS, no ESM
 const express = require('express');
-const crypto  = require('crypto');
+const crypto = require('crypto');
 
 const router = express.Router();
 
-// pull pool off the app (server.js does app.set('pg', pool))
-function getPool(req) {
-  return req.app.get('pg');
-}
-
-// ESPN read helper (uses all known cred candidates)
-const { fetchFromEspnWithCandidates } = require('./espn/espnCred');
-
-// ---------- helpers ----------
-const sha256 = (s='') => crypto.createHash('sha256').update(String(s)).digest('hex');
+function sha256(s) { return crypto.createHash('sha256').update(String(s || '')).digest('hex'); }
+function nowIso()  { return new Date().toISOString(); }
 
 function normalizeSwid(raw) {
   try {
     let v = decodeURIComponent(String(raw || '')).trim();
     if (!v) return '';
-    v = v.replace(/^%7B/i,'{').replace(/%7D$/i,'}');
+    v = v.replace(/^%7B/i, '{').replace(/%7D$/i, '}');
     if (!v.startsWith('{')) v = `{${v.replace(/^\{?/, '').replace(/\}?$/, '')}}`;
     return v.toUpperCase();
   } catch {
@@ -27,290 +19,300 @@ function normalizeSwid(raw) {
   }
 }
 
-function pickCreds(req, body = {}) {
-  // precedence: headers -> body -> cookies -> query
+function readCreds(req) {
   const h = req.headers || {};
-  const q = req.query || {};
   const c = req.cookies || {};
-
-  const swid = normalizeSwid(
-    h['x-espn-swid'] || body.swid || c.SWID || q.SWID || q.swid || ''
-  );
-  const s2 = (h['x-espn-s2'] || body.s2 || c.espn_s2 || q.s2 || q.espn_s2 || '').trim();
-
+  const swid = normalizeSwid(h['x-espn-swid'] || c.SWID || c.swid || c.ff_espn_swid || req.query?.SWID || req.query?.swid);
+  const s2   = h['x-espn-s2']   || c.espn_s2   || c.ESPN_S2      || c.ff_espn_s2    || req.query?.s2   || req.query?.espn_s2;
   return { swid, s2 };
 }
 
-// write cookies for the UI (same-domain)
-function setCredCookies(res, { swid, s2 }) {
-  const opts = { httpOnly: false, sameSite: 'Lax', secure: true, domain: 'fortifiedfantasy.com', path: '/', maxAge: 31536000 };
-  if (swid) res.cookie('SWID', swid, opts);
-  if (s2)   res.cookie('espn_s2', s2, opts);
+async function fetchFan({ swid, s2 }) {
+  if (!swid || !s2) throw Object.assign(new Error('missing_swid_or_s2'), { status: 400 });
+  const url = `https://fan.api.espn.com/apis/v2/fans/${encodeURIComponent(swid)}`;
+  const r = await fetch(url, {
+    headers: {
+      accept: 'application/json, text/plain, */*',
+      cookie: `SWID=${swid}; espn_s2=${s2}`,
+      referer: 'https://www.espn.com/'
+    }
+  });
+  const txt = await r.text();
+  if (!r.ok) throw Object.assign(new Error(`fan_upstream_${r.status}`), { status: r.status, body: txt });
+  try {
+    return JSON.parse(txt);
+  } catch {
+    throw Object.assign(new Error('fan_parse_error'), { status: 502, body: txt.slice(0, 200) });
+  }
 }
 
-// ---------- DB upserts (fixed: do not rewrite ref) ----------
+function buildFanMapForSeason(fanJson, season) {
+  const out = new Map(); // leagueId -> entry object we care about
+  const prefs = Array.isArray(fanJson?.preferences) ? fanJson.preferences : [];
+  for (const p of prefs) {
+    if (String(p?.type?.code || '').toLowerCase() !== 'fantasy') continue;
+    const entry = p?.metaData?.entry;
+    if (!entry) continue;
+    const seasonId = Number(entry.seasonId);
+    if (seasonId !== Number(season)) continue;
+
+    const group = Array.isArray(entry.groups) && entry.groups[0] ? entry.groups[0] : null;
+    const leagueId = group?.groupId ? String(group.groupId) : null;
+    if (!leagueId) continue;
+
+    const gameAbbrev = (entry.abbrev || entry.entryMetadata?.abbrev || '').toString().toUpperCase(); // e.g., FFL
+    const teamId     = Number(entry.entryId);
+    const teamName   = entry?.entryMetadata?.teamName || `Team ${teamId}`;
+    const leagueName = group?.groupName || entry?.name || '';
+    const leagueSize = Number(group?.groupSize || 0);
+
+    const entryURL        = entry.entryURL || entry.entryUrl || '';
+    const leagueURL       = group?.href || '';
+    const fantasyCastHref = group?.fantasyCastHref || '';
+    const scoreboardFeed  = entry.scoreboardFeedURL || entry.scoreboardFeedUrl || '';
+
+    const logo = entry.logoUrl || entry.logoURL || '';
+    out.set(leagueId, {
+      season: Number(season),
+      leagueId,
+      teamId,
+      game: gameAbbrev.toLowerCase(), // 'ffl' expected
+      leagueName,
+      leagueSize,
+      teamName,
+      teamLogo: logo,
+      urls: {
+        entryURL,
+        leagueURL,
+        fantasyCastHref,
+        scoreboardFeed
+      }
+    });
+  }
+  return out;
+}
+
+// ---------- DB helpers ----------
+
 async function upsertCred(pool, { swid, s2, memberId = null, ref = 'espnconnect' }) {
   if (!swid || !s2) return { inserted: 0, updated: 0 };
 
   const swidHash = sha256(swid);
   const s2Hash   = sha256(s2);
 
-  // Is there already a row for this SWID?
+  // Does a cred for this SWID already exist?
   const { rows } = await pool.query(
     'select cred_id, ref from ff_espn_cred where swid_hash = $1 limit 1',
     [swidHash]
   );
 
   if (rows.length) {
-    // UPDATE: do not touch ref; only backfill it if it’s NULL
+    // Update S2 and last_seen; DO NOT overwrite ref (write-once); only backfill if NULL
     await pool.query(
       `update ff_espn_cred
           set espn_s2   = $1,
               s2_hash   = $2,
               last_seen = now(),
-              ref       = coalesce(ref, $3)  -- write-once: fill only if NULL
+              ref       = coalesce(ref, $3)
         where swid_hash = $4`,
       [s2, s2Hash, ref, swidHash]
     );
     return { inserted: 0, updated: 1 };
   }
 
-  // INSERT: include ref
+  // Insert new cred with ref
   await pool.query(
     `insert into ff_espn_cred
       (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-     values ($1, $2, $3, $4, $5, now(), now(), $6)`,
+     values ($1,  $2,     $3,       $4,     $5,        now(),     now(),   $6)`,
     [swid, s2, swidHash, s2Hash, memberId, ref]
   );
   return { inserted: 1, updated: 0 };
 }
 
+async function upsertFfl(pool, item) {
+  // item: { season, leagueId, teamId, leagueName, leagueSize, teamName, teamLogo, urls:{...} }
+  const {
+    season, leagueId, teamId,
+    leagueName = null, leagueSize = null,
+    teamName = null, teamLogo = null,
+    urls = {}
+  } = item;
 
-function buildLeagueUrls({ season, leagueId, teamId }) {
-  const id = Number(leagueId);
-  const team = Number(teamId);
-  return {
-    entry_url:       `https://fantasy.espn.com/football/team?leagueId=${id}&teamId=${team}&seasonId=${season}`,
-    league_url:      `https://fantasy.espn.com/football/league?leagueId=${id}&seasonId=${season}`,
-    fantasycast_url: `https://fantasy.espn.com/football/fantasycast?leagueId=${id}&teamId=${team}`,
-    scoreboard_url:  `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${id}?view=mScoreboard&filter=%7B%22schedule%22%3A%7B%22filterTeamIds%22%3A%7B%22value%22%3A%5B${team}%5D%7D%2C%22filterCurrentMatchupPeriod%22%3A%7B%22value%22%3Atrue%7D%7D%7D&peek=true`,
-    signup_url:      'https://fantasy.espn.com/football/welcome'
-  };
-}
+  if (!season || !leagueId || !teamId) return { inserted: 0, updated: 0, skipped: true };
 
-async function fetchLeagueMeta(req, { season, leagueId }) {
-  // Use the Kona passthrough with cred candidates so private leagues work.
-  const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`);
-  upstream.searchParams.set('view', 'mSettings');
-  const { status, body } = await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId });
-  if (status < 200 || status >= 300) throw new Error('espn_league_meta_' + status);
-  return JSON.parse(body || '{}');
-}
+  const entry_url       = urls.entryURL || null;
+  const league_url      = urls.leagueURL || null;
+  const fantasycast_url = urls.fantasyCastHref || null;
+  const scoreboard_url  = urls.scoreboardFeed  || null;
 
-async function fetchTeams(req, { season, leagueId }) {
-  const upstream = new URL(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`);
-  upstream.searchParams.set('view', 'mTeam');
-  const { status, body } = await fetchFromEspnWithCandidates(upstream.toString(), req, { leagueId });
-  if (status < 200 || status >= 300) throw new Error('espn_teams_' + status);
-  return JSON.parse(body || '{}');
-}
-
-async function upsertFfl(pool, payload) {
-  // Existence check (don’t assume constraints)
-  const { season, leagueId, teamId } = payload;
-  const exists = await pool.query(
-    'select 1 from ff_sport_ffl where season = $1 and league_id = $2 and team_id = $3 limit 1',
-    [season, Number(leagueId), Number(teamId)]
-  );
-
-  const srcJson  = JSON.stringify(payload.source_payload || {});
-  const srcHash  = sha256(srcJson);
-
-  if (exists.rowCount) {
-    const q = `
-      update ff_sport_ffl
-         set league_name = $1,
-             league_size = $2,
-             team_name   = $3,
-             team_logo_url = $4,
-             entry_url     = $5,
-             league_url    = $6,
-             fantasycast_url = $7,
-             scoreboard_url  = $8,
-             signup_url      = $9,
-             in_season       = $10,
-             is_live         = $11,
-             current_scoring_period = $12,
-             source_payload  = $13,
-             source_hash     = $14,
-             last_seen_at    = now(),
-             updated_at      = now()
-       where season=$15 and league_id=$16 and team_id=$17`;
-    const a = [
-      payload.league_name,
-      payload.league_size,
-      payload.team_name,
-      payload.team_logo_url,
-      payload.entry_url,
-      payload.league_url,
-      payload.fantasycast_url,
-      payload.scoreboard_url,
-      payload.signup_url,
-      payload.in_season,
-      payload.is_live,
-      payload.current_scoring_period,
-      srcJson,
-      srcHash,
-      season, Number(leagueId), Number(teamId),
-    ];
-    await pool.query(q, a);
-    return { inserted: 0, updated: 1 };
-  }
-
-  const q = `
+  // We only set a minimal, safe subset of columns you showed in your sample row.
+  const sql = `
     insert into ff_sport_ffl
-      (char_code, season, league_id, team_id,
+      (char_code, season, num_code, platform, league_id, team_id,
        league_name, league_size, team_name, team_logo_url,
-       entry_url, league_url, fantasycast_url, scoreboard_url, signup_url,
+       entry_url, league_url, fantasycast_url, scoreboard_url,
        in_season, is_live, current_scoring_period,
-       source_payload, source_hash,
-       first_seen_at, last_seen_at, status, visibility, updated_at, last_synced_at)
+       first_seen_at, last_seen_at, visibility, status, source_payload)
     values
-      ('ffl', $1, $2, $3,
+      ('ffl', $1, 1, '018', $2, $3,
        $4, $5, $6, $7,
-       $8, $9, $10, $11, $12,
-       $13, $14, $15,
-       $16, $17,
-       now(), now(), 'active', 'public', now(), now())`;
-  const a = [
-    season, Number(leagueId), Number(teamId),
-    payload.league_name,
-    payload.league_size,
-    payload.team_name,
-    payload.team_logo_url,
-    payload.entry_url,
-    payload.league_url,
-    payload.fantasycast_url,
-    payload.scoreboard_url,
-    payload.signup_url,
-    payload.in_season,
-    payload.is_live,
-    payload.current_scoring_period,
-    srcJson,
-    srcHash,
-  ];
-  await pool.query(q, a);
-  return { inserted: 1, updated: 0 };
+       $8, $9, $10, $11,
+       null, null, null,
+       now(), now(), 'public', 'active', $12)
+    on conflict (season, league_id, team_id)
+    do update set
+      league_name     = excluded.league_name,
+      league_size     = excluded.league_size,
+      team_name       = excluded.team_name,
+      team_logo_url   = excluded.team_logo_url,
+      entry_url       = excluded.entry_url,
+      league_url      = excluded.league_url,
+      fantasycast_url = excluded.fantasycast_url,
+      scoreboard_url  = excluded.scoreboard_url,
+      last_seen_at    = now()
+    returning (xmax = 0) as inserted;
+  `;
+
+  const payload = {
+    season,
+    leagueId,
+    teamId,
+    leagueName,
+    leagueSize,
+    teamName,
+    teamLogo,
+    urls
+  };
+
+  const { rows } = await pool.query(sql, [
+    season, String(leagueId), Number(teamId),
+    leagueName, leagueSize, teamName, teamLogo,
+    entry_url, league_url, fantasycast_url, scoreboard_url,
+    payload
+  ]);
+
+  const inserted = rows?.[0]?.inserted ? 1 : 0;
+  const updated  = inserted ? 0 : 1;
+  return { inserted, updated, skipped: false };
 }
 
-// ---------- main handler ----------
+// ---------- ingest handler ----------
+
 async function ingestHandler(req, res) {
+  const pool = req.app.get('pg');
+  res.set('Cache-Control', 'no-store');
+
   try {
-    const pool = getPool(req);
-    const body = req.body || {};
-    const season = Number(body.season || req.query.season || new Date().getUTCFullYear());
+    const season = Number(req.body?.season || req.query?.season || new Date().getUTCFullYear());
+    const { swid, s2 } = readCreds(req);
 
-    // creds
-    const { swid, s2 } = pickCreds(req, body);
-    if (!swid || !s2) {
-      return res.status(400).json({ ok: false, error: 'missing_swid_or_s2' });
+    // Upsert cred first (write-once ref preserved)
+    const credSummary = await upsertCred(pool, { swid, s2, memberId: null, ref: 'espnconnect' });
+
+    // Figure the selected leagues
+    let items = Array.isArray(req.body?.items) ? req.body.items.slice() : [];
+    const leagueIds = (Array.isArray(req.body?.leagues) ? req.body.leagues :
+                      Array.isArray(req.body?.leagueIds) ? req.body.leagueIds : [])
+                      .map(String);
+
+    // If only IDs were sent, enrich from the Fan API
+    let fanMap = null;
+    if (!items.length && leagueIds.length) {
+      const fan = await fetchFan({ swid, s2 });
+      fanMap = buildFanMapForSeason(fan, season);
+      for (const id of leagueIds) {
+        const e = fanMap.get(String(id));
+        if (e) items.push(e);
+      }
     }
-    setCredCookies(res, { swid, s2 });
 
-    // record creds
-    const credResult = await upsertCred(pool, { swid, s2, ref: 'espnconnect' });
-
-    // items to ingest
-    let items = Array.isArray(body.items) ? body.items : [];
-    const fromLeagues = Array.isArray(body.leagueIds) ? body.leagueIds : (Array.isArray(body.leagues) ? body.leagues : []);
-    if (!items.length && fromLeagues.length) {
-      // fall back to just leagueIds (assume teamId unknown)
-      items = fromLeagues.map(id => ({ season, leagueId: Number(id), teamId: null, game: 'ffl' }));
+    // If items were sent but missing teamId / names, also enrich from Fan API
+    if (items.length && items.some(i => !i.teamId)) {
+      if (!fanMap) {
+        const fan = await fetchFan({ swid, s2 });
+        fanMap = buildFanMapForSeason(fan, season);
+      }
+      items = items.map(i => {
+        if (i.teamId) return i;
+        const fallback = fanMap.get(String(i.leagueId)) || {};
+        return { ...fallback, ...i, teamId: i.teamId || fallback.teamId };
+      });
     }
+
+    // Only handle FFL for now (per your note); ignore others safely
+    items = items.filter(i => String(i.game || 'ffl').toLowerCase() === 'ffl');
 
     const summary = {
       leaguesAttempted: items.length,
       leaguesSucceeded: 0,
       teamsInserted: 0,
       teamsUpdated: 0,
-      credInserted: credResult.inserted,
-      credUpdated: credResult.updated,
+      credInserted: credSummary.inserted,
+      credUpdated:  credSummary.updated
     };
 
     for (const it of items) {
-      try {
-        if (String(it.game || 'ffl').toLowerCase() !== 'ffl') continue;
+      const r = await upsertFfl(pool, {
+        season,
+        leagueId: it.leagueId,
+        teamId:   it.teamId,
+        leagueName: it.leagueName || it.groupName,
+        leagueSize: it.leagueSize || it.groupSize,
+        teamName:   it.teamName,
+        teamLogo:   it.teamLogo,
+        urls: it.urls || {
+          entryURL:        it.entryURL,
+          leagueURL:       it.leagueURL || it.href,
+          fantasyCastHref: it.fantasyCastHref,
+          scoreboardFeed:  it.scoreboardFeedURL || it.scoreboardFeedUrl
+        }
+      });
 
-        // fetch metadata needed for ff_sport_ffl
-        const meta   = await fetchLeagueMeta(req, { season, leagueId: it.leagueId });
-        const teamsJ = await fetchTeams(req,       { season, leagueId: it.leagueId });
-
-        const settings = meta?.settings || {};
-        const teamsArr = teamsJ?.teams || [];
-        const team     = teamsArr.find(t => (t.id ?? t.teamId) === Number(it.teamId))
-                      || teamsArr.find(t => (t.primaryOwner && String(t.primaryOwner).includes('SWID') && it.teamId == null))
-                      || null;
-
-        const league_name = settings?.name || meta?.name || '';
-        const league_size = Number(settings?.size || teamsArr.length || 0);
-        const team_name   = team?.location && team?.nickname ? `${team.location} ${team.nickname}` :
-                            team?.teamName || team?.name || '';
-        const team_logo   = team?.logo || team?.logos?.[0]?.url || null;
-
-        const in_season = !!(meta?.status?.isActive ?? true);
-        const is_live   = !!(meta?.status?.isLive ?? false);
-        const current_scoring_period = Number(meta?.status?.currentScoringPeriod?.id || meta?.status?.currentScoringPeriodId || 0);
-
-        const urls = buildLeagueUrls({ season, leagueId: it.leagueId, teamId: it.teamId || (team?.id ?? team?.teamId ?? 0) });
-
-        const rowPayload = {
-          season,
-          leagueId: it.leagueId,
-          teamId:   it.teamId || (team?.id ?? team?.teamId ?? 0),
-          league_name,
-          league_size,
-          team_name,
-          team_logo_url: team_logo,
-          in_season,
-          is_live,
-          current_scoring_period,
-          ...urls,
-          source_payload: {
-            league_settings: settings,
-            team_raw: team || null,
-          }
-        };
-
-        const r = await upsertFfl(pool, rowPayload);
-
+      if (!r.skipped) {
         summary.leaguesSucceeded += 1;
-        summary.teamsInserted     += r.inserted;
-        summary.teamsUpdated      += r.updated;
-      } catch (e) {
-        // continue with others, but note failure in server logs
-        console.error('[espnconnect ingest league failed]', it, e);
+        summary.teamsInserted += r.inserted;
+        summary.teamsUpdated  += r.updated;
       }
     }
 
-    // tolerate empty/short bodies (your FE now reads the JSON safely)
-    res
-      .status(200)
-      .set('Cache-Control','no-store')
-      .json({ ok: true, season, summary });
-
-  } catch (e) {
-    console.error('[espnconnect ingest fatal]', e);
-    res.status(500).json({ ok: false, error: 'server_error' });
+    return res.json({ ok: true, ts: nowIso(), season, summary });
+  } catch (err) {
+    console.error('[espnconnect ingest fatal]', err);
+    const status = Number(err.status || 500);
+    return res.status(status).json({ ok: false, error: err.message || 'server_error' });
   }
 }
 
 // ---------- routes ----------
-// both bases are mounted in server.js:
-//   app.use('/api/espnconnect', router)
-//   app.use('/api/platforms/espn', router)
-router.post('/', ingestHandler);                 // /api/espnconnect
-router.post('/ingest', ingestHandler);           // /api/espnconnect/ingest
-router.post('/espnconnect', ingestHandler);      // /api/platforms/espn/espnconnect
-router.post('/espnconnect/ingest', ingestHandler);
+
+// POST aliases
+router.post('/', ingestHandler);
+router.post('/ingest', ingestHandler);
+
+// Optional: Fan proxy here too (safe dup with server-level handler)
+router.get('/fan/me', async (req, res) => {
+  try {
+    const { swid, s2 } = readCreds(req);
+    const fan = await fetchFan({ swid, s2 });
+    res.set('Cache-Control', 'no-store');
+    res.json(fan);
+  } catch (e) {
+    const status = Number(e.status || 500);
+    res.status(status).json({ ok:false, error: e.message || 'fan_error' });
+  }
+});
+router.get('/fan/:id', async (req, res) => {
+  try {
+    const s2 = readCreds(req).s2;
+    const swid = normalizeSwid(req.params.id);
+    const fan = await fetchFan({ swid, s2 });
+    res.set('Cache-Control', 'no-store');
+    res.json(fan);
+  } catch (e) {
+    const status = Number(e.status || 500);
+    res.status(status).json({ ok:false, error: e.message || 'fan_error' });
+  }
+});
 
 module.exports = router;

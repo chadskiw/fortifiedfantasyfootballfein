@@ -328,11 +328,16 @@ app.get('/', (req, res) => {
   const qs = new URLSearchParams({ season }).toString();
   res.redirect(302, `/fein/?${qs}`);
 });
-app.get('/fein', (req, res) => {
-  const season = (req.query.season && Number(req.query.season)) || new Date().toUTCFullYear();
-  const qs = new URLSearchParams({ season }).toString();
-  res.redirect(302, `/fein/?${qs}`);
+app.get('/fein', (req, res, next) => {
+  // Only redirect if season is missing
+  if (!('season' in (req.query || {}))) {
+    const season = new Date().getUTCFullYear();
+    const qs = new URLSearchParams({ season }).toString();
+    return res.redirect(302, `/fein/?${qs}`);
+  }
+  return next(); // let the static / SPA fallback handle it
 });
+
 
 // Serve built FEIN assets
 const FEIN_DIR = path.join(__dirname, 'public', 'fein');
