@@ -314,6 +314,18 @@ app.use((req,res,next)=>{
     "frame-ancestors 'self'; base-uri 'self'");
   next();
 });
+// /api/coinsignal/candles?productId=BTC-USD&granularity=3600
+app.get('/api/coinsignal/candles', async (req, res) => {
+  const { productId='BTC-USD', granularity='3600' } = req.query;
+  // Coinbase Exchange format: [ time, low, high, open, close, volume ] (newest first)
+  const url = `https://api.exchange.coinbase.com/products/${productId}/candles?granularity=${granularity}`;
+  const r = await fetch(url, { headers: { 'User-Agent':'ff', 'CB-ACCESS-KEY':'' }});
+  const rows = await r.json();
+  const asc = rows.slice().reverse(); // oldest→newest
+  const closes = asc.map(row => row[4]);
+  const price  = closes.at(-1);
+  res.json({ closes, price });
+});
 
 // ===== FEIN roster JSON alias (TOP-LEVEL, before FEIN static) =====
 app.get(['/fein/roster', '/api/roster'], (req, res) => {
