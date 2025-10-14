@@ -315,17 +315,95 @@ app.use((req,res,next)=>{
   next();
 });
 // /api/coinsignal/candles?productId=BTC-USD&granularity=3600
+// put near top of server.js (once)
+app.set('etag', false); // globally disable ETag; or do per-route below
+
+const ALLOWED = new Set([60, 300, 900, 3600, 21600, 86400]); // 1m,5m,15m,1h,6h,1d
+
+// quick in-memory cache to avoid rate-limit thrash
+const _cache = new Map(); // key: `${productId}|${granularity}` -> {ts, data}
+function getCache(key, ttlMs){ const v = _cache.get(key); return (v && (Date.now()-v.ts < ttlMs)) ? v.data : null; }
+function setCache(key, data){ _cache.set(key, { ts: Date.now(), data }); }
+
+// helper: downsample an array of closes by a factor (use the last of each block)
+function downsampleCloses(closes, factor){
+  if (factor <= 1) return closes;
+  const out = [];
+  for (let i = factor-1; i < closes.length; i += factor){
+    out.push(closes[i]);
+  }
+  return out.length ? out : [closes.at(-1)];
+}
+
 app.get('/api/coinsignal/candles', async (req, res) => {
-  const { productId='BTC-USD', granularity='3600' } = req.query;
-  // Coinbase Exchange format: [ time, low, high, open, close, volume ] (newest first)
-  const url = `https://api.exchange.coinbase.com/products/${productId}/candles?granularity=${granularity}`;
-  const r = await fetch(url, { headers: { 'User-Agent':'ff', 'CB-ACCESS-KEY':'' }});
-  const rows = await r.json();
-  const asc = rows.slice().reverse(); // oldest→newest
-  const closes = asc.map(row => row[4]);
-  const price  = closes.at(-1);
-  res.json({ closes, price });
+  try {
+    res.set('Cache-Control', 'no-store, no-transform'); // prevent 304 to client
+
+    const productId  = String(req.query.productId || 'BTC-USD').toUpperCase();
+    let granularity  = Number(req.query.granularity || 3600);
+
+    // Map unsupported granularities to a supported upstream + a downsample factor
+    let upstreamGran = granularity;
+    let factor = 1;
+    if (!ALLOWED.has(granularity)) {
+      if (granularity === 14400) {       // 4h -> fetch 1h, factor 4
+        upstreamGran = 3600; factor = 4;
+      } else if (granularity === 604800) { // 1w -> fetch 1d, factor 7
+        upstreamGran = 86400; factor = 7;
+      } else {
+        // default fallback: use 1h
+        upstreamGran = 3600;
+        factor = Math.max(1, Math.round(granularity / 3600));
+      }
+    }
+
+    // small TTL based on upstream granularity (tune as you like)
+    const ttlMs = upstreamGran <= 300 ? 10_000 : upstreamGran <= 3600 ? 30_000 : 60_000;
+    const cacheKey = `${productId}|${upstreamGran}`;
+    const cached = getCache(cacheKey, ttlMs);
+    if (cached) {
+      const closes = factor > 1 ? downsampleCloses(cached.closes, factor) : cached.closes;
+      return res.json({ closes, price: closes.at(-1) });
+    }
+
+    const url = `https://api.exchange.coinbase.com/products/${encodeURIComponent(productId)}/candles?granularity=${upstreamGran}`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'ff-coinsignal/1.0' } });
+
+    // Parse safely (avoid crashing on non-JSON or HTML error pages)
+    const raw = await r.text();
+    let rows;
+    try { rows = JSON.parse(raw); }
+    catch {
+      throw new Error(`Upstream ${r.status} non-JSON: ${raw.slice(0,120)}`);
+    }
+
+    if (!r.ok) {
+      // Coinbase error shape: { message: "..." }
+      const msg = (rows && rows.message) ? rows.message : `status=${r.status}`;
+      throw new Error(`Coinbase error: ${msg}`);
+    }
+
+    if (!Array.isArray(rows)) {
+      // rows is probably {message: "..."} or something else
+      throw new Error(`Unexpected upstream shape: ${JSON.stringify(rows).slice(0,200)}`);
+    }
+
+    // Coinbase candles format: newest first [[time, low, high, open, close, volume], ...]
+    const asc = rows.slice().reverse();
+    let closes = asc.map(row => row[4]);
+    if (!closes.length) throw new Error('Empty candle set from upstream');
+
+    // Downsample if requested timeframe was unsupported
+    if (factor > 1) closes = downsampleCloses(closes, factor);
+
+    setCache(cacheKey, { closes });
+    res.json({ closes, price: closes.at(-1) });
+  } catch (err) {
+    console.error('[coinsignal] candles error:', err?.message || err);
+    res.status(502).json({ ok:false, error:String(err?.message || err) });
+  }
 });
+
 
 // ===== FEIN roster JSON alias (TOP-LEVEL, before FEIN static) =====
 app.get(['/fein/roster', '/api/roster'], (req, res) => {
