@@ -321,8 +321,6 @@ router.get('/signals', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-// db.any/db.many from pg-promise or similar:
-module.exports = (db) => {
   router.get('/api/coinsignal/latest', async (req, res) => {
     try {
       const timeframe = (req.query.timeframe || '1h').trim();
