@@ -9,6 +9,7 @@ const morgan        = require('morgan');
 const cookieParser  = require('cookie-parser');
 const path          = require('path');
 const espnConnectRouter = require('./routes/espnconnect');
+const coinsignalRouter = require('./routes/coinsignal');   // NEW
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -336,7 +337,6 @@ function downsampleCloses(closes, factor){
 }
 // server.js (add near the other routers, after `app.set('pg', pool)`)
 
-const coinsignalRouter = require('./routes/coinsignal');   // NEW
 app.use('/api/coinsignal', coinsignalRouter({ pool }));    // NEW
 
 
