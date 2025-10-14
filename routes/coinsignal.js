@@ -1,6 +1,6 @@
-// routes/coinsignal.js
+// routes/coinsignal.js — full working version
 const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args)); // safe for CJS
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 
 module.exports = function coinsignalRouter({ pool }) {
   const router = express.Router();
@@ -9,35 +9,35 @@ module.exports = function coinsignalRouter({ pool }) {
   const ALLOWED = new Set([60, 300, 900, 3600, 21600, 86400]);
   const _cache = new Map();
 
+  // ─── Helpers ─────────────────────────────────────────────
   function getCache(key, ttlMs) {
     const v = _cache.get(key);
     return v && (Date.now() - v.ts < ttlMs) ? v.data : null;
   }
   function setCache(key, data) { _cache.set(key, { ts: Date.now(), data }); }
 
-  function downsampleCloses(closes, factor) {
-    if (factor <= 1) return closes;
+  function downsample(arr, factor) {
+    if (factor <= 1) return arr;
     const out = [];
-    for (let i = factor - 1; i < closes.length; i += factor) out.push(closes[i]);
-    return out.length ? out : [closes.at(-1)];
+    for (let i = factor - 1; i < arr.length; i += factor) out.push(arr[i]);
+    return out.length ? out : [arr.at(-1)];
   }
 
   async function fetchCoinbaseCandles(productId, granularity) {
     const url = `https://api.exchange.coinbase.com/products/${encodeURIComponent(productId)}/candles?granularity=${granularity}`;
-    const r = await fetch(url, {
-      headers: { Accept: 'application/json', 'User-Agent': 'ff-coinsignal/1.0' }
-    });
+    const r = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'ff-coinsignal/1.0' } });
     const raw = await r.text();
     let rows;
     try { rows = JSON.parse(raw); } catch { throw new Error(`Bad JSON: ${raw.slice(0,100)}`); }
     if (!Array.isArray(rows)) throw new Error(`Unexpected shape: ${JSON.stringify(rows)}`);
     const asc = rows.slice().reverse().map(([t, low, high, open, close, vol]) => ({
-      ts: new Date(t * 1000).toISOString(), open, high, low, close, volume: vol
+      ts: new Date(t * 1000).toISOString(),
+      open, high, low, close, volume: vol
     }));
     return asc;
   }
 
-  async function upsertCandles(pool, { symbol, granularity, ascCandles }) {
+  async function upsertCandles({ symbol, granularity, ascCandles }) {
     if (!ascCandles?.length) return;
     const payload = JSON.stringify(
       ascCandles.map(c => ({
@@ -57,50 +57,176 @@ module.exports = function coinsignalRouter({ pool }) {
     `;
     await pool.query(sql, [payload]);
   }
-// every 30s per symbol
-const SYMBOLS = ['BTC-USD','ETH-USD','SOL-USD'];
-setInterval(async ()=> {
-  for (const sym of SYMBOLS) {
-    try {
-      const r = await fetch(`${HOST}/api/coinsignal/orderbook?productId=${encodeURIComponent(sym)}`);
-      const j = await r.json();
-      if (!j?.mid) continue;
-      // compute bid5/ask5/imb if not already returned (yours returns bands), then:
-      await pool.query(
-        `INSERT INTO cs_orderbook_band (symbol, ts, mid, bid_size_5bps, ask_size_5bps, imbalance)
-         VALUES ($1, now(), $2, $3, $4, $5) ON CONFLICT (symbol, ts) DO NOTHING`,
-        [sym, j.mid, j.bands.bidSize5bps, j.bands.askSize5bps, j.bands.imbalance]
+
+  // ─── Watchlist persistence ───────────────────────────────
+  async function ensureWatchlistTable() {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cs_watchlist (
+        symbol text PRIMARY KEY,
+        first_seen timestamptz NOT NULL DEFAULT now(),
+        last_seen  timestamptz NOT NULL DEFAULT now(),
+        expires_at timestamptz NOT NULL DEFAULT (now() + interval '30 days')
       );
-    } catch(e){ console.warn('[ob]', sym, e.message); }
+    `);
   }
-}, 30_000);
-const TIMEFRAMES = [{tf:'15m', gran:900}, {tf:'1h', gran:3600}, {tf:'4h', gran:14400}];
+  ensureWatchlistTable().catch(e => console.error('[watchlist/init]', e));
 
-// pseudo "analysis" function (replace with your real model)
-function getRecommendation({ ema, rsi, macd }) {
-  if (rsi < 30 && ema.e20 > ema.e50 && macd.hist > 0) return { rec: 'BUY', conf: 85, reason: 'bullish momentum' };
-  if (rsi > 70 && macd.hist < 0) return { rec: 'SELL', conf: 80, reason: 'overbought / weakening' };
-  return { rec: 'HOLD', conf: 60, reason: 'neutral' };
-}
+  async function registerSymbol(symbol, ttlMinutes = 30*24*60) {
+    await pool.query(`
+      INSERT INTO cs_watchlist(symbol, last_seen, expires_at)
+      VALUES ($1, now(), now() + ($2 || ' minutes')::interval)
+      ON CONFLICT (symbol) DO UPDATE
+        SET last_seen = EXCLUDED.last_seen,
+            expires_at = EXCLUDED.expires_at;
+    `, [symbol, String(ttlMinutes)]);
+  }
 
-async function analyzeAndRecord(pool) {
-  for (const sym of SYMBOLS) {
-    for (const { tf, gran } of TIMEFRAMES) {
-      try {
-        const ind = await (await fetch(`${HOST}/api/coinsignal/indicators?productId=${sym}&granularity=${gran}`)).json();
-        const { rec, conf, reason } = getRecommendation(ind);
-        await recordSignal(sym, tf, rec, ind.latest, reason, Date.now());
-      } catch (e) {
-        console.error('[analyze]', sym, tf, e.message);
-      }
+  const DEFAULTS = ['BTC-USD','ETH-USD','SOL-USD','ADA-USD','AVAX-USD','XRP-USD','LTC-USD','LINK-USD','DOGE-USD','ATOM-USD'];
+  async function symbolsToTrack(limit = 10) {
+    const { rows } = await pool.query(`
+      SELECT symbol
+      FROM cs_watchlist
+      WHERE expires_at > now()
+      ORDER BY last_seen DESC
+      LIMIT $1
+    `, [limit]);
+    const set = new Set(rows.map(r => r.symbol));
+    for (const d of DEFAULTS) { if (set.size >= limit) break; set.add(d); }
+    return Array.from(set).slice(0, limit);
+  }
+
+  router.post('/watch', async (req, res) => {
+    try {
+      const sym = String(req.body?.symbol || '').toUpperCase();
+      if (!/^[A-Z0-9\-]{3,15}$/.test(sym)) return res.status(400).json({ ok:false, error:'bad_symbol' });
+      await registerSymbol(sym);
+      res.json({ ok:true, symbol:sym });
+    } catch (e) {
+      console.error('[watch]', e);
+      res.status(500).json({ ok:false, error:'watch_failed' });
+    }
+  });
+  router.get('/watch', async (_req, res) => {
+    try { res.json({ ok:true, symbols: await symbolsToTrack(10) }); }
+    catch (e) { res.status(500).json({ ok:false, error:'watch_list_failed' }); }
+  });
+
+  // ─── Signal / TA helpers ─────────────────────────────────
+  function emaArr(a, p){ const k=2/(p+1); let e=a[0]; const out=[e]; for(let i=1;i<a.length;i++){ e=a[i]*k+e*(1-k); out.push(e);} return out; }
+  function rsiArr(a, n=14){
+    if (a.length<n+1) return Array(a.length).fill(50);
+    let g=0,l=0; for(let i=1;i<=n;i++){ const d=a[i]-a[i-1]; if(d>=0)g+=d; else l-=d; }
+    let AG=g/n, AL=l/n; const out=Array(a.length).fill(50);
+    for(let i=n;i<a.length;i++){ const d=a[i]-a[i-1]; const G=Math.max(0,d), L=Math.max(0,-d);
+      AG=(AG*(n-1)+G)/n; AL=(AL*(n-1)+L)/n; const rs=AL===0?100:AG/AL; out[i]=100-100/(1+rs); }
+    return out;
+  }
+  function macdArr(a, f=12, s=26, sig=9){
+    const F=emaArr(a,f), S=emaArr(a,s);
+    const M=F.map((v,i)=>v-(S[i]??v)); const SL=emaArr(M,sig); const H=M.map((v,i)=>v-(SL[i]??0));
+    return { macd:M, signal:SL, hist:H };
+  }
+
+  function modelRecommend(closes){
+    const e20=emaArr(closes,20), e50=emaArr(closes,50);
+    const rsi=rsiArr(closes,14).at(-1);
+    const macd=macdArr(closes); const hist=macd.hist.at(-1);
+    let rec='HOLD', conf=60, reason='neutral';
+    if (rsi<=30 && e20.at(-1)>e50.at(-1) && hist>0){ rec='BUY'; conf=75; reason='oversold + ema up + macd+'; }
+    else if (rsi>=70 && hist<0){ rec='SELL'; conf=75; reason='overbought + macd-'; }
+    return { rec, conf, reason };
+  }
+
+  async function insertSignal({ symbol, timeframe, rec, confidence, price, reason, activeSince }) {
+    await pool.query(`
+      INSERT INTO cs_signal (symbol, timeframe, ts, rec, confidence, price, reason, active_since)
+      VALUES ($1,$2,now(),$3,$4,$5,$6,$7)
+      ON CONFLICT (symbol, timeframe, ts) DO NOTHING;
+    `, [symbol, timeframe, rec, confidence, price, reason, new Date(activeSince).toISOString()]);
+  }
+
+  const lastRec = new Map();
+  async function recordSignalIfNeeded({ symbol, timeframe, closes }) {
+    if (!closes?.length) return;
+    const price = closes.at(-1);
+    const { rec, conf, reason } = modelRecommend(closes);
+    const key = `${symbol}|${timeframe}`;
+    const prev = lastRec.get(key) || {};
+    const elapsed = Date.now() - (prev.ts || 0);
+    const changed = !prev.rec || prev.rec !== rec;
+    const shouldSnapshot = elapsed > 10 * 60 * 1000;
+
+    if (changed || shouldSnapshot) {
+      await insertSignal({
+        symbol, timeframe, rec, confidence: conf, price, reason,
+        activeSince: changed ? Date.now() : (prev.activeSince || Date.now())
+      });
+      lastRec.set(key, { rec, ts: Date.now(), activeSince: changed ? Date.now() : (prev.activeSince || Date.now()) });
     }
   }
-}
 
-// run every 5 minutes
-setInterval(() => analyzeAndRecord(pool), 5 * 60 * 1000);
+  // ─── Orderbook helpers ───────────────────────────────────
+  async function insertOrderbookBand({ symbol, mid, bid5, ask5, imb }) {
+    await pool.query(`
+      INSERT INTO cs_orderbook_band (symbol, ts, mid, bid_size_5bps, ask_size_5bps, imbalance)
+      VALUES ($1, now(), $2, $3, $4, $5)
+      ON CONFLICT (symbol, ts) DO NOTHING;
+    `, [symbol, mid, bid5, ask5, imb]);
+  }
 
-  // ---------- routes ----------
+  async function fetchOrderbookBands(symbol) {
+    const url = `https://api.exchange.coinbase.com/products/${encodeURIComponent(symbol)}/book?level=2`;
+    const r = await fetch(url, { headers: { Accept:'application/json', 'User-Agent':'ff-coinsignal/1.0' }});
+    const ob = await r.json();
+    if (!Array.isArray(ob?.bids) || !Array.isArray(ob?.asks)) return null;
+    const top = 15;
+    const bids = ob.bids.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
+    const asks = ob.asks.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
+    const bestBid = bids[0]?.px, bestAsk = asks[0]?.px, mid = (bestBid + bestAsk) / 2;
+    const cum = arr => arr.reduce((a,x)=> (a.push({px:x.px, cum:(a.at(-1)?.cum||0)+x.sz}), a), []);
+    const bid5 = cum(bids).filter(x => (mid - x.px) / mid <= 0.0005).at(-1)?.cum || 0;
+    const ask5 = cum(asks).filter(x => (x.px - mid) / mid <= 0.0005).at(-1)?.cum || 0;
+    const imb  = (bid5 - ask5) / Math.max(1e-9, bid5 + ask5);
+    return { mid, bid5, ask5, imb };
+  }
+
+  // ─── Background workers ──────────────────────────────────
+  const TF = [{ name:'15m', gran:900 }, { name:'1h', gran:3600 }, { name:'4h', gran:14400 }];
+
+  // Every 30 s — orderbook bands
+  setInterval(async () => {
+    try {
+      const list = await symbolsToTrack(10);
+      for (const sym of list) {
+        try {
+          const bands = await fetchOrderbookBands(sym);
+          if (bands) await insertOrderbookBand({ symbol: sym, ...bands });
+        } catch (e) { console.warn('[ob]', sym, e.message); }
+      }
+    } catch (e) { console.error('[worker/ob]', e); }
+  }, 30_000);
+
+  // Every 5 m — analyze + record signals
+  setInterval(async () => {
+    try {
+      const list = await symbolsToTrack(10);
+      for (const sym of list) {
+        for (const { name, gran } of TF) {
+          try {
+            const upstreamGran = (gran === 14400 ? 3600 : gran);
+            const factor = (gran === 14400 ? 4 : 1);
+            const asc = await fetchCoinbaseCandles(sym, upstreamGran);
+            await upsertCandles({ symbol: sym, granularity: upstreamGran, ascCandles: asc });
+            let closes = asc.map(c => +c.close);
+            if (factor > 1) closes = downsample(closes, factor);
+            await recordSignalIfNeeded({ symbol: sym, timeframe: name, closes });
+          } catch (e) { console.error('[analyze]', sym, e.message); }
+        }
+      }
+    } catch (e) { console.error('[worker/signal]', e); }
+  }, 5 * 60 * 1000);
+
+  // ─── Routes ───────────────────────────────────────────────
   router.get('/candles', async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store');
@@ -120,11 +246,11 @@ setInterval(() => analyzeAndRecord(pool), 5 * 60 * 1000);
       if (!asc) {
         asc = await fetchCoinbaseCandles(productId, upstreamGran);
         setCache(key, asc);
-        await upsertCandles(pool, { symbol: productId, granularity: upstreamGran, ascCandles: asc });
+        await upsertCandles({ symbol: productId, granularity: upstreamGran, ascCandles: asc });
       }
 
       let closes = asc.map(c => +c.close);
-      if (factor > 1) closes = downsampleCloses(closes, factor);
+      if (factor > 1) closes = downsample(closes, factor);
       res.json({ closes, price: closes.at(-1) });
     } catch (err) {
       console.error('[coinsignal/candles]', err);
@@ -150,8 +276,6 @@ setInterval(() => analyzeAndRecord(pool), 5 * 60 * 1000);
     }
   });
 
-  // lightweight health route
   router.get('/ping', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
-
   return router;
 };
