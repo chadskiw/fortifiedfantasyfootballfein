@@ -9,7 +9,7 @@ const morgan        = require('morgan');
 const cookieParser  = require('cookie-parser');
 const path          = require('path');
 const espnConnectRouter = require('./routes/espnconnect');
-const coinsignalRouter = require('./routes/coinsignal');   // NEW
+const coinsignalRouter = require('./routes/coinsignal');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -337,56 +337,7 @@ function downsampleCloses(closes, factor){
 }
 // server.js (add near the other routers, after `app.set('pg', pool)`)
 
-app.use('/api/coinsignal', coinsignalRouter({ pool }));    // NEW
-
-
-    // small TTL based on upstream granularity (tune as you like)
-    const ttlMs = upstreamGran <= 300 ? 10_000 : upstreamGran <= 3600 ? 30_000 : 60_000;
-    const cacheKey = `${productId}|${upstreamGran}`;
-    const cached = getCache(cacheKey, ttlMs);
-    if (cached) {
-      const closes = factor > 1 ? downsampleCloses(cached.closes, factor) : cached.closes;
-      return res.json({ closes, price: closes.at(-1) });
-    }
-
-    const url = `https://api.exchange.coinbase.com/products/${encodeURIComponent(productId)}/candles?granularity=${upstreamGran}`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'ff-coinsignal/1.0' } });
-
-    // Parse safely (avoid crashing on non-JSON or HTML error pages)
-    const raw = await r.text();
-    let rows;
-    try { rows = JSON.parse(raw); }
-    catch {
-      throw new Error(`Upstream ${r.status} non-JSON: ${raw.slice(0,120)}`);
-    }
-
-    if (!r.ok) {
-      // Coinbase error shape: { message: "..." }
-      const msg = (rows && rows.message) ? rows.message : `status=${r.status}`;
-      throw new Error(`Coinbase error: ${msg}`);
-    }
-
-    if (!Array.isArray(rows)) {
-      // rows is probably {message: "..."} or something else
-      throw new Error(`Unexpected upstream shape: ${JSON.stringify(rows).slice(0,200)}`);
-    }
-
-    // Coinbase candles format: newest first [[time, low, high, open, close, volume], ...]
-    const asc = rows.slice().reverse();
-    let closes = asc.map(row => row[4]);
-    if (!closes.length) throw new Error('Empty candle set from upstream');
-
-    // Downsample if requested timeframe was unsupported
-    if (factor > 1) closes = downsampleCloses(closes, factor);
-
-    setCache(cacheKey, { closes });
-    res.json({ closes, price: closes.at(-1) });
-  } catch (err) {
-    console.error('[coinsignal] candles error:', err?.message || err);
-    res.status(502).json({ ok:false, error:String(err?.message || err) });
-  }
-});
-
+app.use('/api/coinsignal', coinsignalRouter({ pool }));
 
 // ===== FEIN roster JSON alias (TOP-LEVEL, before FEIN static) =====
 app.get(['/fein/roster', '/api/roster'], (req, res) => {
