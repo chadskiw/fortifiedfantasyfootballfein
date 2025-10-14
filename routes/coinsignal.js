@@ -321,7 +321,48 @@ router.get('/signals', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+// db.any/db.many from pg-promise or similar:
+module.exports = (db) => {
+  router.get('/api/coinsignal/latest', async (req, res) => {
+    try {
+      const timeframe = (req.query.timeframe || '1h').trim();
+      const symbols   = (req.query.symbols || '').trim();
 
+      let rows;
+      if (symbols) {
+        const list = symbols.split(',').map(s => s.trim()).filter(Boolean);
+        rows = await db.any(
+          `SELECT * FROM cs_signal_latest
+           WHERE timeframe = $1 AND symbol = ANY($2::text[])
+           ORDER BY symbol ASC`,
+          [timeframe, list]
+        );
+      } else {
+        rows = await db.any(
+          `SELECT * FROM cs_signal_latest
+           WHERE timeframe = $1
+           ORDER BY symbol ASC`,
+          [timeframe]
+        );
+      }
+
+      res.json({ ok:true, timeframe, rows });
+    } catch (e) {
+      console.error('[coinsignal/latest]', e);
+      res.status(500).json({ ok:false, error:'latest_failed' });
+    }
+  });
+
+  // (Optional) holdstats endpoint
+  router.get('/api/coinsignal/holdstats', async (req, res) => {
+    try {
+      const rows = await db.any(`SELECT * FROM cs_signal_holdstats`);
+      res.json({ ok:true, rows });
+    } catch (e) {
+      console.error('[coinsignal/holdstats]', e);
+      res.status(500).json({ ok:false, error:'holdstats_failed' });
+    }
+  });
   router.get('/ping', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
   return router;
 };
