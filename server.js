@@ -356,6 +356,44 @@ app.get('/api/coinsignal/candles', async (req, res) => {
         factor = Math.max(1, Math.round(granularity / 3600));
       }
     }
+// GET /api/coinsignal/indicators?productId=BTC-USD&granularity=3600
+// -> computes EMA/RSI/MACD/vol from candles server-side to keep the client thin
+app.get('/api/coinsignal/indicators', async (req, res) => {
+  const { productId='BTC-USD', granularity='3600' } = req.query;
+  const { closes, highs, lows, volumes } = await getCandles(productId, Number(granularity)); // your hardened call
+  const ema20  = ema(closes, 20);
+  const ema50  = ema(closes, 50);
+  const ema200 = ema(closes, 200);
+  const rsi14  = rsi(closes, 14);
+  const macd   = macdCalc(closes, 12, 26, 9); // { macd, signal, hist }
+  const volAvg = sma(volumes, 20);
+  res.json({
+    productId, granularity: Number(granularity),
+    latest: closes.at(-1),
+    ema: { e20: ema20.at(-1), e50: ema50.at(-1), e200: ema200.at(-1) },
+    rsi: rsi14.at(-1),
+    macd: { macd: macd.macd.at(-1), signal: macd.signal.at(-1), hist: macd.hist.at(-1) },
+    volume: { last: volumes.at(-1), avg20: volAvg.at(-1) }
+  });
+});
+
+// GET /api/coinsignal/orderbook?productId=BTC-USD
+// -> returns compact depth snapshot suitable for “entry validation”
+app.get('/api/coinsignal/orderbook', async (req, res) => {
+  const { productId='BTC-USD' } = req.query;
+  const ob = await getOrderBook(productId); // from Coinbase WS or REST
+  // Roll up top levels and compute liquidity bands
+  const top = 15;
+  const bids = ob.bids.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
+  const asks = ob.asks.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
+  const bestBid = bids[0]?.px, bestAsk = asks[0]?.px, mid = (bestBid+bestAsk)/2;
+  const cum = arr => arr.reduce((a,x) => (a.push({px:x.px, cum:(a.at(-1)?.cum||0)+x.sz}), a), []);
+  const cumBids = cum(bids), cumAsks = cum(asks);
+  const bidSize5bps = cumBids.filter(x => (mid - x.px) / mid <= 0.0005).at(-1)?.cum || 0;
+  const askSize5bps = cumAsks.filter(x => (x.px - mid) / mid <= 0.0005).at(-1)?.cum || 0;
+  const imbalance = (bidSize5bps - askSize5bps) / Math.max(1e-9, (bidSize5bps + askSize5bps));
+  res.json({ productId, bestBid, bestAsk, mid, bids, asks, bands: { bidSize5bps, askSize5bps, imbalance } });
+});
 
     // small TTL based on upstream granularity (tune as you like)
     const ttlMs = upstreamGran <= 300 ? 10_000 : upstreamGran <= 3600 ? 30_000 : 60_000;
