@@ -555,31 +555,83 @@ const readyForId = (handle, colorHex, email, phone) =>
 // Saves to /public/avatars/anon/<timestamp>_<rand>.<ext> (no re-encode)
 // Returns { ok, image_key, url }
 // ===================================================================
-router.post('/upsert', upload.single('avatar'), async (req, res) => {
+// JSON upsert (no file required)
+router.post('/upsert', async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok: false, error: 'no_file' });
+    const b = req.body || {};
 
-    const ext = (path.extname(req.file.originalname) || '').toLowerCase();
-    const validExts = new Set(['.png', '.jpg', '.jpeg', '.gif']);
-    if (!validExts.has(ext)) {
-      return res.status(400).json({ ok: false, error: 'bad_type' });
+    // normalize
+    const handle  = b.handle ? normHandle(b.handle) : null;
+    const hex     = normHex(b.color_hex);
+    const email   = b.email && isEmail(b.email) ? String(b.email).toLowerCase() : null;
+    const phone   = toE164(b.phone);
+    const emailV  = !!b.email_is_verified;
+    const phoneV  = !!b.phone_is_verified;
+    const image_key = b.image_key || (b.image_url ? stripCdn(b.image_url) : null);
+    const fb_groups = Array.isArray(b.fb_groups) ? b.fb_groups.map(String) : null;
+
+    // choose/ensure member_id
+    let member_id = b.member_id ? ensureMemberId(b.member_id) : null;
+    if (!member_id && readyForId(handle, hex, email, phone) && (emailV || phoneV)) {
+      member_id = ensureMemberId();
     }
 
-    const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
-    const rel = path.join('avatars', 'anon', filename);
-    const abs = path.join(__dirname, '..', 'public', rel);
+    // color collision avoidance
+    const pickedHex = await pickColorForHandleAvoidingCollisions(handle, hex);
+    const color_hex_db = pickedHex ? pickedHex.replace('#', '') : null;
 
-    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-    await fs.promises.writeFile(abs, req.file.buffer); // no sharp(), no webp
+    // preflight uniqueness
+    if (await emailTakenByOtherMember(email, member_id)) return res.status(409).json({ ok:false, error:'email_taken' });
+    if (await phoneTakenByOtherMember(phone, member_id)) return res.status(409).json({ ok:false, error:'phone_taken' });
 
-    const image_key = rel.replace(/\\/g, '/');
-    const url = `/${image_key}`;
-    return res.json({ ok: true, image_key, url });
-  } catch (err) {
-    console.error('[qh.upsert]', err);
-    res.status(500).json({ ok: false, error: 'upload_failed' });
+    let row;
+    if (member_id) {
+      const q = await pool.query(`
+        INSERT INTO ff_quickhitter
+          (member_id, handle, color_hex, image_key, email, phone,
+           email_is_verified, phone_is_verified, fb_groups, updated_at, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
+        ON CONFLICT (member_id) DO UPDATE SET
+          handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
+          color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
+          image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
+          email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
+          phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
+          email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
+          phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
+          fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
+          updated_at = NOW()
+        RETURNING *;
+      `, [member_id, handle, color_hex_db, image_key, email, phone, emailV, phoneV, fb_groups]);
+      row = q.rows[0];
+    } else {
+      // stage without member_id (key off handle); member_id will be minted on a later write
+      const q = await pool.query(`
+        INSERT INTO ff_quickhitter
+          (handle, color_hex, image_key, email, phone,
+           email_is_verified, phone_is_verified, fb_groups, updated_at, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+        ON CONFLICT (handle) DO UPDATE SET
+          color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
+          image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
+          email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
+          phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
+          email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
+          phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
+          fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
+          updated_at = NOW()
+        RETURNING *;
+      `, [handle, color_hex_db, image_key, email, phone, emailV, phoneV, fb_groups]);
+      row = q.rows[0];
+    }
+
+    return res.json({ ok:true, member: rowToMember(row) });
+  } catch (e) {
+    console.error('[qh.upsert]', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
