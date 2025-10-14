@@ -57,6 +57,48 @@ module.exports = function coinsignalRouter({ pool }) {
     `;
     await pool.query(sql, [payload]);
   }
+// every 30s per symbol
+const SYMBOLS = ['BTC-USD','ETH-USD','SOL-USD'];
+setInterval(async ()=> {
+  for (const sym of SYMBOLS) {
+    try {
+      const r = await fetch(`${HOST}/api/coinsignal/orderbook?productId=${encodeURIComponent(sym)}`);
+      const j = await r.json();
+      if (!j?.mid) continue;
+      // compute bid5/ask5/imb if not already returned (yours returns bands), then:
+      await pool.query(
+        `INSERT INTO cs_orderbook_band (symbol, ts, mid, bid_size_5bps, ask_size_5bps, imbalance)
+         VALUES ($1, now(), $2, $3, $4, $5) ON CONFLICT (symbol, ts) DO NOTHING`,
+        [sym, j.mid, j.bands.bidSize5bps, j.bands.askSize5bps, j.bands.imbalance]
+      );
+    } catch(e){ console.warn('[ob]', sym, e.message); }
+  }
+}, 30_000);
+const TIMEFRAMES = [{tf:'15m', gran:900}, {tf:'1h', gran:3600}, {tf:'4h', gran:14400}];
+
+// pseudo "analysis" function (replace with your real model)
+function getRecommendation({ ema, rsi, macd }) {
+  if (rsi < 30 && ema.e20 > ema.e50 && macd.hist > 0) return { rec: 'BUY', conf: 85, reason: 'bullish momentum' };
+  if (rsi > 70 && macd.hist < 0) return { rec: 'SELL', conf: 80, reason: 'overbought / weakening' };
+  return { rec: 'HOLD', conf: 60, reason: 'neutral' };
+}
+
+async function analyzeAndRecord(pool) {
+  for (const sym of SYMBOLS) {
+    for (const { tf, gran } of TIMEFRAMES) {
+      try {
+        const ind = await (await fetch(`${HOST}/api/coinsignal/indicators?productId=${sym}&granularity=${gran}`)).json();
+        const { rec, conf, reason } = getRecommendation(ind);
+        await recordSignal(sym, tf, rec, ind.latest, reason, Date.now());
+      } catch (e) {
+        console.error('[analyze]', sym, tf, e.message);
+      }
+    }
+  }
+}
+
+// run every 5 minutes
+setInterval(() => analyzeAndRecord(pool), 5 * 60 * 1000);
 
   // ---------- routes ----------
   router.get('/candles', async (req, res) => {
