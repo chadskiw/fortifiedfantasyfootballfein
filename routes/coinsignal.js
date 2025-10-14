@@ -275,6 +275,43 @@ module.exports = function coinsignalRouter({ pool }) {
       res.status(500).json({ ok:false, error:'history_failed' });
     }
   });
+router.get('/signals', async (req, res) => {
+  try {
+    const { symbol, timeframe = '1h', since = '7d' } = req.query;
+    if (!symbol) {
+      return res.status(400).json({ ok: false, error: 'missing_symbol' });
+    }
+
+    // Parse `since` like "30d" → SQL interval
+    const m = /^(\d+)\s*(m|h|d|w)?$/i.exec(since);
+    const num = m ? Number(m[1]) : 7;
+    const unit = (m ? m[2] : 'd')?.toLowerCase() || 'd';
+    const multiplier =
+      unit === 'm' ? 'minutes' :
+      unit === 'h' ? 'hours'   :
+      unit === 'w' ? 'weeks'   : 'days';
+
+    // Query signals within time range
+    const q = `
+      SELECT symbol, timeframe, ts, rec, confidence, price, reason, active_since
+      FROM cs_signal
+      WHERE symbol = $1
+        AND timeframe = $2
+        AND ts >= NOW() - INTERVAL '${num} ${multiplier}'
+      ORDER BY ts ASC;
+    `;
+    const { rows } = await pool.query(q, [symbol, timeframe]); // ✅ FIXED
+
+    if (!rows || rows.length === 0) {
+      return res.json({ ok: false, soft: true, error: 'not_found' });
+    }
+
+    return res.json({ ok: true, rows });
+  } catch (err) {
+    console.error('[coinsignal] /signals error', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
   router.get('/ping', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
   return router;
