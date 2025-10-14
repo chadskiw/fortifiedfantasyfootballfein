@@ -334,87 +334,11 @@ function downsampleCloses(closes, factor){
   }
   return out.length ? out : [closes.at(-1)];
 }
-app.get('/api/coinsignal/candles/history', async (req,res)=>{
-  const { symbol='BTC-USD', granularity=3600, since='7d' } = req.query;
-  const rows = await sql`
-    SELECT ts, open, high, low, close, volume
-    FROM cs_candle
-    WHERE symbol=${symbol} AND granularity=${+granularity}
-      AND ts >= now() - ${sql`interval ${since}`}
-    ORDER BY ts ASC`;
-  res.json({ symbol, granularity:+granularity, rows });
-});
+// server.js (add near the other routers, after `app.set('pg', pool)`)
 
-app.get('/api/coinsignal/signals', async (req,res)=>{
-  const { symbol='BTC-USD', timeframe='ensemble', since='7d' } = req.query;
-  const rows = await sql`
-    SELECT ts, rec, confidence, price, reason, active_since
-    FROM cs_signal
-    WHERE symbol=${symbol} AND timeframe=${timeframe}
-      AND ts >= now() - ${sql`interval ${since}`}
-    ORDER BY ts ASC`;
-  res.json({ symbol, timeframe, rows });
-});
+const coinsignalRouter = require('./routes/coinsignal');   // NEW
+app.use('/api/coinsignal', coinsignalRouter({ pool }));    // NEW
 
-app.get('/api/coinsignal/candles', async (req, res) => {
-  try {
-    res.set('Cache-Control', 'no-store, no-transform'); // prevent 304 to client
-
-    const productId  = String(req.query.productId || 'BTC-USD').toUpperCase();
-    let granularity  = Number(req.query.granularity || 3600);
-
-    // Map unsupported granularities to a supported upstream + a downsample factor
-    let upstreamGran = granularity;
-    let factor = 1;
-    if (!ALLOWED.has(granularity)) {
-      if (granularity === 14400) {       // 4h -> fetch 1h, factor 4
-        upstreamGran = 3600; factor = 4;
-      } else if (granularity === 604800) { // 1w -> fetch 1d, factor 7
-        upstreamGran = 86400; factor = 7;
-      } else {
-        // default fallback: use 1h
-        upstreamGran = 3600;
-        factor = Math.max(1, Math.round(granularity / 3600));
-      }
-    }
-// GET /api/coinsignal/indicators?productId=BTC-USD&granularity=3600
-// -> computes EMA/RSI/MACD/vol from candles server-side to keep the client thin
-app.get('/api/coinsignal/indicators', async (req, res) => {
-  const { productId='BTC-USD', granularity='3600' } = req.query;
-  const { closes, highs, lows, volumes } = await getCandles(productId, Number(granularity)); // your hardened call
-  const ema20  = ema(closes, 20);
-  const ema50  = ema(closes, 50);
-  const ema200 = ema(closes, 200);
-  const rsi14  = rsi(closes, 14);
-  const macd   = macdCalc(closes, 12, 26, 9); // { macd, signal, hist }
-  const volAvg = sma(volumes, 20);
-  res.json({
-    productId, granularity: Number(granularity),
-    latest: closes.at(-1),
-    ema: { e20: ema20.at(-1), e50: ema50.at(-1), e200: ema200.at(-1) },
-    rsi: rsi14.at(-1),
-    macd: { macd: macd.macd.at(-1), signal: macd.signal.at(-1), hist: macd.hist.at(-1) },
-    volume: { last: volumes.at(-1), avg20: volAvg.at(-1) }
-  });
-});
-
-// GET /api/coinsignal/orderbook?productId=BTC-USD
-// -> returns compact depth snapshot suitable for “entry validation”
-app.get('/api/coinsignal/orderbook', async (req, res) => {
-  const { productId='BTC-USD' } = req.query;
-  const ob = await getOrderBook(productId); // from Coinbase WS or REST
-  // Roll up top levels and compute liquidity bands
-  const top = 15;
-  const bids = ob.bids.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
-  const asks = ob.asks.slice(0, top).map(([px, sz]) => ({ px:+px, sz:+sz }));
-  const bestBid = bids[0]?.px, bestAsk = asks[0]?.px, mid = (bestBid+bestAsk)/2;
-  const cum = arr => arr.reduce((a,x) => (a.push({px:x.px, cum:(a.at(-1)?.cum||0)+x.sz}), a), []);
-  const cumBids = cum(bids), cumAsks = cum(asks);
-  const bidSize5bps = cumBids.filter(x => (mid - x.px) / mid <= 0.0005).at(-1)?.cum || 0;
-  const askSize5bps = cumAsks.filter(x => (x.px - mid) / mid <= 0.0005).at(-1)?.cum || 0;
-  const imbalance = (bidSize5bps - askSize5bps) / Math.max(1e-9, (bidSize5bps + askSize5bps));
-  res.json({ productId, bestBid, bestAsk, mid, bids, asks, bands: { bidSize5bps, askSize5bps, imbalance } });
-});
 
     // small TTL based on upstream granularity (tune as you like)
     const ttlMs = upstreamGran <= 300 ? 10_000 : upstreamGran <= 3600 ? 30_000 : 60_000;
