@@ -334,6 +334,27 @@ function downsampleCloses(closes, factor){
   }
   return out.length ? out : [closes.at(-1)];
 }
+app.get('/api/coinsignal/candles/history', async (req,res)=>{
+  const { symbol='BTC-USD', granularity=3600, since='7d' } = req.query;
+  const rows = await sql`
+    SELECT ts, open, high, low, close, volume
+    FROM cs_candle
+    WHERE symbol=${symbol} AND granularity=${+granularity}
+      AND ts >= now() - ${sql`interval ${since}`}
+    ORDER BY ts ASC`;
+  res.json({ symbol, granularity:+granularity, rows });
+});
+
+app.get('/api/coinsignal/signals', async (req,res)=>{
+  const { symbol='BTC-USD', timeframe='ensemble', since='7d' } = req.query;
+  const rows = await sql`
+    SELECT ts, rec, confidence, price, reason, active_since
+    FROM cs_signal
+    WHERE symbol=${symbol} AND timeframe=${timeframe}
+      AND ts >= now() - ${sql`interval ${since}`}
+    ORDER BY ts ASC`;
+  res.json({ symbol, timeframe, rows });
+});
 
 app.get('/api/coinsignal/candles', async (req, res) => {
   try {
