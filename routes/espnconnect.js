@@ -141,8 +141,81 @@ async function upsertCred(pool, { swid, s2, memberId = null, ref = null }) {
   return { inserted:1, updated:0 };
 }
 
+// upsert into ff_sport_ffl keyed by (season, sport, league_id, team_id)
+async function upsertSport(pool, item) {
+  const {
+    sport,                  // <-- REQUIRED: e.g. 'ffl', 'nba', 'mlb'
+    season, leagueId, teamId,
+    leagueName = null, leagueSize = null,
+    teamName = null, teamLogo = null,
+    urls = {}               // { entry, league, fantasycast, scoreboard, signup }
+  } = item;
 
-async function upsertFfl(pool, item) {
+  if (!sport || !season || !leagueId || !teamId) {
+    return { inserted: 0, updated: 0, skipped: true };
+  }
+
+  // 1) UPDATE by (season, sport, league_id, team_id)
+  const updSql = `
+    update ff_sport_ffl
+       set league_name     = coalesce($6, league_name),
+           league_size     = coalesce($7, league_size),
+           team_name       = coalesce($8, team_name),
+           team_logo_url   = coalesce($9, team_logo_url),
+           entry_url       = coalesce($10, entry_url),
+           league_url      = coalesce($11, league_url),
+           fantasycast_url = coalesce($12, fantasycast_url),
+           scoreboard_url  = coalesce($13, scoreboard_url),
+           signup_url      = coalesce($14, signup_url),
+           last_seen_at    = now()
+     where sport           = $1
+       and season          = $2
+       and league_id::text = $3::text
+       and team_id::int    = $4::int
+     returning 1
+  `;
+
+  const args = [
+    String(sport).toLowerCase(),      // $1 sport
+    Number(season),                   // $2 season
+    String(leagueId),                 // $3 league_id
+    Number(teamId),                   // $4 team_id
+    null,                             // (kept for index parity if you reuse this pattern)
+    leagueName,                       // $6
+    leagueSize,                       // $7
+    teamName,                         // $8
+    teamLogo,                         // $9
+    urls.entry || null,               // $10
+    urls.league || null,              // $11
+    urls.fantasycast || null,         // $12
+    urls.scoreboard || null,          // $13
+    urls.signup || null               // $14
+  ];
+
+  const ures = await pool.query(updSql, args);
+  if (ures.rowCount > 0) return { inserted: 0, updated: 1, skipped: false };
+
+  // 2) INSERT if missing
+  const insSql = `
+    insert into ff_sport_ffl (
+      sport, season, league_id, team_id,
+      league_name, league_size, team_name, team_logo_url,
+      entry_url, league_url, fantasycast_url, scoreboard_url, signup_url,
+      first_seen_at, last_seen_at
+    ) values (
+      $1, $2, $3, $4,
+      $6, $7, $8, $9,
+      $10, $11, $12, $13, $14,
+      now(), now()
+    )
+    on conflict do nothing
+    returning 1
+  `;
+  const ires = await pool.query(insSql, args);
+  return { inserted: ires.rowCount, updated: 0, skipped: false };
+}
+
+async function upsertFfl(pool, item, sport ='ffl') {
   const {
     season, leagueId, teamId,
     leagueName = null, leagueSize = null,
@@ -153,7 +226,7 @@ async function upsertFfl(pool, item) {
   if (!season || !leagueId || !teamId) return { inserted:0, updated:0, skipped:true };
 
   const updSql = `
-    update ff_sport_ffl
+    update ff_sport_${sport}
        set league_name     = coalesce($4, league_name),
            league_size     = coalesce($5, league_size),
            team_name       = coalesce($6, team_name),
@@ -208,29 +281,54 @@ async function upsertFfl(pool, item) {
 
 // ---------- ingest handler ----------
 
+// expect: upsertSport(pool, item) from your updated helper
+// optional: hydrateFromEspn(req, item) can accept { sport } too
 async function ingestHandler(req, res) {
   try {
     const { season, swid, s2, items = [] } = req.body || {};
     const pool = req.app.get('pg');
 
-    // cred
-    const cred = (swid && s2) ? await upsertCred(pool, { swid, s2, ref: 'espnconnect' }) : { inserted:0, updated:0 };
+    // Save ESPN cred if provided
+    const cred = (swid && s2)
+      ? await upsertCred(pool, { swid, s2, ref: 'espnconnect' })
+      : { inserted: 0, updated: 0 };
 
-    let leaguesAttempted = 0, leaguesSucceeded = 0, teamsInserted = 0, teamsUpdated = 0;
+    let leaguesAttempted = 0,
+        leaguesSucceeded = 0,
+        teamsInserted   = 0,
+        teamsUpdated    = 0;
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ ok:false, error:'items_must_be_array' });
+    }
 
     for (const raw of items) {
       leaguesAttempted++;
-      const itm = { ...raw };
-      // Backfill missing fields from ESPN if the FE didn't include them
-      if (!itm.leagueName || !itm.leagueSize || !itm.teamName || !itm.teamLogo) {
-        const h = await hydrateFromEspn(req, itm);
-        if (h) Object.assign(itm, h);
+      try {
+        // normalize + default sport
+        const itm = {
+          ...raw,
+          sport: (raw.sport || 'ffl').toLowerCase(),
+          season: Number(raw.season ?? season) || null
+        };
+
+        // backfill missing display fields from ESPN
+        if (!itm.leagueName || !itm.leagueSize || !itm.teamName || !itm.teamLogo) {
+          const h = await hydrateFromEspn(req, itm); // pass sport-aware item
+          if (h) Object.assign(itm, h);
+        }
+
+        // upsert with sport-aware helper
+        const r = await upsertSport(pool, itm);
+        if (r?.skipped) continue;
+
+        leaguesSucceeded += 1;
+        teamsInserted    += r.inserted || 0;
+        teamsUpdated     += r.updated  || 0;
+      } catch (e) {
+        // don’t blow up the whole batch; log and continue
+        console.warn('[espnconnect ingest item failed]', { leagueId: raw?.leagueId, teamId: raw?.teamId, sport: raw?.sport || 'ffl' }, e?.message);
       }
-      const r = await upsertFfl(pool, itm);
-      if (r.skipped) continue;
-      leaguesSucceeded += 1;
-      teamsInserted += r.inserted || 0;
-      teamsUpdated  += r.updated  || 0;
     }
 
     return res.json({
@@ -250,6 +348,7 @@ async function ingestHandler(req, res) {
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 }
+
 module.exports = require('express').Router()
   .post('/', ingestHandler)
   .post('/ingest', ingestHandler);
