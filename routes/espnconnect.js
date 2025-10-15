@@ -142,41 +142,54 @@ async function upsertCred(pool, { swid, s2, memberId = null, ref = null }) {
 }
 
 // db/upsertSport.js
+// upsert_sport.js
+const TABLE_BY_SPORT = {
+  ffl: 'ff_sport_ffl',
+  flb: 'ff_sport_flb',
+  fba: 'ff_sport_fba',
+  fhl: 'ff_sport_fhl',
+};
+
+function tableForSport(sport) {
+  const key = String(sport || '').toLowerCase();
+  const table = TABLE_BY_SPORT[key];
+  if (!table) throw new Error(`unsupported_sport: ${sport}`);
+  return table;
+}
+
 async function upsertSport(pool, item) {
   const {
-    sport,
-    season, leagueId, teamId,
+    sport, season, leagueId, teamId,
     leagueName = null, leagueSize = null,
     teamName = null, teamLogo = null,
     urls = {}
   } = item;
 
-  if (!sport || !season || !leagueId || !teamId) {
-    return { inserted: 0, updated: 0, skipped: true };
-  }
+  if (!sport || !season || !leagueId || !teamId) return { inserted:0, updated:0, skipped:true };
 
-  const platform = '018'; // <- constant for this pathway
+  const table = tableForSport(sport);
+  const platform = '018'; // keep consistent with your rows
 
   const args = [
-    String(sport).toLowerCase(),   // $1 sport
-    Number(season),                // $2 season
-    String(leagueId),              // $3 league_id
-    Number(teamId),                // $4 team_id
-    platform,                      // $5 platform  (NOT NULL)
-    leagueName,                    // $6 league_name
-    leagueSize,                    // $7 league_size
-    teamName,                      // $8 team_name
-    teamLogo,                      // $9 team_logo_url
-    urls.entry || null,            // $10 entry_url
-    urls.league || null,           // $11 league_url
-    urls.fantasycast || null,      // $12 fantasycast_url
-    urls.scoreboard || null,       // $13 scoreboard_url
-    urls.signup || null            // $14 signup_url
+    String(sport).toLowerCase(),  // $1 sport
+    Number(season),               // $2 season
+    String(leagueId),             // $3 league_id
+    Number(teamId),               // $4 team_id
+    platform,                     // $5 platform
+    leagueName,                   // $6 league_name
+    leagueSize,                   // $7 league_size
+    teamName,                     // $8 team_name
+    teamLogo,                     // $9 team_logo_url
+    urls.entry || null,           // $10 entry_url
+    urls.league || null,          // $11 league_url
+    urls.fantasycast || null,     // $12 fantasycast_url
+    urls.scoreboard || null,      // $13 scoreboard_url
+    urls.signup || null           // $14 signup_url
   ];
 
   const updSql = `
-    update ff_sport_ffl
-       set platform        = coalesce($5, platform),
+    update ${table}
+       set platform        = coalesce($5,  platform),
            league_name     = coalesce($6,  league_name),
            league_size     = coalesce($7,  league_size),
            team_name       = coalesce($8,  team_name),
@@ -194,11 +207,11 @@ async function upsertSport(pool, item) {
      returning 1
   `;
 
-  const ures = await pool.query(updSql, args);
-  if (ures.rowCount > 0) return { inserted: 0, updated: 1, skipped: false };
+  const u = await pool.query(updSql, args);
+  if (u.rowCount > 0) return { inserted:0, updated:1, skipped:false };
 
   const insSql = `
-    insert into ff_sport_ffl (
+    insert into ${table} (
       sport, season, league_id, team_id, platform,
       league_name, league_size, team_name, team_logo_url,
       entry_url, league_url, fantasycast_url, scoreboard_url, signup_url,
@@ -212,12 +225,11 @@ async function upsertSport(pool, item) {
     on conflict do nothing
     returning 1
   `;
-  const ires = await pool.query(insSql, args);
-  return { inserted: ires.rowCount, updated: 0, skipped: false };
+  const i = await pool.query(insSql, args);
+  return { inserted:i.rowCount, updated:0, skipped:false };
 }
 
 module.exports = { upsertSport };
-
 
 async function upsertFfl(pool, item, sport ='ffl') {
   const {
