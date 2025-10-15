@@ -4,29 +4,28 @@ const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
 const { fetchJsonWithCred } = require('./_fetch');
 
+/* -------------------- config/safe week -------------------- */
 const NFL_MAX_WEEK = 18;
-const CURRENT_WEEK = 6;
+const CURRENT_WEEK = 7;
 function safeWeek(req){
   const w = Number(req.query.week);
   if (Number.isFinite(w) && w >= 1) return Math.min(w, NFL_MAX_WEEK);
-  // very safe fallback if no param
   return CURRENT_WEEK;
 }
 
+/* -------------------- maps/helpers -------------------- */
 const TEAM_ABBR = {
   1:'ATL',2:'BUF',3:'CHI',4:'CIN',5:'CLE',6:'DAL',7:'DEN',8:'DET',9:'GB',
   10:'TEN',11:'IND',12:'KC',13:'LV',14:'LAR',15:'MIA',16:'MIN',17:'NE',
   18:'NO',19:'NYG',20:'NYJ',21:'PHI',22:'ARI',23:'PIT',24:'LAC',25:'SF',
   26:'SEA',27:'TB',28:'WSH',29:'CAR',30:'JAX',33:'BAL',34:'HOU'
 };
-
 const POS = { 1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST' };
 const SLOT = {
   0:'QB',2:'RB',4:'WR',6:'TE',7:'OP',16:'DST',17:'K',20:'BN',21:'IR',
   23:'FLEX',24:'FLEX',25:'FLEX',26:'FLEX',27:'FLEX'
 };
 
-/** Try multiple common image fields; fall back to team logo for DST, player sprite otherwise. */
 function resolveHeadshot(p, position, teamAbbr){
   const cand = p?.headshot?.href || p?.headshot || p?.image?.href || p?.photo?.href || p?.avatar?.href || null;
   if (cand) return String(cand);
@@ -38,32 +37,26 @@ function resolveHeadshot(p, position, teamAbbr){
   return '/img/placeholders/player.png';
 }
 
-/** Pull projections/etc from kona_player_info for a given week. */
-/** Build { playerId -> projection-ish fields } from either kona_player_info OR mBoxscore. */
+/* ------------ projection index (kona/boxscore) ------------ */
+// Same approach you were using; this builds {playerId -> {proj, teamAbbr, ...}}
 function buildKonaIndex(data, week){
   const idx = new Map();
-
-  // Helper: pick best projected value for a given week
   const pickProjected = (stats) => {
     if (!Array.isArray(stats)) return null;
-    // exact week projection first (statSourceId 1 = projected)
     const exact = stats.find(s => s?.statSourceId === 1 && Number(s?.scoringPeriodId) === Number(week));
     if (exact && Number.isFinite(+exact.appliedTotal)) return +exact.appliedTotal;
-    // otherwise any projected entry
     const anyProj = stats.find(s => s?.statSourceId === 1 && Number.isFinite(+s.appliedTotal));
     return anyProj ? +anyProj.appliedTotal : null;
   };
 
-  // ---- Path 1: kona_player_info (top-level players[]) ----
+  // Path 1: kona_player_info
   if (Array.isArray(data?.players) && data.players.length) {
     for (const p of data.players) {
       const pid = Number(p?.id);
       if (!Number.isFinite(pid)) continue;
-
       const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
       const teamAbbr  = p.proTeamAbbreviation || TEAM_ABBR[proTeamId] || null;
       const proj = pickProjected(p.stats);
-
       idx.set(pid, {
         proj: proj ?? null,
         rank: null,
@@ -78,13 +71,12 @@ function buildKonaIndex(data, week){
     return idx;
   }
 
-  // ---- Path 2: mBoxscore (walk schedule -> home/away -> rosterForCurrentScoringPeriod.entries[]) ----
+  // Path 2: boxscore schedule walk
   const schedule = Array.isArray(data?.schedule) ? data.schedule : [];
   for (const game of schedule) {
     const sides = [];
     if (game?.home) sides.push(game.home);
     if (game?.away) sides.push(game.away);
-    // Some payloads use "competitors"
     if (Array.isArray(game?.competitors)) sides.push(...game.competitors);
 
     for (const side of sides) {
@@ -98,12 +90,9 @@ function buildKonaIndex(data, week){
 
         const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
         const teamAbbr  = p.proTeamAbbreviation || TEAM_ABBR[proTeamId] || null;
-
-        // Try multiple places for stats depending on shape
         const stats = Array.isArray(p?.stats) ? p.stats
                     : Array.isArray(e?.playerStats) ? e.playerStats
                     : null;
-
         const proj = pickProjected(stats);
 
         idx.set(pid, {
@@ -119,45 +108,21 @@ function buildKonaIndex(data, week){
       }
     }
   }
-
   return idx;
 }
 
-
-/** Convert one roster entry to your existing player shape + optional extras. */
-function espnRosterEntryToPlayer(entry = {}, extras = {} ) {
-  // ESPN has two common shapes: entry.playerPoolEntry.player or entry.player
-  const p = entry.playerPoolEntry?.player || entry.player || entry;
-
-  const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
-  const teamAbbrFromId = TEAM_ABBR[proTeamId] || null;
-
-  const teamAbbr = p.proTeamAbbreviation || teamAbbrFromId || p.proTeam || '';
-  const position = POS[p.defaultPositionId] || p.position || p.defaultPosition || (p.id < 0 ? 'DST' : '');
-  const slot     = SLOT[entry.lineupSlotId] || entry.slot || 'BN';
-  const isStarter = !['BE','BN','IR'].includes(String(slot).toUpperCase());
-
-  const headshot = resolveHeadshot(p, position, teamAbbr);
-
-  // FantasyPros id if present; otherwise leave undefined
-  const fpId = p.fantasyProsId || p.fpId || p?.externalIds?.fantasyProsId || p?.externalIds?.fpid;
-
-  // ---- NEW (non-breaking): extra projection-y fields from kona index
-  const {
-    proj      = null,
-    rank      = null,
-    opponentAbbr = null,
-    defensiveRank = null,
-    byeWeek   = null,
-    fmv       = null,
-    proTeamId: exProTeamId = proTeamId,
-    teamAbbr:  exTeamAbbr  = teamAbbr
-  } = extras || {};
-
+/* -------------- canonical player (FA-style) -------------- */
+// Mirrors your FA canonicalizer (adds a `team` object while keeping legacy fields).
+function toCanonicalPlayer({
+  id, name, position, proTeamId, teamAbbr,
+  proj, rank, opponentAbbr, defensiveRank, byeWeek, fmv,
+  slot, isStarter, headshot, fpId,
+  teamMeta
+}) {
   return {
-    // === existing fields (unchanged) ===
-    id: p.id || entry.playerId,
-    name: p.fullName || p.displayName || p.name,
+    // legacy/roster fields you already return
+    id,
+    name,
     team: teamAbbr || '',
     position,
     slot,
@@ -165,18 +130,22 @@ function espnRosterEntryToPlayer(entry = {}, extras = {} ) {
     fpId,
     headshot,
 
-    // === added fields (safe to ignore by existing clients) ===
-    proj,
-    rank,
-    opponentAbbr,
-    defensiveRank,
-    byeWeek,
-    fmv,
-    proTeamId: exProTeamId,
-    teamAbbr: exTeamAbbr
+    // FA-style analytics
+    proj: (proj == null || isNaN(+proj)) ? null : Number(proj),
+    rank: (rank == null || isNaN(+rank)) ? null : Number(rank),
+    opponentAbbr: opponentAbbr ?? null,
+    defensiveRank: (defensiveRank == null || isNaN(+defensiveRank)) ? null : Number(defensiveRank),
+    byeWeek: (byeWeek == null || isNaN(+byeWeek)) ? null : Number(byeWeek),
+    fmv: (fmv == null || isNaN(+fmv)) ? null : Number(fmv),
+    proTeamId: (proTeamId == null || isNaN(+proTeamId)) ? null : Number(proTeamId),
+    teamAbbr: teamAbbr ?? null,
+
+    // NEW: ownership object, matching free-agents-with-team
+    team: teamMeta || { type:'TEAM', teamId: null, team_name: null }
   };
 }
 
+/* -------------- ESPN fetch + transform -------------- */
 async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debug }) {
   if (!season || !leagueId) throw new Error('season and leagueId are required');
 
@@ -185,19 +154,18 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
     matchupPeriodId: String(week),
     scoringPeriodId: String(week),
   });
-  // IMPORTANT: add kona_player_info so we get projections like FA view
+  // include views that expose projections (same as FA path does indirectly)
   params.append('view','mTeam');
   params.append('view','mRoster');
   params.append('view','mSettings');
-  params.append('view','mBoxscore'); // <— gives projected stats
+  params.append('view','mBoxscore'); // projections source
 
   const url = `${base}?${params.toString()}`;
 
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
-  let data = null;
-  let last = null;
+  let data = null, last = null;
 
-  for (const cand of cands.length ? cands : [{}]) { // allow anonymous
+  for (const cand of cands.length ? cands : [{}]) {
     const res = await fetchJsonWithCred(url, cand);
     if (res.ok && res.json) {
       try { req.res?.set?.('x-espn-cred-source', cand.source || 'anonymous'); } catch {}
@@ -216,17 +184,19 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
     throw e;
   }
 
-  // Create a fast lookup of projections/stats per player (same week)
   const konaIndex = buildKonaIndex(data, week);
 
-  const teamNameOf = (t) => `${t?.location || t?.teamLocation || ''} ${t?.nickname || t?.teamNickname || ''}`.trim() || t?.name || `Team ${t?.id}`;
+  const teamNameOf = (t) =>
+    `${t?.location || t?.teamLocation || ''} ${t?.nickname || t?.teamNickname || ''}`.trim()
+    || t?.name || `Team ${t?.id}`;
 
   if (teamId != null) {
     const team = (data?.teams || []).find(t => Number(t?.id) === Number(teamId));
     return {
       ok:true,
+      teamId: teamId,
       team_name: team ? teamNameOf(team) : `Team ${teamId}`,
-      players: team?.roster?.entries || [],
+      entries: team?.roster?.entries || [],
       konaIndex
     };
   }
@@ -237,12 +207,12 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
     teams: (data?.teams || []).map(t => ({
       teamId: t?.id,
       team_name: teamNameOf(t),
-      players: t?.roster?.entries || []
+      entries: t?.roster?.entries || []
     }))
   };
 }
 
-// quick mount test
+/* -------------------- Routes -------------------- */
 router.get('/roster/selftest', (_req, res) => res.json({ ok:true, msg:'roster router mounted' }));
 
 router.get('/roster', async (req, res) => {
@@ -252,32 +222,70 @@ router.get('/roster', async (req, res) => {
     const teamId   = req.query.teamId != null ? Number(req.query.teamId) : null;
     const week     = safeWeek(req);
 
-if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
+    if (!season || !leagueId) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
+    }
 
     const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
 
+    // CORS (align with FA endpoints)
+    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
+    res.set('Access-Control-Allow-Credentials', 'true');
+    res.set('Cache-Control', 'no-store, private');
+
+    // Helper to convert an ESPN entry into our canonical FA-style + legacy roster fields
+    const entryToCanon = (entry, teamMeta, konaIndex) => {
+      const p = entry.playerPoolEntry?.player || entry.player || entry || {};
+      const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
+      const teamAbbrFromId = TEAM_ABBR[proTeamId] || null;
+      const teamAbbr = p.proTeamAbbreviation || teamAbbrFromId || p.proTeam || null;
+      const position = POS[p.defaultPositionId] || p.position || p.defaultPosition || (p.id < 0 ? 'DST' : '');
+      const slot     = SLOT[entry.lineupSlotId] || entry.slot || 'BN';
+      const isStarter = !['BE','BN','IR'].includes(String(slot).toUpperCase());
+      const headshot = resolveHeadshot(p, position, teamAbbr);
+      const fpId = p.fantasyProsId || p.fpId || p?.externalIds?.fantasyProsId || p?.externalIds?.fpid;
+      const pid = Number(p.id || entry.playerId);
+
+      const extras = konaIndex.get(pid) || {};
+      return toCanonicalPlayer({
+        id: p.id || entry.playerId,
+        name: p.fullName || p.displayName || p.name,
+        position,
+        proTeamId: extras.proTeamId ?? proTeamId,
+        teamAbbr: extras.teamAbbr ?? teamAbbr,
+        proj: extras.proj ?? null,
+        rank: extras.rank ?? null,
+        opponentAbbr: extras.opponentAbbr ?? null,
+        defensiveRank: extras.defensiveRank ?? null,
+        byeWeek: extras.byeWeek ?? null,
+        fmv: extras.fmv ?? null,
+        slot,
+        isStarter,
+        headshot,
+        fpId,
+        teamMeta
+      });
+    };
+
     if (teamId != null) {
-      const players = (raw.players || []).map(entry => {
-        const pid = Number(entry?.player?.id || entry?.playerId || entry?.playerPoolEntry?.player?.id);
-        const extras = raw.konaIndex.get(pid) || {};
-        return espnRosterEntryToPlayer(entry, extras);
-        });
+      const teamMeta = { type:'TEAM', teamId, team_name: raw.team_name };
+      const players = (raw.entries || []).map(e => entryToCanon(e, teamMeta, raw.konaIndex));
       return res.json({ ok:true, platform:'espn', leagueId, season, week, teamId, team_name: raw.team_name, players });
     }
 
-    const teams = (raw.teams || []).map(t => ({
-      teamId: t.teamId,
-      team_name: t.team_name,
-      players: (t.players || []).map(entry => {
-        const pid = Number(entry?.player?.id || entry?.playerId || entry?.playerPoolEntry?.player?.id);
-        const extras = raw.konaIndex.get(pid) || {};
-        return espnRosterEntryToPlayer(entry, extras);
-      }),
-    }));
-    res.json({ ok:true, platform:'espn', leagueId, season, week, teams });
+    const teams = (raw.teams || []).map(t => {
+      const meta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
+      return {
+        teamId: t.teamId,
+        team_name: t.team_name,
+        players: (t.entries || []).map(e => entryToCanon(e, meta, raw.konaIndex))
+      };
+    });
+
+    return res.json({ ok:true, platform:'espn', leagueId, season, week, teams });
   } catch (err) {
     const status = err?.meta?.status >= 500 ? 502 : 500;
-    res.status(status).json({
+    return res.status(status).json({
       ok: false,
       error: err.message || 'server_error',
       status: err?.meta?.status || status,
