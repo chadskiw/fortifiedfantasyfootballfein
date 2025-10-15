@@ -169,6 +169,11 @@ async function upsertSport(pool, item) {
 
   const table = tableForSport(sport);
   const platform = '018'; // keep consistent with your rows
+  // normalize URL shapes from FE (entryURL, leagueURL, fantasyCastHref, scoreboardFeed)
+  const entryUrl       = urls.entry       ?? urls.entryURL       ?? null;
+  const leagueUrl      = urls.league      ?? urls.leagueURL      ?? null;
+  const fantasycastUrl = urls.fantasycast ?? urls.fantasyCastHref?? null;
+  const scoreboardUrl  = urls.scoreboard  ?? urls.scoreboardFeed ?? null;
 
   const args = [
     String(sport).toLowerCase(),  // $1 sport
@@ -180,11 +185,11 @@ async function upsertSport(pool, item) {
     leagueSize,                   // $7 league_size
     teamName,                     // $8 team_name
     teamLogo,                     // $9 team_logo_url
-    urls.entry || null,           // $10 entry_url
-    urls.league || null,          // $11 league_url
-    urls.fantasycast || null,     // $12 fantasycast_url
-    urls.scoreboard || null,      // $13 scoreboard_url
-    urls.signup || null           // $14 signup_url
+    entryUrl,                     // $10 entry_url
+    leagueUrl,                    // $11 league_url
+    fantasycastUrl,               // $12 fantasycast_url
+    scoreboardUrl,                // $13 scoreboard_url
+    urls.signup ?? null           // $14 signup_url
   ];
 
   const updSql = `
@@ -324,7 +329,8 @@ async function ingestHandler(req, res) {
         // normalize + default sport
         const itm = {
           ...raw,
-          sport: (raw.sport || 'ffl').toLowerCase(),
+          // accept both "sport" and "game" from the client
+          sport: (raw.sport || raw.game || 'ffl').toLowerCase(),
           season: Number(raw.season ?? season) || null
         };
 
