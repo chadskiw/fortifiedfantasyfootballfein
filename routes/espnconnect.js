@@ -141,32 +141,31 @@ async function upsertCred(pool, { swid, s2, memberId = null, ref = null }) {
   return { inserted:1, updated:0 };
 }
 
-// upsert into ff_sport_ffl keyed by (season, sport, league_id, team_id)
+// db/upsertSport.js
 async function upsertSport(pool, item) {
   const {
-    sport,                  // <-- REQUIRED: e.g. 'ffl', 'nba', 'mlb'
-    season, leagueId, teamId,
+    sport, season, leagueId, teamId,
     leagueName = null, leagueSize = null,
     teamName = null, teamLogo = null,
-    urls = {}               // { entry, league, fantasycast, scoreboard, signup }
+    urls = {}
   } = item;
 
   if (!sport || !season || !leagueId || !teamId) {
     return { inserted: 0, updated: 0, skipped: true };
   }
 
-  // 1) UPDATE by (season, sport, league_id, team_id)
+  // UPDATE (no gaps in $n)
   const updSql = `
     update ff_sport_ffl
-       set league_name     = coalesce($6, league_name),
-           league_size     = coalesce($7, league_size),
-           team_name       = coalesce($8, team_name),
-           team_logo_url   = coalesce($9, team_logo_url),
-           entry_url       = coalesce($10, entry_url),
-           league_url      = coalesce($11, league_url),
-           fantasycast_url = coalesce($12, fantasycast_url),
-           scoreboard_url  = coalesce($13, scoreboard_url),
-           signup_url      = coalesce($14, signup_url),
+       set league_name     = coalesce($5, league_name),
+           league_size     = coalesce($6, league_size),
+           team_name       = coalesce($7, team_name),
+           team_logo_url   = coalesce($8, team_logo_url),
+           entry_url       = coalesce($9, entry_url),
+           league_url      = coalesce($10, league_url),
+           fantasycast_url = coalesce($11, fantasycast_url),
+           scoreboard_url  = coalesce($12, scoreboard_url),
+           signup_url      = coalesce($13, signup_url),
            last_seen_at    = now()
      where sport           = $1
        and season          = $2
@@ -176,26 +175,24 @@ async function upsertSport(pool, item) {
   `;
 
   const args = [
-    String(sport).toLowerCase(),      // $1 sport
-    Number(season),                   // $2 season
-    String(leagueId),                 // $3 league_id
-    Number(teamId),                   // $4 team_id
-    null,                             // (kept for index parity if you reuse this pattern)
-    leagueName,                       // $6
-    leagueSize,                       // $7
-    teamName,                         // $8
-    teamLogo,                         // $9
-    urls.entry || null,               // $10
-    urls.league || null,              // $11
-    urls.fantasycast || null,         // $12
-    urls.scoreboard || null,          // $13
-    urls.signup || null               // $14
+    String(sport).toLowerCase(),    // $1
+    Number(season),                 // $2
+    String(leagueId),               // $3
+    Number(teamId),                 // $4
+    leagueName,                     // $5
+    (leagueSize == null ? null : Number(leagueSize)), // $6
+    teamName,                       // $7
+    teamLogo,                       // $8
+    urls.entry || null,             // $9
+    urls.league || null,            // $10
+    urls.fantasycast || null,       // $11
+    urls.scoreboard || null,        // $12
+    urls.signup || null             // $13
   ];
 
   const ures = await pool.query(updSql, args);
   if (ures.rowCount > 0) return { inserted: 0, updated: 1, skipped: false };
 
-  // 2) INSERT if missing
   const insSql = `
     insert into ff_sport_ffl (
       sport, season, league_id, team_id,
@@ -204,8 +201,8 @@ async function upsertSport(pool, item) {
       first_seen_at, last_seen_at
     ) values (
       $1, $2, $3, $4,
-      $6, $7, $8, $9,
-      $10, $11, $12, $13, $14,
+      $5, $6, $7, $8,
+      $9, $10, $11, $12, $13,
       now(), now()
     )
     on conflict do nothing
@@ -214,6 +211,8 @@ async function upsertSport(pool, item) {
   const ires = await pool.query(insSql, args);
   return { inserted: ires.rowCount, updated: 0, skipped: false };
 }
+module.exports = { upsertSport };
+
 
 async function upsertFfl(pool, item, sport ='ffl') {
   const {
