@@ -416,7 +416,7 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       return [Number(s), String(l), Number(t), Number(w), String(sc), Number(pts)];
     });
 
-    const nameSQL = `SELECT team_id, team_name FROM ff_sport_ffl WHERE season=$1 AND league_id=$2`;
+    const nameSQL = `SELECT team_id, team_name FROM ff_sport_ffl WHERE season=$1 AND league_id::text=$2`;
     const names   = await q(nameSQL, [Number(season), String(league_id)]);
     const nameMap = new Map(names.map(r => [Number(r.team_id), r.team_name || `Team ${r.team_id}`]));
 
@@ -443,7 +443,7 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       `WITH totals AS (
          SELECT season, league_id, team_id, scoring, SUM(points)::numeric AS sum_pts
          FROM ff_team_weekly_points
-         WHERE season=$1 AND league_id=$2 AND scoring = ANY($3)
+         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
            AND week BETWEEN 2 AND COALESCE($4::int, 99)
          GROUP BY 1,2,3,4
        )
@@ -454,7 +454,7 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
               t.sum_pts, '[]'::jsonb, t.scoring, now(), now()
        FROM totals t
        LEFT JOIN ff_sport_ffl s
-         ON s.season=t.season AND s.league_id=t.league_id AND s.team_id=t.team_id
+         ON s.season=t.season AND s.league_id::text=t.league_id AND s.team_id=t.team_id
        ON CONFLICT (season, league_id, team_id, week, scoring)
        DO UPDATE SET team_name=EXCLUDED.team_name, points=EXCLUDED.points, updated_at=now()`,
       [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
@@ -467,14 +467,14 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
                 COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
          FROM ff_team_weekly_points w
          LEFT JOIN ff_sport_ffl s
-           ON s.season=w.season AND s.league_id=w.league_id AND s.team_id=w.team_id
-         WHERE season=$1 AND league_id=$2 AND scoring = ANY($3)
+           ON s.season=w.season AND s.league_id::text=w.league_id AND s.team_id=w.team_id
+         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
          ORDER BY season, league_id, team_id, scoring, week DESC, updated_at DESC
        ),
        season_tot AS (
          SELECT season, league_id, team_id, scoring, SUM(points)::numeric AS season_pts
          FROM ff_team_weekly_points
-         WHERE season=$1 AND league_id=$2 AND scoring = ANY($3)
+         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
          GROUP BY 1,2,3,4
        )
        INSERT INTO ff_team_points_cache AS c
