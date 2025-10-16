@@ -5,8 +5,15 @@ const { Pool } = require('pg');
 const router = express.Router();
 router.use(express.json({ limit: '12mb' }));
 
+// Use global fetch if present (Node 18+); otherwise lazy-load node-fetch
+const _fetch = async (...args) =>
+  (typeof fetch !== 'undefined'
+    ? fetch(...args)
+    : (await import('node-fetch')).default(...args));
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
+/* ----------------------------- DDL (tables) ----------------------------- */
 const DDL = `
 CREATE TABLE IF NOT EXISTS ff_fp_points_week (
   season     int    NOT NULL,
@@ -22,10 +29,10 @@ CREATE TABLE IF NOT EXISTS ff_fp_points_week (
 );
 
 CREATE TABLE IF NOT EXISTS ff_fp_player_map (
-  fp_id   int PRIMARY KEY,
+  fp_id     int PRIMARY KEY,
   player_id int,
-  espn_id  int,
-  notes   text
+  espn_id   int,
+  notes     text
 );
 
 CREATE TABLE IF NOT EXISTS ff_team_weekly_points (
@@ -57,46 +64,117 @@ CREATE TABLE IF NOT EXISTS ff_team_points_cache (
 CREATE UNIQUE INDEX IF NOT EXISTS ff_team_points_cache_uniq4
   ON ff_team_points_cache (season, league_id, team_id, scoring);
 `;
-// routes/fp_ingest.js (CommonJS) — add near the top
+
+/* --------------------------- small helpers ------------------------------ */
+const q = (sql, params = []) => pool.query(sql, params).then(r => r.rows);
+const ALL_SCORINGS = ['STD', 'HALF', 'PPR'];
+
+/* --------------------- Name/Team/Pos normalization ---------------------- */
+// Canonical first, then variants/synonyms.
+const NAME_SYNONYM_LIST = [
+  ['patrick mahomes ii', 'patrick mahomes'],
+  ['james cook iii', 'james cook'],
+  ['kenneth walker', 'kenneth walker iii'],
+  ['brian robinson', 'brian robinson jr'],
+  ['marvin harrison', 'marvin harrison jr'],
+
+  ['deebo samuel', 'deebo samuel sr', 'deebo samuel sr.'],
+
+  ["d'andre swift", 'dandre swift'],
+  ['juju smith-schuster', 'juju smith schuster'],
+  ["ja'marr chase", 'jamarr chase'],
+  ['marquise brown', 'hollywood brown'],
+
+  // common dot/space issues
+  ['dj moore', 'd.j. moore', 'd j moore'],
+  ['dk metcalf', 'd.k. metcalf', 'd k metcalf'],
+  ['aj brown', 'a.j. brown', 'a j brown'],
+  ['tj hockenson', 't.j. hockenson', 't j hockenson'],
+  ["de'von achane", 'devon achane'],
+];
+
+const _variantToCanonical = (() => {
+  const m = new Map();
+  for (const arr of NAME_SYNONYM_LIST) {
+    const canonical = normName(arr[0]);
+    for (const v of arr) m.set(normName(v), canonical);
+  }
+  return m;
+})();
+
+function normName(s = '') {
+  return String(s)
+    .toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .replace(/&/g, ' and ')
+    .replace(/[.'"]/g, '') // remove periods & apostrophes/quotes
+    .replace(/-/g, ' ')
+    .replace(/\b(sr|jr|ii|iii|iv|v)\b/g, '') // drop suffixes for matching
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function canonName(s = '') {
+  const k = normName(s);
+  return _variantToCanonical.get(k) || k;
+}
+
+const TEAM_ALIAS = {
+  WSH: 'WAS', WAS: 'WAS',
+  JAX: 'JAC', JAC: 'JAC',
+  LA: 'LAR',  LAR: 'LAR', LAC: 'LAC',
+  NO: 'NO',   NOR: 'NO',
+  GB: 'GB',   GNB: 'GB',
+  KC: 'KC',   KAN: 'KC',
+  TB: 'TB',   TAM: 'TB',
+};
+function normTeam(abbr) {
+  const u = String(abbr || '').toUpperCase().trim();
+  return TEAM_ALIAS[u] || u;
+}
+function normPos(p) {
+  return String(p || '').toUpperCase().trim();
+}
+
+/* ----------------------------- Diagnostics ------------------------------ */
 router.get('/api/fp/diagnose', async (_req, res) => {
   try {
     const out = {};
-    const q = (sql, params=[]) => pool.query(sql, params).then(r=>r.rows);
     out.tables = await q(`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema='public' AND table_name IN
         ('ff_fp_points_week','ff_team_weekly_points','ff_team_points_cache','ff_espn_roster_week','ff_fp_player_map')
       ORDER BY table_name`);
     out.fp_points_sample = await q(`SELECT * FROM ff_fp_points_week ORDER BY season DESC, week DESC LIMIT 3`);
-    out.roster_sample   = await q(`SELECT * FROM ff_espn_roster_week ORDER BY season DESC, week DESC LIMIT 3`).catch(()=>[]);
-    res.json({ ok:true, diagnose: out });
+    out.roster_sample = await q(`SELECT * FROM ff_espn_roster_week ORDER BY season DESC, week DESC LIMIT 3`).catch(() => []);
+    res.json({ ok: true, diagnose: out });
   } catch (e) {
-    res.status(500).json({ ok:false, error:String(e) });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-/** Ensure tables exist */
+/* ----------------------------- Ensure DDL ------------------------------- */
 router.post('/api/fp/ensure-ddl', async (_req, res) => {
   try {
     await pool.query(DDL);
-    res.json({ ok:true });
+    res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok:false, error:String(e) });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-/** Stage batches from GUI */
+/* --------------------------- Ingest (staging) --------------------------- */
 router.post('/api/fp/ingest-batch', async (req, res) => {
   const { season, batches } = req.body || {};
-  if (!season || !Array.isArray(batches)) return res.status(400).json({ ok:false, error:'bad_request' });
+  if (!season || !Array.isArray(batches)) {
+    return res.status(400).json({ ok: false, error: 'bad_request' });
+  }
 
   const client = await pool.connect();
   try {
     await client.query(DDL);
     await client.query('BEGIN');
-    let rows = 0;
 
-    // flatten records
+    // Flatten all players across batches into typed arrays
     const records = [];
     for (const b of batches) {
       const scoring = String(b.scoring || '').toUpperCase();
@@ -109,17 +187,15 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
           String(p.name || ''),
           String(p.position || ''),
           String(p.team || p.team_abbr || ''),
-          Number(p.points) || 0
+          Number(p.points) || 0,
         ]);
       }
     }
 
-    // chunk into 2k rows per insert
     const CHUNK = 2000;
-    for (let i=0; i<records.length; i+=CHUNK) {
-      const chunk = records.slice(i, i+CHUNK);
-      const cols = ['season','week','scoring','fp_id','name','position','team_abbr','points'];
-      const params = { };
+    for (let i = 0; i < records.length; i += CHUNK) {
+      const chunk = records.slice(i, i + CHUNK);
+      const cols = ['season', 'week', 'scoring', 'fp_id', 'name', 'position', 'team_abbr', 'points'];
       const arrays = cols.map((_c, idx) => chunk.map(r => r[idx]));
 
       const sql = `
@@ -135,61 +211,37 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
           team_abbr = EXCLUDED.team_abbr,
           points = EXCLUDED.points,
           updated_at = now();`;
-      const r = await client.query(sql, arrays);
-
-      rows += r.rowCount || 0;
+      await client.query(sql, arrays);
     }
 
     await client.query('COMMIT');
-    res.json({ ok:true, season, batches:batches.length, upserted_rows: rows });
+    res.json({ ok: true, season, batches: batches.length, upserted_rows: records.length });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('ingest-batch error:', e);
-    res.status(500).json({ ok:false, error:String(e) });
+    res.status(500).json({ ok: false, error: String(e) });
   } finally {
     client.release();
   }
 });
 
-// Always process these three
-const ALL_SCORINGS = ['STD','HALF','PPR'];
-
-// normalize helpers
-function normName(s) {
-  if (!s) return '';
-  return s.normalize('NFD')
-    .replace(/[\u0300-\u036f]/g,'')          // strip diacritics
-    .replace(/\b(jr|sr|ii|iii|iv|v)\b/gi,'') // drop suffixes
-    .replace(/[^a-z0-9]+/gi,'')              // remove non-alnum
-    .toLowerCase();
-}
-const TEAM_ALIAS = {
-  WSH:'WAS', WAS:'WAS',
-  JAX:'JAC', JAC:'JAC',
-  LA:'LAR',  LAR:'LAR', LAC:'LAC',
-  NO:'NO',   NOR:'NO',
-  GB:'GB',   GNB:'GB',
-  KC:'KC',   KAN:'KC',
-  TB:'TB',   TAM:'TB',
-};
-function normTeam(abbr) {
-  const u = String(abbr||'').toUpperCase();
-  return TEAM_ALIAS[u] || u;
-}
-function normPos(p){ return String(p||'').toUpperCase(); }
-
+/* ------------------------ Apply to League (build) ----------------------- */
 router.post('/api/fp/apply-to-league', async (req, res) => {
   const { season, league_id, cutoffWeek = null } = req.body || {};
   const scorings = ALL_SCORINGS;
-  if (!season || !league_id) return res.status(400).json({ ok:false, error:'missing season/league_id' });
+  if (!season || !league_id) {
+    return res.status(400).json({ ok: false, error: 'missing season/league_id' });
+  }
 
-  const baseURL = process.env.INTERNAL_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3000}`;
+  const baseURL =
+    process.env.INTERNAL_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3000}`;
+
   const client = await pool.connect();
 
   try {
     await client.query(DDL);
 
-    // weeks we have FP points for
+    // Weeks we have FP points for
     const wkSQL = `
       SELECT DISTINCT week
       FROM ff_fp_points_week
@@ -199,29 +251,35 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       ? [Number(season), scorings, Number(cutoffWeek)]
       : [Number(season), scorings];
     const { rows: wkRows } = await client.query(wkSQL, wkParams);
-    if (!wkRows.length) return res.status(400).json({ ok:false, error:'no_fp_points_for_season_or_scoring' });
+    if (!wkRows.length) {
+      return res.status(400).json({ ok: false, error: 'no_fp_points_for_season_or_scoring' });
+    }
 
-    // 1) Build roster index for each week: prefer fpId; else name+team+pos
-    const rostersByWeek = new Map();  // week -> { byFpId: Map<fpId, teamId>, byKey: Map<key, teamId> }
+    // Build roster index for each week (prefer fpId; else name+team+pos)
+    const rostersByWeek = new Map(); // week -> { byFpId, byKey }
     const warnings = [];
 
     for (const { week } of wkRows) {
-      const url = `${baseURL}/api/platforms/espn/roster?season=${encodeURIComponent(season)}&leagueId=${encodeURIComponent(league_id)}&week=${encodeURIComponent(week)}`;
+      const url = `${baseURL}/api/platforms/espn/roster?season=${encodeURIComponent(
+        season
+      )}&leagueId=${encodeURIComponent(league_id)}&week=${encodeURIComponent(week)}`;
+
       try {
-        const r = await fetch(url);
+        const r = await _fetch(url);
         const j = await r.json();
         if (!r.ok || !j?.ok) throw new Error(j?.error || `roster_fetch_${r.status}`);
 
         const byFpId = new Map();
-        const byKey  = new Map();
+        const byKey = new Map();
 
-        for (const team of (j.teams || [])) {
+        for (const team of j.teams || []) {
           const tid = Number(team.teamId);
-          for (const p of (team.players || [])) {
+          for (const p of team.players || []) {
             const fp = Number(p.fpId ?? p?.externalIds?.fantasyProsId ?? NaN);
             const pos = normPos(p.position);
-            const teamAbbr = normTeam(p.team);
-            const key = `${normName(p.name)}|${teamAbbr}|${pos}`;
+            const tAbbr = normTeam(p.team);
+            const key = `${canonName(p.name)}|${tAbbr}|${pos}`;
+
             if (Number.isFinite(fp)) byFpId.set(fp, tid);
             if (!byKey.has(key)) byKey.set(key, tid); // first claim wins
           }
@@ -230,12 +288,11 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
         rostersByWeek.set(Number(week), { byFpId, byKey });
       } catch (e) {
         warnings.push(`week ${week}: ${e.message}`);
-        // still create empty maps so apply continues for other weeks
         rostersByWeek.set(Number(week), { byFpId: new Map(), byKey: new Map() });
       }
     }
 
-    // 2) Pull FP points we’ve staged for those weeks+scorings
+    // Pull staged FP points
     const weeksArr = wkRows.map(w => Number(w.week));
     const { rows: fpRows } = await client.query(
       `
@@ -246,12 +303,12 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       [Number(season), scorings, weeksArr]
     );
 
-    // 3) Aggregate to team totals using roster mapping
-    //    Priority: fpId → team; fallback: name+team+pos → team
-    const agg = new Map(); // key: season|league|team_id|week|scoring → points
-    function akey(tid, week, scoring){ return `${season}|${league_id}|${tid}|${week}|${scoring}`; }
+    // Aggregate to team totals via mapping
+    const agg = new Map(); // season|league|team_id|week|scoring -> points
+    const akey = (tid, week, scoring) => `${season}|${league_id}|${tid}|${week}|${scoring}`;
 
     let matched = 0, unmatched = 0;
+
     for (const row of fpRows) {
       const week = Number(row.week);
       const scoring = String(row.scoring).toUpperCase();
@@ -259,10 +316,13 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       if (!maps) { unmatched++; continue; }
 
       let tid = null;
+
+      // 1) fpId direct hit
       if (Number.isFinite(row.fp_id) && maps.byFpId.has(row.fp_id)) {
         tid = maps.byFpId.get(row.fp_id);
       } else {
-        const key = `${normName(row.name)}|${normTeam(row.team_abbr)}|${normPos(row.position)}`;
+        // 2) name+team+pos fallback with canonical name + team alias + pos
+        const key = `${canonName(row.name)}|${normTeam(row.team_abbr)}|${normPos(row.position)}`;
         tid = maps.byKey.get(key) ?? null;
       }
 
@@ -273,31 +333,31 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       agg.set(k, (agg.get(k) || 0) + Number(row.points || 0));
     }
 
-    // If literally nothing matched, bail with a helpful error
     if (matched === 0) {
-      return res.status(400).json({ ok:false, error:'no_roster_matches', details:{ warnings, unmatched } });
+      return res.status(400).json({ ok: false, error: 'no_roster_matches', details: { warnings, unmatched } });
     }
 
-    // 4) Upsert weekly rows and refresh totals/cache
+    // Upsert weekly rows + refresh week1 totals + cache
     await client.query('BEGIN');
 
-    // Upsert weekly in chunks
+    // Prepare arrays to insert weekly
     const rows = Array.from(agg.entries()).map(([k, pts]) => {
       const [s, l, t, w, sc] = k.split('|');
       return [Number(s), String(l), Number(t), Number(w), String(sc), Number(pts)];
     });
 
-    // materialize team names
+    // Map team_id -> team_name for labeling
     const nameSQL = `
       SELECT team_id, team_name
       FROM ff_sport_ffl
       WHERE season=$1 AND league_id=$2`;
-    const { rows: names } = await client.query(nameSQL, [Number(season), String(league_id)]);
+    const names = await q(nameSQL, [Number(season), String(league_id)]);
     const nameMap = new Map(names.map(r => [Number(r.team_id), r.team_name || `Team ${r.team_id}`]));
 
-    const S=[],L=[],T=[],W=[],SC=[],PTS=[],TN=[];
-    for (const [s,l,t,w,sc,pts] of rows) {
-      S.push(s); L.push(l); T.push(t); W.push(w); SC.push(sc); PTS.push(pts); TN.push(nameMap.get(t) || `Team ${t}`);
+    const S = [], L = [], T = [], W = [], SC = [], PTS = [], TN = [];
+    for (const [s, l, t, w, sc, pts] of rows) {
+      S.push(s); L.push(l); T.push(t); W.push(w); SC.push(sc); PTS.push(pts);
+      TN.push(nameMap.get(t) || `Team ${t}`);
     }
 
     if (rows.length) {
@@ -311,16 +371,17 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
         ON CONFLICT (season, league_id, team_id, week, scoring)
         DO UPDATE SET team_name=EXCLUDED.team_name, points=EXCLUDED.points, updated_at=now()
         `,
-        [ S, L, T, W, TN, PTS,
-          Array(S.length).fill('[]'),               // starters placeholder
+        [
+          S, L, T, W, TN, PTS,
+          Array(S.length).fill('[]'), // starters placeholder
           SC,
           Array(S.length).fill(new Date().toISOString()),
-          Array(S.length).fill(new Date().toISOString())
+          Array(S.length).fill(new Date().toISOString()),
         ]
       );
     }
 
-    // week=1 season totals up to cutoff/max
+    // week=1 row stores season-to-date totals (weeks 2..cutoff)
     await client.query(
       `
       WITH totals AS (
@@ -344,12 +405,12 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
     );
 
-    // refresh cache
+    // Refresh cache (latest week + season totals)
     await client.query(
       `
       WITH latest AS (
         SELECT DISTINCT ON (season, league_id, team_id, scoring)
-               season, league_id, team_id, scoring, week, points, 
+               season, league_id, team_id, scoring, week, points,
                COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
         FROM ff_team_weekly_points w
         LEFT JOIN ff_sport_ffl s
@@ -380,21 +441,19 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
     await client.query('COMMIT');
 
     res.json({
-      ok:true,
+      ok: true,
       matched,
       unmatched,
       weeks: weeksArr,
-      warnings
+      warnings,
     });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('apply-to-league(name-match) error:', e);
-    res.status(500).json({ ok:false, error:String(e) });
+    res.status(500).json({ ok: false, error: String(e) });
   } finally {
     client.release();
   }
 });
-
-
 
 module.exports = router;
