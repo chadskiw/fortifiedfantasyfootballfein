@@ -83,7 +83,8 @@ const allow = {
 };
 app.options('*', (req, res) => res.set(allow).sendStatus(204));
 app.use((req, res, next) => { res.set(allow); next(); });
-
+app.use(require('./routes/fp_ingest'));  // /api/fp/*
+app.use(require('./routes/scoring'));    // /api/scoring/*
 // ===== Health & status =====
 app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
