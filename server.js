@@ -116,7 +116,9 @@ app.use('/espnconnect', express.static(ESPN_CONNECT_DIR, {
 app.use('/api/espnconnect', espnConnectRouter);
 // expose the Fan endpoint under the platforms namespace too, so FE can use one base:
 app.use('/api/platforms/espn', espnConnectRouter);
-
+// mount
+app.use('/api/minileagues', require('./routes/miniLeagues'));
+app.use('/api/challenges',  require('./routes/challenges'));
 // --- CSP: allow same-origin scripts and inline styles for the page ---
 app.use((req, res, next) => {
   res.set('Content-Security-Policy',
