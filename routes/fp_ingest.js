@@ -57,6 +57,23 @@ CREATE TABLE IF NOT EXISTS ff_team_points_cache (
 CREATE UNIQUE INDEX IF NOT EXISTS ff_team_points_cache_uniq4
   ON ff_team_points_cache (season, league_id, team_id, scoring);
 `;
+// routes/fp_ingest.js (CommonJS) — add near the top
+router.get('/api/fp/diagnose', async (_req, res) => {
+  try {
+    const out = {};
+    const q = (sql, params=[]) => pool.query(sql, params).then(r=>r.rows);
+    out.tables = await q(`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema='public' AND table_name IN
+        ('ff_fp_points_week','ff_team_weekly_points','ff_team_points_cache','ff_espn_roster_week','ff_fp_player_map')
+      ORDER BY table_name`);
+    out.fp_points_sample = await q(`SELECT * FROM ff_fp_points_week ORDER BY season DESC, week DESC LIMIT 3`);
+    out.roster_sample   = await q(`SELECT * FROM ff_espn_roster_week ORDER BY season DESC, week DESC LIMIT 3`).catch(()=>[]);
+    res.json({ ok:true, diagnose: out });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
 
 /** Ensure tables exist */
 router.post('/api/fp/ensure-ddl', async (_req, res) => {
