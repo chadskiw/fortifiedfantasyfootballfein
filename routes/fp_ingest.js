@@ -121,9 +121,13 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
       const cols = ['season','week','scoring','fp_id','name','position','team_abbr','points'];
       const params = { };
       const arrays = cols.map((_c, idx) => chunk.map(r => r[idx]));
+
       const sql = `
-        INSERT INTO ff_fp_points_week (season, week, scoring, fp_id, name, position, team_abbr, points, updated_at)
-        SELECT * FROM unnest($1::int[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::numeric[])
+        INSERT INTO ff_fp_points_week (season, week, scoring, fp_id, name, position, team_abbr, points)
+        SELECT * FROM unnest(
+          $1::int[], $2::int[], $3::text[], $4::int[],
+          $5::text[], $6::text[], $7::text[], $8::numeric[]
+        )
         ON CONFLICT (season, week, scoring, fp_id)
         DO UPDATE SET
           name = EXCLUDED.name,
@@ -132,6 +136,7 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
           points = EXCLUDED.points,
           updated_at = now();`;
       const r = await client.query(sql, arrays);
+
       rows += r.rowCount || 0;
     }
 
