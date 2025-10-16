@@ -270,8 +270,8 @@ function rosterFields(p) {
   };
 }
 
-/* ------------------------ Apply to League (build) ----------------------- */
-// ------------------------ Apply to League (replace) ----------------------
+
+// ------------------------ Apply to League (build) -----------------------
 router.post('/api/fp/apply-to-league', async (req, res) => {
   const { season, league_id, cutoffWeek = null } = req.body || {};
   const scorings = ['STD', 'HALF', 'PPR'];
@@ -300,13 +300,13 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
     }
 
     // Build roster indexes per week
-    const rostersByWeek = new Map(); // week -> { byFpId, byNTP, byNT, byN }
+    const rostersByWeek = new Map(); // week -> { byFpId, byNTP, byNT, byN, peek }
     const warnings = [];
 
     for (const { week } of wkRows) {
       const url = `${baseURL}/api/platforms/espn/roster?season=${encodeURIComponent(season)}&leagueId=${encodeURIComponent(league_id)}&week=${encodeURIComponent(week)}`;
       try {
-        const r = await (typeof fetch !== 'undefined' ? fetch(url) : (await import('node-fetch')).default(url));
+        const r = await _fetch(url);
         const j = await r.json();
         if (!r.ok || !j?.ok) throw new Error(j?.error || `roster_fetch_${r.status}`);
 
@@ -319,7 +319,6 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
           const tid = Number(team.teamId);
           for (const p of (team.players || [])) {
             const f = rosterFields(p);
-
             const n  = canonName(f.name);
             const ta = normTeam(f.team);
             const po = normPos(f.pos);
@@ -338,16 +337,15 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
           }
         }
 
-        // small debug snapshot to help when matched==0
-        const sample = 3;
-        const peek = {
-          fpId: Array.from(byFpId.keys()).slice(0, sample),
-          nTp:  Array.from(byNTP.keys()).slice(0, sample),
-          nT:   Array.from(byNT.keys()).slice(0, sample),
-          n:    Array.from(byN.keys()).slice(0, sample),
-        };
-
-        rostersByWeek.set(Number(week), { byFpId, byNTP, byNT, byN, peek });
+        rostersByWeek.set(Number(week), {
+          byFpId, byNTP, byNT, byN,
+          peek: {
+            fpId: Array.from(byFpId.keys()).slice(0, 3),
+            nTp:  Array.from(byNTP.keys()).slice(0, 3),
+            nT:   Array.from(byNT.keys()).slice(0, 3),
+            n:    Array.from(byN.keys()).slice(0, 3),
+          }
+        });
       } catch (e) {
         warnings.push(`week ${week}: ${e.message}`);
         rostersByWeek.set(Number(week), { byFpId:new Map(), byNTP:new Map(), byNT:new Map(), byN:new Map(), peek:{} });
@@ -383,8 +381,6 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       const k3 = `${n}`;
 
       let tid = null;
-
-      // priority: fpId -> name+team+pos -> name+team -> name
       if (Number.isFinite(row.fp_id) && maps.byFpId.has(row.fp_id)) {
         tid = maps.byFpId.get(row.fp_id);
       } else {
@@ -399,7 +395,6 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
     }
 
     if (matched === 0) {
-      // include a tiny peek at week 1 index keys to debug quickly in UI
       const wk1 = rostersByWeek.get(weeksArr[0]);
       return res.status(400).json({
         ok:false,
@@ -408,7 +403,7 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       });
     }
 
-    // === upsert weekly + week1 totals + cache (unchanged from your version) ===
+    // Upsert weekly + week1 totals + cache
     await client.query('BEGIN');
 
     const rows = Array.from(agg.entries()).map(([k, pts]) => {
@@ -427,126 +422,106 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
     }
 
     if (rows.length) {
-// week=1 row stores season-to-date totals (weeks 2..cutoff) — fully qualified
-await client.query(
-  `
-  WITH totals AS (
-    SELECT
-      w.season,
-      w.league_id,
-      w.team_id,
-      w.scoring,
-      SUM(w.points)::numeric AS sum_pts
-    FROM ff_team_weekly_points AS w
-    WHERE w.season = $1
-      AND w.league_id = $2
-      AND w.scoring = ANY($3)
-      AND w.week BETWEEN 2 AND COALESCE($4::int, 99)
-    GROUP BY w.season, w.league_id, w.team_id, w.scoring
-  )
-  INSERT INTO ff_team_weekly_points AS dst
-    (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
-  SELECT
-    t.season,
-    t.league_id,
-    t.team_id,
-    1,
-    COALESCE(s.team_name, 'Team ' || t.team_id) AS team_name,
-    t.sum_pts,
-    '[]'::jsonb,
-    t.scoring,
-    now(),
-    now()
-  FROM totals AS t
-  LEFT JOIN ff_sport_ffl AS s
-    ON s.season = t.season
-   AND s.league_id::text = t.league_id
-   AND s.team_id = t.team_id
-  ON CONFLICT (season, league_id, team_id, week, scoring)
-  DO UPDATE SET
-    team_name = EXCLUDED.team_name,
-    points    = EXCLUDED.points,
-    updated_at= now()
-  `,
-  [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
-);
+      await client.query(
+        `INSERT INTO ff_team_weekly_points
+           (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
+         SELECT * FROM unnest(
+           $1::int[], $2::text[], $3::int[], $4::int[], $5::text[], $6::numeric[], $7::jsonb[], $8::text[], $9::timestamptz[], $10::timestamptz[]
+         )
+         ON CONFLICT (season, league_id, team_id, week, scoring)
+         DO UPDATE SET team_name=EXCLUDED.team_name, points=EXCLUDED.points, updated_at=now()`,
+        [S,L,T,W,TN,PTS,Array(S.length).fill('[]'),SC,Array(S.length).fill(new Date().toISOString()),Array(S.length).fill(new Date().toISOString())]
+      );
 
+      // week=1 season-to-date (weeks 2..cutoff)
+      await client.query(
+        `
+        WITH totals AS (
+          SELECT
+            w.season,
+            w.league_id,
+            w.team_id,
+            w.scoring,
+            SUM(w.points)::numeric AS sum_pts
+          FROM ff_team_weekly_points AS w
+          WHERE w.season = $1
+            AND w.league_id = $2
+            AND w.scoring = ANY($3)
+            AND w.week BETWEEN 2 AND COALESCE($4::int, 99)
+          GROUP BY w.season, w.league_id, w.team_id, w.scoring
+        )
+        INSERT INTO ff_team_weekly_points AS dst
+          (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
+        SELECT
+          t.season,
+          t.league_id,
+          t.team_id,
+          1,
+          COALESCE(s.team_name, 'Team ' || t.team_id) AS team_name,
+          t.sum_pts,
+          '[]'::jsonb,
+          t.scoring,
+          now(),
+          now()
+        FROM totals AS t
+        LEFT JOIN ff_sport_ffl AS s
+          ON s.season = t.season
+         AND s.league_id::text = t.league_id
+         AND s.team_id = t.team_id
+        ON CONFLICT (season, league_id, team_id, week, scoring)
+        DO UPDATE SET
+          team_name = EXCLUDED.team_name,
+          points    = EXCLUDED.points,
+          updated_at= now()
+        `,
+        [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
+      );
     }
 
-// refresh cache (LATEST + SEASON TOTALS) — fully qualified to avoid ambiguity
-await client.query(
-  `
-  WITH latest AS (
-    SELECT DISTINCT ON (w.season, w.league_id, w.team_id, w.scoring)
-           w.season, w.league_id, w.team_id, w.scoring, w.week, w.points,
-           COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
-    FROM ff_team_weekly_points AS w
-    LEFT JOIN ff_sport_ffl AS s
-      ON s.season = w.season
-     AND s.league_id::text = w.league_id
-     AND s.team_id = w.team_id
-    WHERE w.season = $1
-      AND w.league_id = $2
-      AND w.scoring = ANY($3)
-    ORDER BY w.season, w.league_id, w.team_id, w.scoring, w.week DESC, w.updated_at DESC
-  ),
-  season_tot AS (
-    SELECT w.season, w.league_id, w.team_id, w.scoring,
-           SUM(w.points)::numeric AS season_pts
-    FROM ff_team_weekly_points AS w
-    WHERE w.season = $1
-      AND w.league_id = $2
-      AND w.scoring = ANY($3)
-    GROUP BY w.season, w.league_id, w.team_id, w.scoring
-  )
-  INSERT INTO ff_team_points_cache AS c
-    (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
-  SELECT l.season, l.league_id, l.team_id, l.team_name, l.scoring,
-         l.week, l.points, s.season_pts, now()
-  FROM latest l
-  JOIN season_tot s
-    ON s.season   = l.season
-   AND s.league_id = l.league_id
-   AND s.team_id   = l.team_id
-   AND s.scoring   = l.scoring
-  ON CONFLICT (season, league_id, team_id, scoring)
-  DO UPDATE SET
-    team_name = EXCLUDED.team_name,
-    week      = EXCLUDED.week,
-    week_pts  = EXCLUDED.week_pts,
-    season_pts= EXCLUDED.season_pts,
-    updated_at= now()
-  `,
-  [Number(season), String(league_id), scorings]
-);
-
+    // refresh cache (LATEST + SEASON TOTALS) — single, fully qualified block
     await client.query(
-      `WITH latest AS (
-         SELECT DISTINCT ON (season, league_id, team_id, scoring)
-                season, league_id, team_id, scoring, week, points,
-                COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
-         FROM ff_team_weekly_points w
-         LEFT JOIN ff_sport_ffl s
-           ON s.season=w.season AND s.league_id::text=w.league_id AND s.team_id=w.team_id
-         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
-         ORDER BY season, league_id, team_id, scoring, week DESC, updated_at DESC
-       ),
-       season_tot AS (
-         SELECT season, league_id, team_id, scoring, SUM(points)::numeric AS season_pts
-         FROM ff_team_weekly_points
-         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
-         GROUP BY 1,2,3,4
-       )
-       INSERT INTO ff_team_points_cache AS c
-         (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
-       SELECT l.season, l.league_id, l.team_id, l.team_name, l.scoring,
-              l.week, l.points, s.season_pts, now()
-       FROM latest l
-       JOIN season_tot s USING (season, league_id, team_id, scoring)
-       ON CONFLICT (season, league_id, team_id, scoring)
-       DO UPDATE SET
-         team_name=EXCLUDED.team_name, week=EXCLUDED.week,
-         week_pts=EXCLUDED.week_pts, season_pts=EXCLUDED.season_pts, updated_at=now()`,
+      `
+      WITH latest AS (
+        SELECT DISTINCT ON (w.season, w.league_id, w.team_id, w.scoring)
+               w.season, w.league_id, w.team_id, w.scoring, w.week, w.points,
+               COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
+        FROM ff_team_weekly_points AS w
+        LEFT JOIN ff_sport_ffl AS s
+          ON s.season = w.season
+         AND s.league_id::text = w.league_id
+         AND s.team_id = w.team_id
+        WHERE w.season = $1
+          AND w.league_id = $2
+          AND w.scoring = ANY($3)
+        ORDER BY w.season, w.league_id, w.team_id, w.scoring, w.week DESC, w.updated_at DESC
+      ),
+      season_tot AS (
+        SELECT w.season, w.league_id, w.team_id, w.scoring,
+               SUM(w.points)::numeric AS season_pts
+        FROM ff_team_weekly_points AS w
+        WHERE w.season = $1
+          AND w.league_id = $2
+          AND w.scoring = ANY($3)
+        GROUP BY w.season, w.league_id, w.team_id, w.scoring
+      )
+      INSERT INTO ff_team_points_cache AS c
+        (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
+      SELECT l.season, l.league_id, l.team_id, l.team_name, l.scoring,
+             l.week, l.points, s.season_pts, now()
+      FROM latest l
+      JOIN season_tot s
+        ON s.season    = l.season
+       AND s.league_id = l.league_id
+       AND s.team_id   = l.team_id
+       AND s.scoring   = l.scoring
+      ON CONFLICT (season, league_id, team_id, scoring)
+      DO UPDATE SET
+        team_name = EXCLUDED.team_name,
+        week      = EXCLUDED.week,
+        week_pts  = EXCLUDED.week_pts,
+        season_pts= EXCLUDED.season_pts,
+        updated_at= now()
+      `,
       [Number(season), String(league_id), scorings]
     );
 
@@ -560,6 +535,7 @@ await client.query(
     client.release();
   }
 });
+
 
 
 module.exports = router;
