@@ -96,31 +96,42 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
     await client.query('BEGIN');
     let rows = 0;
 
+    // flatten records
+    const records = [];
     for (const b of batches) {
-      const vals = [];
+      const scoring = String(b.scoring || '').toUpperCase();
       for (const p of (b.players || [])) {
-        const name = String(p.name || '').replace(/'/g, "''");
-        const pos  = String(p.position || '').replace(/'/g, "''");
-        const team = String(p.team || p.team_abbr || '').replace(/'/g, "''");
-        vals.push(`(${[
-          b.season || season, b.week, `'${String(b.scoring).toUpperCase()}'`,
-          Number(p.fpId ?? p.fp_id), `'${name}'`, `'${pos}'`, `'${team}'`, Number(p.points) || 0
-        ].join(',')})`);
+        records.push([
+          Number(b.season || season),
+          Number(b.week),
+          scoring,
+          Number(p.fpId ?? p.fp_id),
+          String(p.name || ''),
+          String(p.position || ''),
+          String(p.team || p.team_abbr || ''),
+          Number(p.points) || 0
+        ]);
       }
-      if (!vals.length) continue;
+    }
 
+    // chunk into 2k rows per insert
+    const CHUNK = 2000;
+    for (let i=0; i<records.length; i+=CHUNK) {
+      const chunk = records.slice(i, i+CHUNK);
+      const cols = ['season','week','scoring','fp_id','name','position','team_abbr','points'];
+      const params = { };
+      const arrays = cols.map((_c, idx) => chunk.map(r => r[idx]));
       const sql = `
         INSERT INTO ff_fp_points_week (season, week, scoring, fp_id, name, position, team_abbr, points, updated_at)
-        VALUES ${vals.join(',')}
+        SELECT * FROM unnest($1::int[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::numeric[])
         ON CONFLICT (season, week, scoring, fp_id)
         DO UPDATE SET
           name = EXCLUDED.name,
           position = EXCLUDED.position,
           team_abbr = EXCLUDED.team_abbr,
           points = EXCLUDED.points,
-          updated_at = now();
-      `;
-      const r = await client.query(sql);
+          updated_at = now();`;
+      const r = await client.query(sql, arrays);
       rows += r.rowCount || 0;
     }
 
@@ -128,6 +139,7 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
     res.json({ ok:true, season, batches:batches.length, upserted_rows: rows });
   } catch (e) {
     await client.query('ROLLBACK');
+    console.error('ingest-batch error:', e);
     res.status(500).json({ ok:false, error:String(e) });
   } finally {
     client.release();
