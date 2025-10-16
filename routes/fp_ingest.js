@@ -151,35 +151,104 @@ router.post('/api/fp/ingest-batch', async (req, res) => {
   }
 });
 
-/** Apply staged FP rows to a league: build weekly totals + season totals + refresh cache */
+// routes/fp_ingest.js  — replace the whole /apply-to-league handler with this:
 router.post('/api/fp/apply-to-league', async (req, res) => {
   const { season, league_id, scorings = ['STD','HALF','PPR'], cutoffWeek = null } = req.body || {};
   if (!season || !league_id) return res.status(400).json({ ok:false, error:'missing season/league_id' });
 
+  // Where to call our own roster route from (same service). Node 18+ has global fetch.
+  const baseURL =
+    process.env.INTERNAL_BASE_URL ||
+    `http://127.0.0.1:${process.env.PORT || 3000}`;
+
   const client = await pool.connect();
   try {
     await client.query(DDL);
+
+    // 1) figure out which weeks we need (from staged FP points)
+    const wkSQL = `
+      SELECT DISTINCT week
+      FROM ff_fp_points_week
+      WHERE season=$1 AND scoring = ANY($2)
+        ${cutoffWeek ? 'AND week <= $3' : ''}
+      ORDER BY week`;
+    const wkParams = cutoffWeek ? [Number(season), scorings.map(String), Number(cutoffWeek)] : [Number(season), scorings.map(String)];
+    const { rows: wkRows } = await client.query(wkSQL, wkParams);
+    if (wkRows.length === 0) {
+      return res.status(400).json({ ok:false, error:'no_fp_points_for_season_or_scoring' });
+    }
+
+    // 2) pull rosters from your ESPN route for each week
+    const rosterRows = []; // [season, week, league_id, team_id, fp_id]
+    const warnings = [];
+    for (const { week } of wkRows) {
+      const url = `${baseURL}/api/platforms/espn/roster?season=${encodeURIComponent(season)}&leagueId=${encodeURIComponent(league_id)}&week=${encodeURIComponent(week)}`;
+      let j;
+      try {
+        const r = await fetch(url);
+        j = await r.json();
+        if (!r.ok || !j?.ok) throw new Error(j?.error || `roster_fetch_failed_${r.status}`);
+      } catch (e) {
+        warnings.push(`week ${week}: ${e.message}`);
+        continue;
+      }
+      const teams = Array.isArray(j.teams) ? j.teams : [];
+      for (const t of teams) {
+        const teamId = Number(t.teamId);
+        if (!Number.isFinite(teamId)) continue;
+        const players = Array.isArray(t.players) ? t.players : [];
+        for (const p of players) {
+          const fpId = Number(p.fpId ?? p.fpid ?? p?.externalIds?.fantasyProsId);
+          if (Number.isFinite(fpId)) {
+            rosterRows.push([Number(season), Number(week), String(league_id), teamId, fpId]);
+          }
+        }
+      }
+    }
+
+    if (rosterRows.length === 0) {
+      return res.status(400).json({ ok:false, error:'no_roster_fpids_found', warnings });
+    }
+
+    // de-dup (player might appear twice via multiple views)
+    const seen = new Set();
+    const uniq = [];
+    for (const r of rosterRows) {
+      const k = `${r[1]}|${r[3]}|${r[4]}`; // week|team_id|fp_id
+      if (seen.has(k)) continue;
+      seen.add(k);
+      uniq.push(r);
+    }
+
     await client.query('BEGIN');
 
-    const weeklySQL = `
-      WITH roster AS (
-        SELECT season, week, league_id::text AS league_id, team_id,
-               COALESCE(r.fp_id, m.fp_id) AS fp_id
-        FROM ff_espn_roster_week r
-        LEFT JOIN ff_fp_player_map m ON m.player_id = r.player_id
-        WHERE season = $1 AND league_id::text = $2
-      ),
-      filt AS (
-        SELECT f.season, f.week, f.scoring, r.league_id, r.team_id, f.points
+    // 3) temp roster map for SQL joins
+    await client.query('CREATE TEMP TABLE tmp_roster_map (season int, week int, league_id text, team_id int, fp_id int) ON COMMIT DROP');
+    const S = uniq.map(r => r[0]);
+    const W = uniq.map(r => r[1]);
+    const L = uniq.map(r => r[2]);
+    const T = uniq.map(r => r[3]);
+    const F = uniq.map(r => r[4]);
+    await client.query(
+      `INSERT INTO tmp_roster_map (season, week, league_id, team_id, fp_id)
+       SELECT * FROM unnest($1::int[], $2::int[], $3::text[], $4::int[], $5::int[])`,
+      [S, W, L, T, F]
+    );
+
+    // 4) one SQL pass: weekly → week=1 totals → cache
+    const sql = `
+      WITH filt AS (
+        SELECT f.season, f.week, m.league_id, m.team_id, f.scoring, f.points
         FROM ff_fp_points_week f
-        JOIN roster r ON r.season=f.season AND r.week=f.week AND r.fp_id=f.fp_id
-        WHERE f.scoring = ANY($3)
+        JOIN tmp_roster_map m
+          ON m.season=f.season AND m.week=f.week AND m.fp_id=f.fp_id
+        WHERE f.season=$1 AND m.league_id=$2 AND f.scoring = ANY($3)
           AND ($4::int IS NULL OR f.week <= $4::int)
+          AND f.week BETWEEN 2 AND COALESCE($4::int, 99)
       ),
       agg AS (
         SELECT season, league_id, team_id, week, scoring, SUM(points)::numeric AS pts
-        FROM filt
-        GROUP BY 1,2,3,4,5
+        FROM filt GROUP BY 1,2,3,4,5
       ),
       named AS (
         SELECT a.*, COALESCE(s.team_name, 'Team '||a.team_id) AS team_name
@@ -199,7 +268,8 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       totals AS (
         SELECT season, league_id, team_id, scoring, SUM(points)::numeric AS sum_pts
         FROM ff_team_weekly_points
-        WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3) AND week BETWEEN 2 AND COALESCE($4::int, 99)
+        WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
+          AND week BETWEEN 2 AND COALESCE($4::int, 99)
         GROUP BY 1,2,3,4
       ),
       up_totals AS (
@@ -244,18 +314,23 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       RETURNING 1;
     `;
 
-    const upw = await client.query(weeklySQL, [
-      Number(season), String(league_id), scorings.map(String), cutoffWeek ?? null
+    const up = await client.query(sql, [
+      Number(season),
+      String(league_id),
+      scorings.map(s => String(s).toUpperCase()),
+      cutoffWeek ? Number(cutoffWeek) : null
     ]);
 
     await client.query('COMMIT');
-    res.json({ ok:true, weekly_rows: '✔', season_rows: '✔', cache_rows: upw.rowCount || 0 });
+    res.json({ ok:true, cache_rows: up.rowCount || 0, warnings });
   } catch (e) {
     await client.query('ROLLBACK');
+    console.error('apply-to-league(live roster) error:', e);
     res.status(500).json({ ok:false, error:String(e) });
   } finally {
     client.release();
   }
 });
+
 
 module.exports = router;
