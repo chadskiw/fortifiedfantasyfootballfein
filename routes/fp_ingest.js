@@ -439,26 +439,52 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
       );
     }
 
-    await client.query(
-      `WITH totals AS (
-         SELECT season, league_id, team_id, scoring, SUM(points)::numeric AS sum_pts
-         FROM ff_team_weekly_points
-         WHERE season=$1 AND league_id::text=$2 AND scoring = ANY($3)
-           AND week BETWEEN 2 AND COALESCE($4::int, 99)
-         GROUP BY 1,2,3,4
-       )
-       INSERT INTO ff_team_weekly_points
-         (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
-       SELECT t.season, t.league_id, t.team_id, 1,
-              COALESCE(s.team_name, 'Team '||t.team_id),
-              t.sum_pts, '[]'::jsonb, t.scoring, now(), now()
-       FROM totals t
-       LEFT JOIN ff_sport_ffl s
-         ON s.season=t.season AND s.league_id::text=t.league_id AND s.team_id=t.team_id
-       ON CONFLICT (season, league_id, team_id, week, scoring)
-       DO UPDATE SET team_name=EXCLUDED.team_name, points=EXCLUDED.points, updated_at=now()`,
-      [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
-    );
+// refresh cache (LATEST + SEASON TOTALS) — fully qualified to avoid ambiguity
+await client.query(
+  `
+  WITH latest AS (
+    SELECT DISTINCT ON (w.season, w.league_id, w.team_id, w.scoring)
+           w.season, w.league_id, w.team_id, w.scoring, w.week, w.points,
+           COALESCE(s.team_name, 'Team '||w.team_id) AS team_name
+    FROM ff_team_weekly_points AS w
+    LEFT JOIN ff_sport_ffl AS s
+      ON s.season = w.season
+     AND s.league_id::text = w.league_id
+     AND s.team_id = w.team_id
+    WHERE w.season = $1
+      AND w.league_id = $2
+      AND w.scoring = ANY($3)
+    ORDER BY w.season, w.league_id, w.team_id, w.scoring, w.week DESC, w.updated_at DESC
+  ),
+  season_tot AS (
+    SELECT w.season, w.league_id, w.team_id, w.scoring,
+           SUM(w.points)::numeric AS season_pts
+    FROM ff_team_weekly_points AS w
+    WHERE w.season = $1
+      AND w.league_id = $2
+      AND w.scoring = ANY($3)
+    GROUP BY w.season, w.league_id, w.team_id, w.scoring
+  )
+  INSERT INTO ff_team_points_cache AS c
+    (season, league_id, team_id, team_name, scoring, week, week_pts, season_pts, updated_at)
+  SELECT l.season, l.league_id, l.team_id, l.team_name, l.scoring,
+         l.week, l.points, s.season_pts, now()
+  FROM latest l
+  JOIN season_tot s
+    ON s.season   = l.season
+   AND s.league_id = l.league_id
+   AND s.team_id   = l.team_id
+   AND s.scoring   = l.scoring
+  ON CONFLICT (season, league_id, team_id, scoring)
+  DO UPDATE SET
+    team_name = EXCLUDED.team_name,
+    week      = EXCLUDED.week,
+    week_pts  = EXCLUDED.week_pts,
+    season_pts= EXCLUDED.season_pts,
+    updated_at= now()
+  `,
+  [Number(season), String(league_id), scorings]
+);
 
     await client.query(
       `WITH latest AS (
