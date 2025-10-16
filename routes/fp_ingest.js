@@ -427,16 +427,50 @@ router.post('/api/fp/apply-to-league', async (req, res) => {
     }
 
     if (rows.length) {
-      await client.query(
-        `INSERT INTO ff_team_weekly_points
-           (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
-         SELECT * FROM unnest(
-           $1::int[], $2::text[], $3::int[], $4::int[], $5::text[], $6::numeric[], $7::jsonb[], $8::text[], $9::timestamptz[], $10::timestamptz[]
-         )
-         ON CONFLICT (season, league_id, team_id, week, scoring)
-         DO UPDATE SET team_name=EXCLUDED.team_name, points=EXCLUDED.points, updated_at=now()`,
-        [S,L,T,W,TN,PTS,Array(S.length).fill('[]'),SC,Array(S.length).fill(new Date().toISOString()),Array(S.length).fill(new Date().toISOString())]
-      );
+// week=1 row stores season-to-date totals (weeks 2..cutoff) — fully qualified
+await client.query(
+  `
+  WITH totals AS (
+    SELECT
+      w.season,
+      w.league_id,
+      w.team_id,
+      w.scoring,
+      SUM(w.points)::numeric AS sum_pts
+    FROM ff_team_weekly_points AS w
+    WHERE w.season = $1
+      AND w.league_id = $2
+      AND w.scoring = ANY($3)
+      AND w.week BETWEEN 2 AND COALESCE($4::int, 99)
+    GROUP BY w.season, w.league_id, w.team_id, w.scoring
+  )
+  INSERT INTO ff_team_weekly_points AS dst
+    (season, league_id, team_id, week, team_name, points, starters, scoring, created_at, updated_at)
+  SELECT
+    t.season,
+    t.league_id,
+    t.team_id,
+    1,
+    COALESCE(s.team_name, 'Team ' || t.team_id) AS team_name,
+    t.sum_pts,
+    '[]'::jsonb,
+    t.scoring,
+    now(),
+    now()
+  FROM totals AS t
+  LEFT JOIN ff_sport_ffl AS s
+    ON s.season = t.season
+   AND s.league_id::text = t.league_id
+   AND s.team_id = t.team_id
+  ON CONFLICT (season, league_id, team_id, week, scoring)
+  DO UPDATE SET
+    team_name = EXCLUDED.team_name,
+    points    = EXCLUDED.points,
+    updated_at= now()
+  `,
+  [Number(season), String(league_id), scorings, cutoffWeek ? Number(cutoffWeek) : null]
+);
+
     }
 
 // refresh cache (LATEST + SEASON TOTALS) — fully qualified to avoid ambiguity
