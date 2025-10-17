@@ -13,7 +13,7 @@ const pool = new Pool({
 
 // ---------- helpers ----------
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
-const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
+const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 7);
 // #region helpers-id-factories
 // compact id generator with a prefix (ch_, chs_, che_)
 const rid = (p = 'ch') =>
@@ -23,6 +23,56 @@ const newChallengeId = () => rid('ch');
 const newSideId      = () => rid('chs'); // <-- use this when inserting ff_challenge_side
 const newEventId     = () => rid('che'); // events
 // #endregion helpers-id-factories
+// #region helpers-builder-and-ids
+const DEFAULT_PLATFORM = '018'; // ESPN code
+
+
+
+function normalizePlatform(p) {
+  if (!p) return DEFAULT_PLATFORM;
+  const s = String(p).trim().toLowerCase();
+  if (s === 'espn' || s === '018') return '018';
+  return p;
+}
+const normSide = s => {
+  const v = String(s ?? 'home').toLowerCase();
+  return (v === '2' || v === 'away') ? 2 : 1; // default home=1
+};
+
+// Accepts multiple shapes and prefers builder.*
+// If side is known (1=home,2=away), we use builder.home/builder.away first.
+function readTeamFrom(body = {}, query = {}, side = 1) {
+  const b = body || {};
+  const q = query || {};
+  const fromBuilderTeam =
+    (b.builder && b.builder.team) ? b.builder.team :
+    (b.builder && side === 1 && b.builder.home) ? b.builder.home :
+    (b.builder && side === 2 && b.builder.away) ? b.builder.away :
+    null;
+
+  const src = fromBuilderTeam || b.team || b || q;
+
+  return {
+    platform: src.platform ?? b.platform ?? q.platform ?? null,
+    leagueId: src.leagueId ?? b.leagueId ?? q.leagueId ?? null,
+    teamId:   src.teamId   ?? b.teamId   ?? q.teamId   ?? null,
+    teamName: src.teamName ?? b.teamName ?? q.teamName ?? null,
+  };
+}
+
+const numOrNull = v => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+
+function resolveSeasonWeek(body = {}, query = {}) {
+  const b = body || {};
+  const q = query || {};
+  const fromBuilder = b.builder || {};
+  const season = numOrNull(b.season ?? fromBuilder.season ?? q.season) ?? Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
+  const week   = numOrNull(b.week   ?? fromBuilder.week   ?? q.week)   ?? Number(process.env.FF_CURRENT_WEEK || 1);
+  return { season, week };
+}
+
+
+// #endregion helpers-builder-and-ids
 
 function parseCookies(header = '') {
   return Object.fromEntries(
@@ -38,7 +88,6 @@ function parseCookies(header = '') {
 }
 const getCookies = req => req.cookies ?? parseCookies(req.headers.cookie || '');
 // #region helpers-platform
-const DEFAULT_PLATFORM = '018'; // ESPN
 
 function normalizePlatform(p) {
   if (!p) return DEFAULT_PLATFORM;
@@ -50,12 +99,7 @@ function normalizePlatform(p) {
 }
 // #endregion helpers-platform
 
-const normSide = s => {
-  const v = String(s ?? 'home').toLowerCase();
-  return (v === '2' || v === 'away') ? 2 : 1; // default home=1
-};
 
-const numOrNull = v => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 
 async function resolveMemberId(req) {
   const c = getCookies(req);
@@ -147,6 +191,35 @@ async function readChallengeAggregate(id) {
 // Anyone can claim any team for a side. Team is optional. season/week default if not supplied.
 // ?force=1 lets caller take over an already-claimed side.
 router.post('/api/challenges/:id/claim', async (req, res) => {
+    // #region route-claim-args
+const q = req.query || {};
+const b = req.body || {};
+
+const side   = normSide(b.side ?? q.side);
+const { season, week } = resolveSeasonWeek(b, q);
+const value  = numOrNull(b.value ?? q.value) ?? 0;
+const force  = String(q.force ?? b.force ?? '0') === '1';
+
+// **Get team from the builder first**
+const team   = readTeamFrom(b, q, side);
+const platform = normalizePlatform(team.platform);
+
+// Hard-require league/team (no placeholders)
+const missing = [];
+if (!team.leagueId) missing.push('leagueId (builder.*)');
+if (!team.teamId)   missing.push('teamId (builder.*)');
+if (missing.length) {
+  return res.status(400).json({
+    ok: false,
+    error: 'bad_args',
+    missing,
+    hint: 'Send via body.builder.home/away or body.team (include platform/leagueId/teamId).'
+  });
+}
+
+const challengeId = req.params.id;
+// #endregion route-claim-args
+
   try {
     const auth = await resolveMemberId(req);
     if (auth.error) return res.status(401).json({ ok: false, error: auth.error });
@@ -164,24 +237,23 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
     const challengeId = req.params.id;
 
     // upsert challenge row (season/week are ALWAYS non-null now)
-    await pool.query(
-      `INSERT INTO ff_challenge (id, season, week, status, stake_points, created_at, updated_at)
-       VALUES ($1, $2, $3, 'open', $4, now(), now())
-       ON CONFLICT (id) DO UPDATE
-         SET season = $2,
-             week   = $3,
-             stake_points = COALESCE(EXCLUDED.stake_points, ff_challenge.stake_points),
-             updated_at = now()`,
-      [challengeId, season, week, value]
-    );
+await pool.query(
+  `INSERT INTO ff_challenge (id, season, week, status, stake_points, created_at, updated_at)
+   VALUES ($1, $2, $3, 'open', $4, now(), now())
+   ON CONFLICT (id) DO UPDATE
+     SET season=$2, week=$3, stake_points=COALESCE(EXCLUDED.stake_points, ff_challenge.stake_points), updated_at=now()`,
+  [challengeId, season, week, value]
+);
 
-    // Existing side?
-    const { rows: sideRows } = await pool.query(
-      `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
-      [challengeId, side]
-    );
-    const claimedBy = sideRows[0]?.owner_member_id || null;
-
+// Side claim policy: block overwrite unless ?force=1
+const { rows: sideRows } = await pool.query(
+  `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
+  [challengeId, side]
+);
+const claimedBy = sideRows[0]?.owner_member_id || null;
+if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
+  return res.status(409).json({ ok:false, error:'side_already_claimed' });
+}
     if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
       // Side is claimed by someone else; allow only if ?force=1
       return res.status(409).json({ ok: false, error: 'side_already_claimed' });
@@ -201,20 +273,15 @@ await pool.query(
      (id, challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
    ON CONFLICT (challenge_id, side) DO UPDATE
-     SET platform        = COALESCE(EXCLUDED.platform, ff_challenge_side.platform),
-         season          = COALESCE(EXCLUDED.season,   ff_challenge_side.season),
-         league_id       = COALESCE(EXCLUDED.league_id,ff_challenge_side.league_id),
-         team_id         = COALESCE(EXCLUDED.team_id,  ff_challenge_side.team_id),
-         team_name       = COALESCE(EXCLUDED.team_name,ff_challenge_side.team_name),
-         owner_member_id = EXCLUDED.owner_member_id`,
+     SET platform=$4, season=$5, league_id=$6, team_id=$7, team_name=$8, owner_member_id=$9`,
   [
-    newSideId(),          // <- generate chs_* so id is never NULL
+    newSideId(),
     challengeId,
     side,
-    platform,             // <- ALWAYS non-null ("018" default)
+    platform,
     season,
-    team.leagueId ? String(team.leagueId) : null,
-    team.teamId   ? String(team.teamId)   : null,
+    String(team.leagueId),
+    String(team.teamId),
     team.teamName || null,
     memberId,
   ]
@@ -234,6 +301,35 @@ await pool.query(
 
 // POST /api/challenges/claim-lock  (claim + lock lineup)
 router.post('/api/challenges/claim-lock', async (req, res) => {
+    // #region route-claim-lock-args
+const b = req.body || {};
+const q = req.query || {};
+
+const id = b.id || null;
+const clientId = b.clientId || null;
+
+const side = normSide(b.side ?? q.side);
+const { season, week } = resolveSeasonWeek(b, q);
+const value = numOrNull(b.value ?? q.value) ?? 0;
+const force = String(q.force ?? b.force ?? '0') === '1';
+
+// **Team from builder first**
+const team = readTeamFrom(b, q, side);
+const platform = normalizePlatform(team.platform);
+
+// lineup payload
+const lineup = b.lineup || {};
+
+const missing = [];
+if (!season) missing.push('season');
+if (!week)   missing.push('week');
+if (!team.leagueId) missing.push('leagueId (builder.*)');
+if (!team.teamId)   missing.push('teamId (builder.*)');
+if (missing.length) {
+  return res.status(400).json({ ok:false, error:'bad_args', missing });
+}
+// #endregion route-claim-lock-args
+
   const client = await pool.connect();
   try {
     const auth = await resolveMemberId(req);
@@ -269,25 +365,26 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
     if (!challengeId) challengeId = rid('ch');
 
     // upsert challenge (season/week always set)
-    await client.query(
-      `INSERT INTO ff_challenge (id, season, week, scoring_profile_id, status, stake_points, client_id, created_at, updated_at)
-       VALUES ($1,$2,$3,NULL,'open',$4,$5, now(), now())
-       ON CONFLICT (id) DO UPDATE
-         SET season=$2, week=$3, stake_points=$4, client_id=COALESCE(ff_challenge.client_id, $5), updated_at=now()`,
-      [challengeId, season, week, value, clientId]
-    );
+await pool.query(
+  `INSERT INTO ff_challenge (id, season, week, status, stake_points, created_at, updated_at)
+   VALUES ($1, $2, $3, 'open', $4, now(), now())
+   ON CONFLICT (id) DO UPDATE
+     SET season=$2, week=$3, stake_points=COALESCE(EXCLUDED.stake_points, ff_challenge.stake_points), updated_at=now()`,
+  [challengeId, season, week, value]
+);
 
-    // side claim policy
-    const { rows: claimRows } = await client.query(
-      `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
-      [challengeId, side]
-    );
-    const claimedBy = claimRows[0]?.owner_member_id || null;
-    if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
-      await client.query('ROLLBACK');
-      client.release();
-      return res.status(409).json({ ok: false, error: 'side_already_claimed' });
-    }
+
+// side ownership (force to take over)
+const { rows: claimRows } = await client.query(
+  `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
+  [challengeId, side]
+);
+const claimedBy = claimRows[0]?.owner_member_id || null;
+if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
+  await client.query('ROLLBACK');
+  return res.status(409).json({ ok:false, error:'side_already_claimed' });
+}
+
 
     // upsert side & lock (no team-ownership checks)
 // #region route-claim-lock-upsert-side
@@ -296,6 +393,10 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
 // #region route-claim-lock-upsert-side
 // Upsert side & lock lineup. Ensure non-null id and platform.
 const platform = normalizePlatform(team.platform);
+
+// #region route-claim-lock-upsert-side
+// ... after you’ve resolved challengeId and BEGIN'ed a tx ...
+
 
 await client.query(
   `INSERT INTO ff_challenge_side
@@ -306,19 +407,21 @@ await client.query(
      platform=$4, season=$5, league_id=$6, team_id=$7, team_name=$8,
      owner_member_id=$9, lineup_json=$10, bench_json=$11, locked_at=now()`,
   [
-    newSideId(),                 // <- chs_*
+    newSideId(),
     challengeId,
     side,
-    platform,                    // <- "018" default if missing
+    platform,
     season,
-    team.leagueId ? String(team.leagueId) : null,
-    team.teamId   ? String(team.teamId)   : null,
+    String(team.leagueId),
+    String(team.teamId),
     team.teamName || null,
     memberId,
     lineup?.starters || null,
     lineup?.bench || null,
   ]
 );
+// #endregion route-claim-lock-upsert-side
+
 // #endregion route-claim-lock-upsert-side
 
 // #endregion route-claim-lock-upsert-side
