@@ -12,9 +12,17 @@ const pool = new Pool({
 });
 
 // ---------- helpers ----------
-const rid = (p = 'ch') => `${p}_${crypto.randomUUID().replace(/-/g, '').slice(0, 18)}`;
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
 const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
+// #region helpers-id-factories
+// compact id generator with a prefix (ch_, chs_, che_)
+const rid = (p = 'ch') =>
+  `${p}_${crypto.randomUUID().replace(/-/g, '').slice(0, 18)}`;
+
+const newChallengeId = () => rid('ch');
+const newSideId      = () => rid('chs'); // <-- use this when inserting ff_challenge_side
+const newEventId     = () => rid('che'); // events
+// #endregion helpers-id-factories
 
 function parseCookies(header = '') {
   return Object.fromEntries(
@@ -168,28 +176,34 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
     }
 
     // Upsert side (NO team-ownership checks; any team allowed; team can be null for now)
-    await pool.query(
-      `INSERT INTO ff_challenge_side
-         (challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (challenge_id, side) DO UPDATE
-         SET platform       = COALESCE(EXCLUDED.platform, ff_challenge_side.platform),
-             season         = COALESCE(EXCLUDED.season,   ff_challenge_side.season),
-             league_id      = COALESCE(EXCLUDED.league_id,ff_challenge_side.league_id),
-             team_id        = COALESCE(EXCLUDED.team_id,  ff_challenge_side.team_id),
-             team_name      = COALESCE(EXCLUDED.team_name,ff_challenge_side.team_name),
-             owner_member_id= EXCLUDED.owner_member_id`,
-      [
-        challengeId,
-        side,
-        team.platform || null,
-        season,
-        team.leagueId ? String(team.leagueId) : null,
-        team.teamId   ? String(team.teamId)   : null,
-        team.teamName || null,
-        memberId,
-      ]
-    );
+// #region route-claim-upsert-side
+// Upsert side (NO team-ownership checks; any team allowed; team can be null for now)
+// NOTE: include `id` column so we never insert NULL into ff_challenge_side.id
+await pool.query(
+  `INSERT INTO ff_challenge_side
+     (id, challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+   ON CONFLICT (challenge_id, side) DO UPDATE
+     SET platform        = COALESCE(EXCLUDED.platform, ff_challenge_side.platform),
+         season          = COALESCE(EXCLUDED.season,   ff_challenge_side.season),
+         league_id       = COALESCE(EXCLUDED.league_id,ff_challenge_side.league_id),
+         team_id         = COALESCE(EXCLUDED.team_id,  ff_challenge_side.team_id),
+         team_name       = COALESCE(EXCLUDED.team_name,ff_challenge_side.team_name),
+         owner_member_id = EXCLUDED.owner_member_id`,
+  [
+    newSideId(),          // <-- id (required by your schema)
+    challengeId,
+    side,
+    team.platform || null,
+    season,
+    team.leagueId ? String(team.leagueId) : null,
+    team.teamId   ? String(team.teamId)   : null,
+    team.teamName || null,
+    memberId,
+  ]
+);
+// #endregion route-claim-upsert-side
+
 
     const challenge = await readChallengeAggregate(challengeId);
     return res.json({ ok: true, challenge });
@@ -257,27 +271,33 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
     }
 
     // upsert side & lock (no team-ownership checks)
-    await client.query(
-      `INSERT INTO ff_challenge_side
-         (challenge_id, side, platform, season, league_id, team_id, team_name,
-          owner_member_id, lineup_json, bench_json, locked_at, points_final)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), NULL)
-       ON CONFLICT (challenge_id, side) DO UPDATE SET
-         platform=$3, season=$4, league_id=$5, team_id=$6, team_name=$7,
-         owner_member_id=$8, lineup_json=$9, bench_json=$10, locked_at=now()`,
-      [
-        challengeId,
-        side,
-        team.platform || null,
-        season,
-        team.leagueId ? String(team.leagueId) : null,
-        team.teamId   ? String(team.teamId)   : null,
-        team.teamName || null,
-        memberId,
-        lineup?.starters || null,
-        lineup?.bench || null,
-      ]
-    );
+// #region route-claim-lock-upsert-side
+// upsert side & lock (no team-ownership checks)
+// include `id` so ff_challenge_side.id is never NULL on first insert
+await client.query(
+  `INSERT INTO ff_challenge_side
+     (id, challenge_id, side, platform, season, league_id, team_id, team_name,
+      owner_member_id, lineup_json, bench_json, locked_at, points_final)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), NULL)
+   ON CONFLICT (challenge_id, side) DO UPDATE SET
+     platform=$4, season=$5, league_id=$6, team_id=$7, team_name=$8,
+     owner_member_id=$9, lineup_json=$10, bench_json=$11, locked_at=now()`,
+  [
+    newSideId(),                 // <-- id (required)
+    challengeId,
+    side,
+    team.platform || null,
+    season,
+    team.leagueId ? String(team.leagueId) : null,
+    team.teamId   ? String(team.teamId)   : null,
+    team.teamName || null,
+    memberId,
+    lineup?.starters || null,
+    lineup?.bench || null,
+  ]
+);
+// #endregion route-claim-lock-upsert-side
+
 
     // bump status when both locked
     const { rows: sides } = await client.query(
