@@ -23,7 +23,6 @@ const pool              = require('./src/db/pool');
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
-const challengesClaimLock = require('./routes/challenges')(pool, { currentWeek: Number(process.env.FF_CURRENT_WEEK || 7) });
 
 const app = express();
 app.disable('x-powered-by');
