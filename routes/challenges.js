@@ -10,6 +10,60 @@ const pool = new Pool({
 });
 
 const rid = (p='ch') => `${p}_${crypto.randomUUID().replace(/-/g,'').slice(0,18)}`;
+// add at top if not present
+const cookie = require('cookie'); // if you don't use cookie-parser
+
+function getMemberId(req){
+  // prefer existing auth if you have it
+  if (req.user?.id) return String(req.user.id);
+
+  // cookie-parser style
+  const c = req.cookies || cookie.parse(req.headers.cookie || '');
+  return String(
+    c.fein_member_id || c.member_id || c['ff.member_id'] || c.mid || ''
+  ) || null;
+}
+
+// helper you already likely have:
+async function readChallenge(pool, id){
+  const { rows: [c] } = await pool.query('SELECT * FROM ff_challenge WHERE id=$1', [id]);
+  if (!c) return null;
+  const { rows: sides } = await pool.query('SELECT * FROM ff_challenge_side WHERE challenge_id=$1',[id]);
+  const map = Object.fromEntries(sides.map(s => [s.side, s]));
+  return { ...c, ...map }; // {id, season, week, home:..., away:...}
+}
+
+// === NEW: claim side ===
+router.post('/api/challenges/:id/claim', async (req, res) => {
+  try{
+    const me = getMemberId(req);
+    if (!me) return res.status(401).json({ ok:false, error:'no_member' });
+
+    const side = (req.body?.side === 2 || req.body?.side === 'away') ? 'away' : 'home';
+    const c = await readChallenge(pool, req.params.id);
+    if (!c) return res.status(404).json({ ok:false, error:'not_found' });
+    if (Number(c.week) < Number(process.env.FF_CURRENT_WEEK || 1))
+      return res.status(400).json({ ok:false, error:'past_week' });
+
+    const current = c[side];
+    if (current?.owner_member_id && String(current.owner_member_id) !== String(me))
+      return res.status(409).json({ ok:false, error:'claimed_by_other' });
+
+    const { rows:[row] } = await pool.query(
+      `UPDATE ff_challenge_side
+         SET owner_member_id=$1
+       WHERE challenge_id=$2 AND side=$3
+       RETURNING *`,
+      [me, req.params.id, side]
+    );
+    await pool.query(
+      `INSERT INTO ff_challenge_event (challenge_id, actor_member_id, type, data)
+       VALUES ($1,$2,'claimed',$3)`,
+      [req.params.id, me, { side }]
+    );
+    res.json({ ok:true, side: row });
+  }catch(e){ console.error(e); res.status(500).json({ ok:false, error:'server_error' }); }
+});
 
 // POST /api/challenges  (create)
 router.post('/', async (req, res) => {
