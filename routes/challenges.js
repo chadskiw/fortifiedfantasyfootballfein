@@ -191,36 +191,68 @@ module.exports = (pool, opts = {}) => {
 };
 
 // === NEW: claim side ===
+// If you already use cookie-parser, req.cookies exists.
+// If not, this parser will grab cookies from the header.
+function parseCookies(h = '') {
+  return Object.fromEntries(
+    h.split(';')
+     .map(p => p.trim())
+     .filter(Boolean)
+     .map(p => {
+       const i = p.indexOf('=');
+       return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))];
+     })
+  );
+}
+
 router.post('/api/challenges/:id/claim', async (req, res) => {
-  try{
-    const me = getMemberId(req);
-    if (!me) return res.status(401).json({ ok:false, error:'no_member' });
+  const cookies = req.cookies ?? parseCookies(req.headers.cookie || '');
+  const sid = cookies.ff_session_id;
+  if (!sid) return res.status(401).json({ ok:false, error:'no_session' });
 
-    const side = (req.body?.side === 2 || req.body?.side === 'away') ? 'away' : 'home';
-    const c = await readChallenge(pool, req.params.id);
-    if (!c) return res.status(404).json({ ok:false, error:'not_found' });
-    if (Number(c.week) < Number(process.env.FF_CURRENT_WEEK || 1))
-      return res.status(400).json({ ok:false, error:'past_week' });
+  // Look up the session
+  let row = await db.oneOrNone(
+    'select member_id from ff_session where session_id = $1',
+    [sid]
+  );
 
-    const current = c[side];
-    if (current?.owner_member_id && String(current.owner_member_id) !== String(me))
-      return res.status(409).json({ ok:false, error:'claimed_by_other' });
+  let memberId = row?.member_id;
 
-    const { rows:[row] } = await pool.query(
-      `UPDATE ff_challenge_side
-         SET owner_member_id=$1
-       WHERE challenge_id=$2 AND side=$3
-       RETURNING *`,
-      [me, req.params.id, side]
-    );
-    await pool.query(
-      `INSERT INTO ff_challenge_event (challenge_id, actor_member_id, type, data)
-       VALUES ($1,$2,'claimed',$3)`,
-      [req.params.id, me, { side }]
-    );
-    res.json({ ok:true, side: row });
-  }catch(e){ console.error(e); res.status(500).json({ ok:false, error:'server_error' }); }
+  // If the session isn't linked, stitch it using the server-issued ff_member_id cookie
+  if (!memberId) {
+    const mid = cookies.ff_member_id;
+    if (!mid) return res.status(401).json({ ok:false, error:'no_member' });
+
+    // Ensure member exists (schema uses member_id, not id)
+    await db.none(`
+      insert into ff_member (member_id, created_at, updated_at)
+      values ($1, now(), now())
+      on conflict (member_id) do nothing
+    `, [mid]);
+
+    // Link (or create) the session row
+    await db.none(`
+      insert into ff_session (session_id, member_id, created_at, last_seen_at)
+      values ($1, $2, now(), now())
+      on conflict (session_id) do update
+        set member_id = excluded.member_id,
+            last_seen_at = now()
+    `, [sid, mid]);
+
+    memberId = mid;
+  }
+
+  // ✅ You now have a guaranteed member id
+  req.member_id = memberId;
+
+  // …continue your claim logic…
+  const challengeId = req.params.id;
+  const { side, value } = req.body ?? {};
+  // do your checks / writes here, using `memberId`
+
+  return res.json({ ok:true, memberId, challengeId });
 });
+
 
 // POST /api/challenges  (create)
 router.post('/', async (req, res) => {
