@@ -211,7 +211,7 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
   if (!sid) return res.status(401).json({ ok:false, error:'no_session' });
 
   // Look up the session
-  let row = await db.oneOrNone(
+  let row = await pool.oneOrNone(
     'select member_id from ff_session where session_id = $1',
     [sid]
   );
@@ -224,14 +224,14 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
     if (!mid) return res.status(401).json({ ok:false, error:'no_member' });
 
     // Ensure member exists (schema uses member_id, not id)
-    await db.none(`
+    await pool.none(`
       insert into ff_member (member_id, created_at, updated_at)
       values ($1, now(), now())
       on conflict (member_id) do nothing
     `, [mid]);
 
     // Link (or create) the session row
-    await db.none(`
+    await pool.none(`
       insert into ff_session (session_id, member_id, created_at, last_seen_at)
       values ($1, $2, now(), now())
       on conflict (session_id) do update
