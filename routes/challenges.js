@@ -37,6 +37,18 @@ function parseCookies(header = '') {
   );
 }
 const getCookies = req => req.cookies ?? parseCookies(req.headers.cookie || '');
+// #region helpers-platform
+const DEFAULT_PLATFORM = '018'; // ESPN
+
+function normalizePlatform(p) {
+  if (!p) return DEFAULT_PLATFORM;
+  const s = String(p).trim().toLowerCase();
+  if (s === 'espn' || s === '018') return '018';
+  // add other mappings as you adopt more providers:
+  // if (s === 'yahoo' || s === '017') return '017';
+  return p; // pass-through for already-coded values
+}
+// #endregion helpers-platform
 
 const normSide = s => {
   const v = String(s ?? 'home').toLowerCase();
@@ -179,6 +191,11 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
 // #region route-claim-upsert-side
 // Upsert side (NO team-ownership checks; any team allowed; team can be null for now)
 // NOTE: include `id` column so we never insert NULL into ff_challenge_side.id
+// #region route-claim-upsert-side
+// Upsert side (any team allowed; team fields may be null).
+// Ensure non-null `id` and normalized, non-null `platform`.
+const platform = normalizePlatform(team.platform);
+
 await pool.query(
   `INSERT INTO ff_challenge_side
      (id, challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
@@ -191,10 +208,10 @@ await pool.query(
          team_name       = COALESCE(EXCLUDED.team_name,ff_challenge_side.team_name),
          owner_member_id = EXCLUDED.owner_member_id`,
   [
-    newSideId(),          // <-- id (required by your schema)
+    newSideId(),          // <- generate chs_* so id is never NULL
     challengeId,
     side,
-    team.platform || null,
+    platform,             // <- ALWAYS non-null ("018" default)
     season,
     team.leagueId ? String(team.leagueId) : null,
     team.teamId   ? String(team.teamId)   : null,
@@ -202,6 +219,8 @@ await pool.query(
     memberId,
   ]
 );
+// #endregion route-claim-upsert-side
+
 // #endregion route-claim-upsert-side
 
 
@@ -274,6 +293,10 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
 // #region route-claim-lock-upsert-side
 // upsert side & lock (no team-ownership checks)
 // include `id` so ff_challenge_side.id is never NULL on first insert
+// #region route-claim-lock-upsert-side
+// Upsert side & lock lineup. Ensure non-null id and platform.
+const platform = normalizePlatform(team.platform);
+
 await client.query(
   `INSERT INTO ff_challenge_side
      (id, challenge_id, side, platform, season, league_id, team_id, team_name,
@@ -283,10 +306,10 @@ await client.query(
      platform=$4, season=$5, league_id=$6, team_id=$7, team_name=$8,
      owner_member_id=$9, lineup_json=$10, bench_json=$11, locked_at=now()`,
   [
-    newSideId(),                 // <-- id (required)
+    newSideId(),                 // <- chs_*
     challengeId,
     side,
-    team.platform || null,
+    platform,                    // <- "018" default if missing
     season,
     team.leagueId ? String(team.leagueId) : null,
     team.teamId   ? String(team.teamId)   : null,
@@ -296,6 +319,8 @@ await client.query(
     lineup?.bench || null,
   ]
 );
+// #endregion route-claim-lock-upsert-side
+
 // #endregion route-claim-lock-upsert-side
 
 
