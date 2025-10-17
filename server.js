@@ -23,6 +23,7 @@ const pool              = require('./src/db/pool');
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
+const challengesClaimLock = require('./routes/challenges')(pool, { currentWeek: Number(process.env.FF_CURRENT_WEEK || 7) });
 
 const app = express();
 app.disable('x-powered-by');
@@ -117,6 +118,9 @@ app.use('/api/espnconnect', espnConnectRouter);
 // expose the Fan endpoint under the platforms namespace too, so FE can use one base:
 app.use('/api/platforms/espn', espnConnectRouter);
 // mount
+// server.js
+app.use(challengesClaimLock);
+
 app.use('/api/minileagues', require('./routes/miniLeagues'));
 app.use('/api/challenges',  require('./routes/challenges'));
 // --- CSP: allow same-origin scripts and inline styles for the page ---
