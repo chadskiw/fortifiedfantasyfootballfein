@@ -2,7 +2,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const crypto = require('crypto');
-const cookie = require('cookie-parser');
+const cookie = require('cookie');
 
 const router = express.Router();
 const pool = new Pool({
