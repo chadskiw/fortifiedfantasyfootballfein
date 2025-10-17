@@ -119,10 +119,9 @@ app.use('/api/espnconnect', espnConnectRouter);
 app.use('/api/platforms/espn', espnConnectRouter);
 // mount
 // server.js
-app.use(challengesClaimLock);
-
+app.use(require('./routes/challenges'));       // routes inside file already use /api/challenges/*
 app.use('/api/minileagues', require('./routes/miniLeagues'));
-app.use('/api/challenges',  require('./routes/challenges'));
+
 // --- CSP: allow same-origin scripts and inline styles for the page ---
 app.use((req, res, next) => {
   res.set('Content-Security-Policy',
