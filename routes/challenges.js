@@ -195,45 +195,44 @@ module.exports = (pool, opts = {}) => {
 // If not, this parser will grab cookies from the header.
 // If you already use cookie-parser, req.cookies exists.
 // If not, this parser will grab cookies from the header.
+// helper: tolerant side normalizer
+function normSide(s) {
+  if (s === 2 || s === '2' || String(s).toLowerCase() === 'away') return 2;
+  return 1; // default home
+}
+
+// tiny cookie parser fallback if you don't use cookie-parser
 function parseCookies(h = '') {
   return Object.fromEntries(
-    h.split(';')
-     .map(p => p.trim())
-     .filter(Boolean)
-     .map(p => {
-       const i = p.indexOf('=');
-       return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))];
-     })
+    (h || '').split(';').map(p => p.trim()).filter(Boolean).map(p => {
+      const i = p.indexOf('=');
+      return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))];
+    })
   );
 }
 
 router.post('/api/challenges/:id/claim', async (req, res) => {
-  try {
-    const cookies = req.cookies ?? parseCookies(req.headers.cookie || '');
-    const sid = cookies.ff_session_id;
-    if (!sid) return res.status(401).json({ ok:false, error:'no_session' });
+  const cookies = req.cookies ?? parseCookies(req.headers.cookie || '');
+  const sid = cookies.ff_session_id;
+  if (!sid) return res.status(401).json({ ok:false, error:'no_session' });
 
-    // Look up the session (node-postgres style)
+  try {
+    // stitch/resolve member from session
     const { rows: sessRows } = await pool.query(
       'SELECT member_id FROM ff_session WHERE session_id = $1',
       [sid]
     );
     let memberId = sessRows[0]?.member_id ?? null;
 
-    // If the session isn't linked, stitch it using ff_member_id cookie
     if (!memberId) {
       const mid = cookies.ff_member_id;
       if (!mid) return res.status(401).json({ ok:false, error:'no_member' });
-
-      // Ensure member exists
       await pool.query(
         `INSERT INTO ff_member (member_id, created_at, updated_at)
          VALUES ($1, now(), now())
          ON CONFLICT (member_id) DO NOTHING`,
         [mid]
       );
-
-      // Link (or create) the session row
       await pool.query(
         `INSERT INTO ff_session (session_id, member_id, created_at, last_seen_at)
          VALUES ($1, $2, now(), now())
@@ -242,23 +241,105 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
                last_seen_at = now()`,
         [sid, mid]
       );
-
       memberId = mid;
     }
 
-    // ✅ You now have a guaranteed member id
-    req.member_id = memberId;
-
-    // …continue your claim logic…
     const challengeId = req.params.id;
-    const { side, value } = req.body ?? {};
+    const { side, team = {}, value = 0, season, week } = req.body || {};
+    const s = normSide(side);
 
-    return res.json({ ok:true, memberId, challengeId, side: side ?? null, value: Number(value) || 0 });
+    // require basic team identity to "claim"
+    if (!team.leagueId || !team.teamId) {
+      return res.status(400).json({ ok:false, error:'bad_args' });
+    }
+
+    // ensure challenge exists
+    const { rows: chRows } = await pool.query(
+      `SELECT * FROM ff_challenge WHERE id=$1`,
+      [challengeId]
+    );
+    if (!chRows[0]) {
+      // (A) hard fail if not created elsewhere
+      return res.status(404).json({ ok:false, error:'challenge_not_found' });
+
+      // (B) or lazily create it:
+      // const { rows: [created] } = await pool.query(
+      //   `INSERT INTO ff_challenge (id, season, week, scoring_profile_id, status, stake_points)
+      //    VALUES ($1, $2, $3, NULL, 'open', $4) RETURNING *`,
+      //   [challengeId, Number(season)||null, Number(week)||null, Number(value)||0]
+      // );
+      // chRows[0] = created;
+    }
+
+    // read any existing side rows
+    const { rows: sideRows } = await pool.query(
+      `SELECT * FROM ff_challenge_side WHERE challenge_id=$1`,
+      [challengeId]
+    );
+    const existing = new Map(sideRows.map(r => [Number(r.side), r]));
+    const cur = existing.get(s);
+
+    // prevent stealing a claimed side
+    if (cur?.owner_member_id && String(cur.owner_member_id) !== String(memberId)) {
+      return res.status(409).json({ ok:false, error:'side_already_claimed' });
+    }
+
+    // upsert claim (owner + team identity) WITHOUT locking lineup
+    await pool.query(
+      `INSERT INTO ff_challenge_side
+         (challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (challenge_id, side) DO UPDATE
+         SET platform = EXCLUDED.platform,
+             season   = COALESCE(EXCLUDED.season, ff_challenge_side.season),
+             league_id= EXCLUDED.league_id,
+             team_id  = EXCLUDED.team_id,
+             team_name= COALESCE(EXCLUDED.team_name, ff_challenge_side.team_name),
+             owner_member_id = EXCLUDED.owner_member_id`,
+      [
+        challengeId,
+        s,
+        team.platform || 'espn',
+        season ? Number(season) : null,
+        String(team.leagueId),
+        String(team.teamId),
+        team.teamName || null,
+        memberId
+      ]
+    );
+
+    // make sure challenge is at least 'open' and keep stake_points synced if provided
+    await pool.query(
+      `UPDATE ff_challenge
+         SET status = CASE WHEN status IN ('closed','pending') THEN status ELSE 'open' END,
+             stake_points = COALESCE($1, stake_points),
+             updated_at = now()
+       WHERE id = $2`,
+      [Number(value)||0, challengeId]
+    );
+
+    // return the challenge with sides
+    const { rows } = await pool.query(
+      `SELECT c.*,
+              jsonb_agg(jsonb_build_object(
+                'side', s.side, 'platform', s.platform, 'season', s.season, 'league_id', s.league_id,
+                'team_id', s.team_id, 'team_name', s.team_name, 'locked_at', s.locked_at, 'points_final', s.points_final,
+                'owner_member_id', s.owner_member_id
+              ) ORDER BY s.side) AS sides
+       FROM ff_challenge c
+       JOIN ff_challenge_side s ON s.challenge_id = c.id
+       WHERE c.id=$1
+       GROUP BY c.id`,
+      [challengeId]
+    );
+
+    return res.json({ ok:true, challenge: rows[0] || null });
   } catch (e) {
     console.error('claim failed', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 
