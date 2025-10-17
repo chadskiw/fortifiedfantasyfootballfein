@@ -2,17 +2,16 @@
 const express = require('express');
 const { Pool } = require('pg');
 const crypto = require('crypto');
-const cookie = require('cookie');
 
 const router = express.Router();
 
-// --- DB ---
+// ---------- DB ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-// --- helpers ---
+// ---------- helpers ----------
 const rid = (p = 'ch') => `${p}_${crypto.randomUUID().replace(/-/g, '').slice(0, 18)}`;
 const nowWeek = () => Number(process.env.FF_CURRENT_WEEK || 7);
 
@@ -28,20 +27,13 @@ function parseCookies(header = '') {
       })
   );
 }
+const getCookies = req => req.cookies ?? parseCookies(req.headers.cookie || '');
 
-// side normalizer: home/1 -> 1, away/2 -> 2 (default home)
-function normSide(s) {
+const normSide = s => {
   const v = String(s ?? 'home').toLowerCase();
-  if (v === '2' || v === 'away') return 2;
-  return 1;
-}
+  return (v === '2' || v === 'away') ? 2 : 1; // default home=1
+};
 
-// pull cookies (supports cookie-parser or manual)
-function getCookies(req) {
-  return req.cookies ?? parseCookies(req.headers.cookie || '');
-}
-
-// resolve/stitch member using ff_session + ff_member cookies
 async function resolveMemberId(req) {
   const c = getCookies(req);
   const sid = c.ff_session_id;
@@ -81,16 +73,14 @@ async function resolveMemberId(req) {
   return { memberId };
 }
 
-// accept nested team OR root keys OR querystring
-function readTeamFrom(reqBody, reqQuery) {
-  const b = reqBody || {};
-  if (b.team && (b.team.leagueId || b.team.teamId)) return b.team;
-
+// accept nested team OR root keys OR querystring; all are optional (you can claim with no team yet)
+function readTeamFrom(body = {}, query = {}) {
+  if (body.team) return body.team;
   return {
-    platform: b.platform ?? reqQuery.platform ?? 'espn',
-    leagueId: b.leagueId ?? reqQuery.leagueId ?? null,
-    teamId: b.teamId ?? reqQuery.teamId ?? null,
-    teamName: b.teamName ?? reqQuery.teamName ?? null,
+    platform: body.platform ?? query.platform ?? null,
+    leagueId: body.leagueId ?? query.leagueId ?? null,
+    teamId:   body.teamId   ?? query.teamId   ?? null,
+    teamName: body.teamName ?? query.teamName ?? null,
   };
 }
 
@@ -103,7 +93,9 @@ async function readChallengeAggregate(id) {
                   'side', s.side,
                   'platform', s.platform, 'season', s.season,
                   'league_id', s.league_id, 'team_id', s.team_id,
-                  'team_name', s.team_name, 'owner_member_id', s.owner_member_id,
+                  'team_name', s.team_name,
+                  'claimed_by_member_id', s.owner_member_id,   -- API-friendly alias
+                  'owner_member_id', s.owner_member_id,        -- legacy field for compatibility
                   'locked_at', s.locked_at, 'points_final', s.points_final
                 )
                 ORDER BY s.side
@@ -119,14 +111,12 @@ async function readChallengeAggregate(id) {
   return rows[0] || null;
 }
 
-// ---------------------------------------------------------------------------
+// ========== ROUTES ==========
+
 // POST /api/challenges/:id/claim
-// body accepts either:
-//   { side, value, season, week, team:{platform,leagueId,teamId,teamName} }
-// or root form:
-//   { side, value, season, week, platform, leagueId, teamId, teamName }
-// (also honors querystring fallbacks)
-// ---------------------------------------------------------------------------
+// Anyone can claim any team for a side.
+// Body can be empty; you can add team later via another claim or lock.
+// Optional ?force=1 will let the caller take over a side already claimed by someone else.
 router.post('/api/challenges/:id/claim', async (req, res) => {
   try {
     const auth = await resolveMemberId(req);
@@ -137,19 +127,15 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
     const b = req.body || {};
 
     const season = b.season != null ? Number(b.season) : (q.season != null ? Number(q.season) : null);
-    const week = b.week != null ? Number(b.week) : (q.week != null ? Number(q.week) : null);
-    const value = Number(b.value ?? q.value ?? 0);
-    const side = normSide(b.side ?? q.side);
-    const team = readTeamFrom(b, q);
-
-    const missing = [];
-    if (!team.leagueId) missing.push('team.leagueId');
-    if (!team.teamId) missing.push('team.teamId');
-    if (missing.length) return res.status(400).json({ ok: false, error: 'bad_args', missing });
+    const week   = b.week   != null ? Number(b.week)   : (q.week   != null ? Number(q.week)   : null);
+    const value  = Number(b.value ?? q.value ?? 0);
+    const side   = normSide(b.side ?? q.side);
+    const force  = String(q.force ?? b.force ?? '0') === '1';
+    const team   = readTeamFrom(b, q); // may be nulls
 
     const challengeId = req.params.id;
 
-    // lazily create/refresh challenge
+    // upsert challenge row
     await pool.query(
       `INSERT INTO ff_challenge (id, season, week, status, stake_points, created_at, updated_at)
        VALUES ($1, $2, $3, 'open', $4, now(), now())
@@ -161,34 +147,37 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
       [challengeId, season, week, value]
     );
 
-    // prevent stealing a claimed side
-    const { rows: claimRows } = await pool.query(
+    // Existing side?
+    const { rows: sideRows } = await pool.query(
       `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
       [challengeId, side]
     );
-    if (claimRows[0]?.owner_member_id && String(claimRows[0].owner_member_id) !== String(memberId)) {
+    const claimedBy = sideRows[0]?.owner_member_id || null;
+
+    if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
+      // Side is claimed by someone else; allow only if ?force=1
       return res.status(409).json({ ok: false, error: 'side_already_claimed' });
     }
 
-    // NOTE: requires UNIQUE (challenge_id, side)
+    // Upsert side (NO team-ownership checks; any team is allowed)
     await pool.query(
       `INSERT INTO ff_challenge_side
          (challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (challenge_id, side) DO UPDATE
-         SET platform       = EXCLUDED.platform,
-             season         = COALESCE(EXCLUDED.season, ff_challenge_side.season),
-             league_id      = EXCLUDED.league_id,
-             team_id        = EXCLUDED.team_id,
-             team_name      = COALESCE(EXCLUDED.team_name, ff_challenge_side.team_name),
+         SET platform       = COALESCE(EXCLUDED.platform, ff_challenge_side.platform),
+             season         = COALESCE(EXCLUDED.season,   ff_challenge_side.season),
+             league_id      = COALESCE(EXCLUDED.league_id,ff_challenge_side.league_id),
+             team_id        = COALESCE(EXCLUDED.team_id,  ff_challenge_side.team_id),
+             team_name      = COALESCE(EXCLUDED.team_name,ff_challenge_side.team_name),
              owner_member_id= EXCLUDED.owner_member_id`,
       [
         challengeId,
         side,
-        team.platform || 'espn',
+        team.platform || null,
         season,
-        String(team.leagueId),
-        String(team.teamId),
+        team.leagueId ? String(team.leagueId) : null,
+        team.teamId   ? String(team.teamId)   : null,
         team.teamName || null,
         memberId,
       ]
@@ -202,12 +191,7 @@ router.post('/api/challenges/:id/claim', async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/challenges/claim-lock
-// Same as claim, but also locks a lineup (sets locked_at) and bumps status.
-// body: { id?, clientId?, season, week, value, side, team{...}, lineup{starters,bench} }
-// If id absent + clientId absent, it creates a new challenge id.
-// ---------------------------------------------------------------------------
+// POST /api/challenges/claim-lock  (claim + lock lineup)
 router.post('/api/challenges/claim-lock', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -224,17 +208,14 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
     const week = Number(b.week ?? q.week);
     const value = Number(b.value ?? q.value ?? 0);
     const side = normSide(b.side ?? q.side);
+    const force  = String(q.force ?? b.force ?? '0') === '1';
     const team = readTeamFrom(b, q);
     const lineup = b.lineup || {};
 
-    const missing = [];
-    if (!season) missing.push('season');
-    if (!week) missing.push('week');
-    if (!team.leagueId) missing.push('team.leagueId');
-    if (!team.teamId) missing.push('team.teamId');
-    if (missing.length) return res.status(400).json({ ok: false, error: 'bad_args', missing });
-
-    if (week < nowWeek()) return res.status(400).json({ ok: false, error: 'past_week' });
+    if (!season || !week) {
+      return res.status(400).json({ ok:false, error:'bad_args', missing: ['season','week'] });
+    }
+    if (week < nowWeek()) return res.status(400).json({ ok:false, error:'past_week' });
 
     await client.query('BEGIN');
 
@@ -258,17 +239,18 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
       [challengeId, season, week, value, clientId]
     );
 
-    // existing side ownership?
+    // side ownership (claimant) policy
     const { rows: claimRows } = await client.query(
       `SELECT owner_member_id FROM ff_challenge_side WHERE challenge_id=$1 AND side=$2`,
       [challengeId, side]
     );
-    if (claimRows[0]?.owner_member_id && String(claimRows[0].owner_member_id) !== String(memberId)) {
+    const claimedBy = claimRows[0]?.owner_member_id || null;
+    if (claimedBy && !force && String(claimedBy) !== String(memberId)) {
       await client.query('ROLLBACK');
       return res.status(409).json({ ok: false, error: 'side_already_claimed' });
     }
 
-    // upsert side & lock
+    // upsert side & lock (no team-ownership checks)
     await client.query(
       `INSERT INTO ff_challenge_side
          (challenge_id, side, platform, season, league_id, team_id, team_name,
@@ -280,10 +262,10 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
       [
         challengeId,
         side,
-        team.platform || 'espn',
+        team.platform || null,
         season,
-        String(team.leagueId),
-        String(team.teamId),
+        team.leagueId ? String(team.leagueId) : null,
+        team.teamId   ? String(team.teamId)   : null,
         team.teamName || null,
         memberId,
         lineup?.starters || null,
@@ -316,25 +298,19 @@ router.post('/api/challenges/claim-lock', async (req, res) => {
     const challenge = await readChallengeAggregate(challengeId);
     return res.json({ ok: true, challenge });
   } catch (e) {
-    await pool.query('ROLLBACK').catch(() => {});
+    try { await pool.query('ROLLBACK'); } catch {}
     console.error('claim-lock failed', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   } finally {
-    // eslint-disable-next-line no-unsafe-finally
-    try { (await pool.connect()).release(); } catch {}
+    client.release();
   }
-}
+});
 
-// ---------------------------------------------------------------------------
-// POST /api/challenges        (create explicitly)
-// body: { season, week, scoring_profile_id?, home{...}, away{...} }
-// ---------------------------------------------------------------------------
-);
-
+// POST /api/challenges        (explicit create; optional; keeps behavior same)
 router.post('/api/challenges', async (req, res) => {
   const { season, week, scoring_profile_id = null, home = {}, away = {} } = req.body || {};
-  if (!season || !week || !home.leagueId || !home.teamId || !away.leagueId || !away.teamId) {
-    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  if (!season || !week) {
+    return res.status(400).json({ ok:false, error:'invalid_payload', missing:['season','week'] });
   }
   const id = rid('ch');
   const client = await pool.connect();
@@ -348,37 +324,37 @@ router.post('/api/challenges', async (req, res) => {
       [id, Number(season), Number(week), scoring_profile_id]
     );
 
-    // side 1 (home)
-    await client.query(
-      `INSERT INTO ff_challenge_side
-         (challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
-       VALUES ($1,1,$2,$3,$4,$5,$6,$7)`,
-      [
-        id,
-        home.platform || 'espn',
-        Number(season),
-        String(home.leagueId),
-        String(home.teamId),
-        home.teamName || null,
-        null,
-      ]
-    );
-
-    // side 2 (away)
-    await client.query(
-      `INSERT INTO ff_challenge_side
-         (challenge_id, side, platform, season, league_id, team_id, team_name, owner_member_id)
-       VALUES ($1,2,$2,$3,$4,$5,$6,$7)`,
-      [
-        id,
-        away.platform || 'espn',
-        Number(season),
-        String(away.leagueId),
-        String(away.teamId),
-        away.teamName || null,
-        null,
-      ]
-    );
+    // side rows are optional here; you can add via claim/lock later
+    if (home.leagueId && home.teamId) {
+      await client.query(
+        `INSERT INTO ff_challenge_side
+           (challenge_id, side, platform, season, league_id, team_id, team_name)
+         VALUES ($1,1,$2,$3,$4,$5,$6)`,
+        [
+          id,
+          home.platform || null,
+          Number(season),
+          String(home.leagueId),
+          String(home.teamId),
+          home.teamName || null,
+        ]
+      );
+    }
+    if (away.leagueId && away.teamId) {
+      await client.query(
+        `INSERT INTO ff_challenge_side
+           (challenge_id, side, platform, season, league_id, team_id, team_name)
+         VALUES ($1,2,$2,$3,$4,$5,$6)`,
+        [
+          id,
+          away.platform || null,
+          Number(season),
+          String(away.leagueId),
+          String(away.teamId),
+          away.teamName || null,
+        ]
+      );
+    }
 
     await client.query(
       `INSERT INTO ff_challenge_event (id, challenge_id, actor_member_id, type, data)
@@ -399,9 +375,7 @@ router.post('/api/challenges', async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // GET /api/challenges?season=&leagueId=&teamId=
-// ---------------------------------------------------------------------------
 router.get('/api/challenges', async (req, res) => {
   try {
     const { season, leagueId, teamId } = req.query || {};
@@ -431,8 +405,10 @@ router.get('/api/challenges', async (req, res) => {
                'side', s.side,
                'platform', s.platform, 'season', s.season,
                'league_id', s.league_id, 'team_id', s.team_id,
-               'team_name', s.team_name, 'locked_at', s.locked_at,
-               'points_final', s.points_final, 'owner_member_id', s.owner_member_id
+               'team_name', s.team_name,
+               'claimed_by_member_id', s.owner_member_id,
+               'owner_member_id', s.owner_member_id,
+               'locked_at', s.locked_at, 'points_final', s.points_final
              ) ORDER BY s.side) FILTER (WHERE s.challenge_id IS NOT NULL), '[]'::jsonb) AS sides
       FROM ff_challenge c
       LEFT JOIN ff_challenge_side s ON s.challenge_id = c.id
@@ -451,9 +427,7 @@ router.get('/api/challenges', async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // GET /api/challenges/:id
-// ---------------------------------------------------------------------------
 router.get('/api/challenges/:id', async (req, res) => {
   try {
     const challenge = await readChallengeAggregate(req.params.id);
@@ -464,10 +438,8 @@ router.get('/api/challenges/:id', async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // POST /api/challenges/:id/lock
 // body: { side: 1|2|'home'|'away', lineup:{starters,bench}, teamName? }
-// ---------------------------------------------------------------------------
 router.post('/api/challenges/:id/lock', async (req, res) => {
   try {
     const side = normSide(req.body?.side);
@@ -512,10 +484,8 @@ router.post('/api/challenges/:id/lock', async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // POST /api/challenges/:id/score
 // sums lineup_json.starters[].pts (or .points) → points_final; status → closed
-// ---------------------------------------------------------------------------
 router.post('/api/challenges/:id/score', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -555,7 +525,7 @@ router.post('/api/challenges/:id/score', async (req, res) => {
     const challenge = await readChallengeAggregate(req.params.id);
     res.json({ ok: true, challenge });
   } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('challenge score failed', e);
     res.status(500).json({ ok: false, error: 'challenge_score_failed' });
   } finally {
