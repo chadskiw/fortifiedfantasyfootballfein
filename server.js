@@ -10,6 +10,7 @@ const cookieParser  = require('cookie-parser');
 const path          = require('path');
 const espnConnectRouter = require('./routes/espnconnect');
 const coinsignalRouter = require('./routes/coinsignal');
+const zeffyRoutes = require('./routes/zeffy');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -72,6 +73,7 @@ async function fanProxyHandler(req, res){
 
 app.get('/api/platforms/espn/fan/me', fanProxyHandler);
 app.get('/api/platforms/espn/fan/:id', fanProxyHandler);
+app.use('/api/zeffy', zeffyRoutes);
 
 // ===== CORS (CF fronted) =====
 const allow = {
@@ -228,8 +230,7 @@ function asMiddleware(mod) {
   app.use('/api/platforms/espn', leagueMw);
 }
 
-// ===== FF points API =====
-app.use('/api/ff', ffPointsRouter({ pool }));
+
 
 // ===== Avatar/logo fallback =====
 const sendLogo = (req, res) => {
@@ -253,7 +254,8 @@ app.use('/api/identity/me', require('./routes/identity/me'));
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/images', createImagesRouter());
-
+// ===== FF points API =====
+app.use('/api/ff', ffPointsRouter({ pool }));
 // Accept reactions (no-op for now)
 app.post('/api/fein/react', express.json(), (_req, res) => res.status(204).end());
 

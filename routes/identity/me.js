@@ -107,46 +107,21 @@ function fireIngest(req, { swidBrace, s2, memberId }) {
 
 router.get('/me', async (req, res) => {
   try {
-    // Disable caching
-    res.set('Cache-Control', 'no-store');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.removeHeader('ETag');
+    res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); res.set('Expires', '0'); res.removeHeader('ETag');
 
-    // 1) If ff_* cookies already exist, honor them (and ensure DB row)
-    const midCookie = norm(req.cookies?.ff_member_id || req.cookies?.ff_member); // tolerate old name
-    const sidCookie = norm(req.cookies?.ff_session_id || req.cookies?.ff_session);
+    const midCookie = (req.cookies?.ff_member_id || req.cookies?.ff_member || '').trim();
+    const sidCookie = (req.cookies?.ff_session_id || req.cookies?.ff_session || '').trim();
     if (midCookie && sidCookie) {
-      await ensureDbSession(sidCookie, midCookie);
-      return res.status(200).json({ ok: true, member_id: midCookie });
+      await ensureDbSession(sidCookie, midCookie); // idempotent
+      return res.status(200).json({ ok:true, member_id: midCookie });
     }
 
-    // 2) Self-heal via ESPN cookies
-    const swidBrace = normalizeSwid(req.cookies?.SWID);
-    const s2        = norm(req.cookies?.espn_s2 || req.cookies?.ESPN_S2);
-    if (swidBrace && s2) {
-      await upsertEspnCred({ swidBrace, s2 });
-      const memberId = await findOrCreateMemberFromSwid(swidBrace);
-
-      const newSid = makeSid();
-      await ensureDbSession(newSid, memberId);
-
-      // IMPORTANT: make sure these helpers set the *_id cookie names
-      cookies.setSessionCookie(res, newSid);     // should set 'ff_session_id'
-      cookies.setMemberCookie(res, memberId);    // should set 'ff_member_id'
-      // cookies.clearEspnS2?.(res); // optional
-
-      fireIngest(req, { swidBrace, s2, memberId });
-      return res.status(200).json({ ok: true, member_id: memberId });
-    }
-
-    // 3) Anonymous
-    return res.status(200).json({ ok: true, member_id: null });
+    // ... ESPN self-heal branch ...
+    return res.status(200).json({ ok:true, member_id: null });
   } catch (e) {
-    console.error('[identity/me] error', e);
-    res.set('Cache-Control', 'no-store');
-    return res.status(200).json({ ok: true, member_id: null });
+    return res.status(200).json({ ok:true, member_id: null });
   }
 });
+
 
 module.exports = router;
