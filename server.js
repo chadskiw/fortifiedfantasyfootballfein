@@ -250,8 +250,7 @@ app.get('/api/platforms/espn/image/:id', sendLogo);
 app.get('/api/espn/image/:id',           sendLogo); // legacy alias
 app.get('/api/image/:id',                sendLogo); // generic alias
 
-// ===== Early routers =====
-app.use('/api/identity/me', require('./routes/identity/me'));
+// ===== Early routers ===== app.use('/api/identity', require('./routes/identity/me'));
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/images', createImagesRouter());
