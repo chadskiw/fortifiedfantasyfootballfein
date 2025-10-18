@@ -1,11 +1,5 @@
 // routes/identity/me.js
-// Identity probe that "self-heals" login:
-// - If ff_* cookies exist -> return member.
-// - Else, if ESPN SWID + espn_s2 exist -> create/find member, mint session cookies, fire ingest.
-// - Else -> anonymous.
-//
-// Mount in server: app.use('/api/identity', require('./routes/identity/me'));
-
+// GET /api/identity/me
 const express = require('express');
 const router  = express.Router();
 const crypto  = require('crypto');
@@ -13,12 +7,10 @@ const crypto  = require('crypto');
 const poolMod = require('../../src/db/pool');
 const pool    = poolMod.pool || poolMod;
 
-const cookies = require('../../lib/cookies'); // your centralized cookie helpers
-
-// ---------------- utils ----------------
+const cookies = require('../../lib/cookies'); // make sure these set *_id names
 
 const norm = v => (v == null ? '' : String(v)).trim();
-const makeSid = () => crypto.randomUUID(); // returns RFC4122 UUID string
+const makeSid = () => crypto.randomUUID(); // RFC4122
 const MID_RE = /^[A-Z0-9]{8}$/;
 
 function normalizeSwid(raw) {
@@ -34,15 +26,12 @@ function normalizeSwid(raw) {
 function ensureMemberId(v) {
   const clean = String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (MID_RE.test(clean)) return clean;
-  return crypto.randomBytes(8)
-    .toString('base64')
-    .replace(/[^A-Z0-9]/gi, '')
-    .slice(0, 8)
-    .toUpperCase()
-    .padEnd(8, 'X');
+  return crypto.randomBytes(8).toString('base64')
+    .replace(/[^A-Z0-9]/gi, '').slice(0,8).toUpperCase().padEnd(8,'X');
 }
 
 async function ensureDbSession(sessionId, memberId) {
+  if (!sessionId || !memberId) return null;
   await pool.query(
     `INSERT INTO ff_session (session_id, member_id, created_at)
      VALUES ($1, $2, now())
@@ -52,8 +41,6 @@ async function ensureDbSession(sessionId, memberId) {
   return sessionId;
 }
 
-
-// Find or create a member bound to this SWID using ff_quickhitter.
 async function findOrCreateMemberFromSwid(swidBrace) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
 
@@ -69,7 +56,6 @@ async function findOrCreateMemberFromSwid(swidBrace) {
   if (rows.length) {
     const row = rows[0];
     const memberId = ensureMemberId(row.member_id);
-    // Backfill & touch
     await pool.query(
       `UPDATE ff_quickhitter
           SET member_id   = $1,
@@ -82,7 +68,6 @@ async function findOrCreateMemberFromSwid(swidBrace) {
     return memberId;
   }
 
-  // Create a new quickhitter row with a fresh member_id.
   const memberId = ensureMemberId();
   await pool.query(
     `INSERT INTO ff_quickhitter (member_id, quick_snap, swid, last_seen_at, created_at)
@@ -92,7 +77,6 @@ async function findOrCreateMemberFromSwid(swidBrace) {
   return memberId;
 }
 
-// Persist/refresh the ESPN cred record so S2 is tracked.
 async function upsertEspnCred({ swidBrace, s2 }) {
   const swidUuid = swidBrace.slice(1, -1).toLowerCase();
   await pool.query(
@@ -105,7 +89,6 @@ async function upsertEspnCred({ swidBrace, s2 }) {
   );
 }
 
-// Fire-and-forget ingest call (must not block).
 function fireIngest(req, { swidBrace, s2, memberId }) {
   try {
     const origin = `${req.protocol}://${req.get('host')}`;
@@ -113,7 +96,6 @@ function fireIngest(req, { swidBrace, s2, memberId }) {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        // Optional pass-through headers
         'x-espn-swid': swidBrace,
         'x-espn-s2'  : s2 || '',
         'x-fein-key' : memberId || ''
@@ -123,53 +105,45 @@ function fireIngest(req, { swidBrace, s2, memberId }) {
   } catch {}
 }
 
-// ---------------- GET /api/identity/me ----------------
-
 router.get('/me', async (req, res) => {
   try {
-    // Kill caching to avoid 304s from CDNs / proxies.
+    // Disable caching
     res.set('Cache-Control', 'no-store');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     res.removeHeader('ETag');
 
-    // If app cookies already exist, return them.
-const sid = await ensureDbSession(makeSid(), memberId);
-    const mid = norm(req.cookies?.ff_member);
-    if (sid && mid) {
-      return res.status(200).json({ ok: true, member_id: mid });
+    // 1) If ff_* cookies already exist, honor them (and ensure DB row)
+    const midCookie = norm(req.cookies?.ff_member_id || req.cookies?.ff_member); // tolerate old name
+    const sidCookie = norm(req.cookies?.ff_session_id || req.cookies?.ff_session);
+    if (midCookie && sidCookie) {
+      await ensureDbSession(sidCookie, midCookie);
+      return res.status(200).json({ ok: true, member_id: midCookie });
     }
 
-    // Self-heal: if ESPN cookies exist, log the user in now.
+    // 2) Self-heal via ESPN cookies
     const swidBrace = normalizeSwid(req.cookies?.SWID);
     const s2        = norm(req.cookies?.espn_s2 || req.cookies?.ESPN_S2);
-
     if (swidBrace && s2) {
-      // Make sure we store/refresh the cred (tracks latest S2).
       await upsertEspnCred({ swidBrace, s2 });
-
-      // Find or create a member for this SWID.
       const memberId = await findOrCreateMemberFromSwid(swidBrace);
 
-      // Create a session and set first-party cookies via your cookie helpers.
-      const newSid = await ensureDbSession(makeSid(), memberId);
-      cookies.setSessionCookie(res, newSid);  // HttpOnly ff_sid (domain/samesite/secure from lib)
-      cookies.setMemberCookie(res, memberId); // readable ff_member for UI
+      const newSid = makeSid();
+      await ensureDbSession(newSid, memberId);
 
-      // Optional: if you don’t want to keep espn_s2 on your domain:
-      // cookies.clearEspnS2(res);
+      // IMPORTANT: make sure these helpers set the *_id cookie names
+      cookies.setSessionCookie(res, newSid);     // should set 'ff_session_id'
+      cookies.setMemberCookie(res, memberId);    // should set 'ff_member_id'
+      // cookies.clearEspnS2?.(res); // optional
 
-      // Kick ingest.
       fireIngest(req, { swidBrace, s2, memberId });
-
       return res.status(200).json({ ok: true, member_id: memberId });
     }
 
-    // Anonymous
+    // 3) Anonymous
     return res.status(200).json({ ok: true, member_id: null });
   } catch (e) {
     console.error('[identity/me] error', e);
-    // Return anonymous (don’t 500 your FE).
     res.set('Cache-Control', 'no-store');
     return res.status(200).json({ ok: true, member_id: null });
   }
