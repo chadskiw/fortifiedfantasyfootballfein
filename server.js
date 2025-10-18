@@ -74,6 +74,7 @@ async function fanProxyHandler(req, res){
 app.get('/api/platforms/espn/fan/me', fanProxyHandler);
 app.get('/api/platforms/espn/fan/:id', fanProxyHandler);
 app.use('/api/zeffy', zeffyRoutes);
+app.use('/api/zeffy', require('./routes/zeffy_embed_credit'));
 
 // ===== CORS (CF fronted) =====
 const allow = {
