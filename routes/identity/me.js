@@ -123,5 +123,22 @@ router.get('/me', async (req, res) => {
   }
 });
 
+function requireMember(req, res, next) {
+  // accept cookie first, then header/body/query fallbacks
+  const mid =
+    (req.cookies?.ff_member_id ||
+     req.get('x-member-id') ||
+     req.body?.memberId ||
+     req.query?.memberId || '')
+    .toString().trim().toUpperCase();
 
+  if (!/^[A-Z0-9]{8}$/.test(mid)) {
+    return res.status(401).json({ ok:false, error:'unauthorized' });
+  }
+  req.member_id = mid;
+  next();
+}
+
+// keep exporting the router, but also export the middleware
 module.exports = router;
+module.exports.requireMember = requireMember;

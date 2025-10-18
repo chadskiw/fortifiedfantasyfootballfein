@@ -1,7 +1,9 @@
 // routes/zeffy.js
 const express = require('express');
 const { Pool } = require('pg');
-
+// pull in your DB helpers:
+const { sql } = require('../src/db');                  // <- replace with your pg/pool helper
+const { requireMember } = require('../routes/identity/me');    
 const router = express.Router();
 
 // --- DB ---
@@ -13,7 +15,80 @@ const pool = new Pool({
 // --- Config ---
 const WEBHOOK_SECRET = process.env.ZEFFY_WEBHOOK_SECRET || '';
 const POINTS_PER_DOLLAR = Number(process.env.FF_POINTS_PER_DOLLAR || 1);
+// Convert USD -> points. Use your real rule; fallback $1 => 100 pts.
+const usdToPoints = (usd) => Math.round(Number(usd) * 100);
 
+// NOTE: choose ONE source of truth below.
+
+// ---- A) If you already store Zeffy webhook events locally (recommended) ----
+// Expected columns (example): id, external_id, amount_usd, email, member_hint, status, created_at, credited_at
+async function fetchUncreditedDonationsForMemberFromDB(memberId) {
+  return sql/*sql*/`
+    SELECT id, external_id, amount_usd, email, member_hint, created_at
+    FROM zeffy_events
+    WHERE status = 'paid'
+      AND credited_at IS NULL
+      AND (member_hint = ${memberId} OR email IN (
+            SELECT email FROM ff_member WHERE member_id = ${memberId} AND email_is_verified = true
+          ))
+    ORDER BY created_at DESC
+  `;
+}
+
+// ---- B) If you do NOT store webhooks yet, query Zeffy API on demand (fill in their API) ----
+// Placeholder function – wire to Zeffy’s API and return an array like above.
+async function fetchUncreditedDonationsForMemberFromZeffyAPI(memberId) {
+  // TODO: implement with Zeffy API (campaign filter + created_since). Match on metadata.member_id or on donor email.
+  return [];
+}
+
+// Idempotent write to your points ledger
+async function creditIfNew({ memberId, externalId, amountUsd, source = 'zeffy' }) {
+  // ensure uniqueness by externalId
+  const points = usdToPoints(amountUsd);
+  const row = await sql/*sql*/`
+    INSERT INTO ff_points_ledger (member_id, points, usd_amount, source, external_tx_id)
+    VALUES (${memberId}, ${points}, ${amountUsd}, ${source}, ${externalId})
+    ON CONFLICT (external_tx_id) DO NOTHING
+    RETURNING id, points
+  `;
+  return row[0]?.points || 0;
+}
+
+router.post('/sync', requireMember, async (req, res) => {
+  try {
+    const memberId = req.member_id || req.body.memberId;
+    if (!memberId) return res.status(401).json({ ok:false, error:'unauthorized' });
+
+    // Pick A or B based on what you have today
+    let donations = await fetchUncreditedDonationsForMemberFromDB(memberId);
+    if (!donations?.length) {
+      donations = await fetchUncreditedDonationsForMemberFromZeffyAPI(memberId);
+    }
+
+    let totalPoints = 0, count = 0;
+    for (const d of donations) {
+      const added = await creditIfNew({
+        memberId,
+        externalId: d.external_id || `zeffy:${d.id}`,
+        amountUsd: d.amount_usd
+      });
+      if (added > 0) {
+        totalPoints += added;
+        count += 1;
+        // mark local webhook row as credited, if you have it
+        if (d.id) {
+          await sql/*sql*/`UPDATE zeffy_events SET credited_at = NOW() WHERE id = ${d.id}`;
+        }
+      }
+    }
+
+    if (count === 0) return res.status(200).json({ ok:false, error:'No new credits found' });
+    res.json({ ok:true, count, total_points: totalPoints });
+  } catch (e) {
+    res.status(400).json({ ok:false, error: e.message });
+  }
+});
 // Ensure tables exist (cheap, safe to call at boot)
 async function ensureTables() {
   await pool.query(`
