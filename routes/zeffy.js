@@ -1,6 +1,8 @@
 // routes/zeffy.js
 const express = require('express');
 const { Pool } = require('pg');
+const crypto = require('crypto');
+
 // pull in your DB helpers:
 const { sql } = require('../src/db');                  // <- replace with your pg/pool helper
 const { requireMember } = require('../routes/identity/me');    
@@ -183,6 +185,73 @@ async function creditPointsIfPossible({ memberIdHint, donorEmail, amountCents, p
     [memberId, paymentId, points]
   );
 }
+// helper: accept multiple possible key names (Zapier sometimes uses spaced names)
+const pick = (obj, ...keys) => {
+  for (const k of keys) {
+    if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null && obj[k] !== '') return obj[k];
+  }
+  return undefined;
+};
+
+router.post('/webhook/:token?', express.json(), async (req, res) => {
+  try {
+    // ... your auth guard here (token/header/dev) ...
+
+    const p = req.body || {};
+
+    // 1) Pull values from common variants
+    let paymentId = String(pick(p, 'payment_id', 'id', 'paymentId', 'Payment ID', 'Payment Id', 'transaction_id') || '').trim();
+
+    // Amount can be cents or dollars; accept both
+    let amountCents = pick(p, 'amount_cents', 'amountCents', 'Amount (cents)', 'Amount in Cents');
+    if (amountCents == null) {
+      const amtDollars = Number(pick(p, 'amount', 'Amount'));
+      if (Number.isFinite(amtDollars)) amountCents = Math.round(amtDollars * 100);
+    }
+    amountCents = Number(amountCents || 0);
+
+    const currency   = String(pick(p, 'currency', 'Currency') || 'USD');
+    const donorEmail = String(pick(p, 'donor_email', 'email', 'Donor Email') || '').trim();
+    const donorName  = String(pick(p, 'donor_name', 'name', 'Donor Name') || '').trim();
+    const formId     = String(pick(p, 'form_id', 'form', 'Form ID') || '').trim();
+    const createdAt  = new Date(pick(p, 'created_at', 'timestamp', 'Timestamp', 'Created At') || Date.now());
+
+    // 2) If no payment id (common in Zap tests), create a deterministic synthetic one
+    if (!paymentId) {
+      const material = `${donorEmail}|${amountCents}|${+createdAt}|${formId}`;
+      const hash = crypto.createHash('sha1').update(material).digest('hex').slice(0, 16);
+      paymentId = `zeffy_synth_${hash}`;
+    }
+
+    // 3) Member hint from your custom field (accept variants)
+    const memberHint =
+      String(pick(p, 'ff_member_id', 'Fortified Fantasy Member Id', 'member_id', 'memberId') || '').trim().toUpperCase() || null;
+
+    // ---- insert into zeffy_payments (idempotent) ----
+    await pool.query(
+      `INSERT INTO zeffy_payments
+         (payment_id, amount_cents, currency, donor_email, donor_name, form_id, occurred_at, raw, member_hint)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         raw = EXCLUDED.raw,
+         member_hint = COALESCE(NULLIF(EXCLUDED.member_hint,''), zeffy_payments.member_hint)`,
+      [paymentId, amountCents, currency, donorEmail, donorName, formId, createdAt, p, memberHint]
+    );
+
+    // ---- immediate credit by member id (or fallback by email) ----
+    await creditPointsIfPossible({
+      memberIdHint: memberHint,
+      donorEmail,
+      amountCents,
+      paymentId
+    }).catch(err => console.error('points_credit_failed', err));
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('zeffy_webhook_failed', err);
+    return res.status(400).json({ ok: false, error: err.message || 'bad_request' });
+  }
+});
 
 // --- Route ---
 router.post('/webhook', express.json(), async (req, res) => {
