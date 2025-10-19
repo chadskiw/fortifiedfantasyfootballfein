@@ -17,6 +17,30 @@ const WEBHOOK_SECRET = process.env.ZEFFY_WEBHOOK_SECRET || '';
 const POINTS_PER_DOLLAR = Number(process.env.FF_POINTS_PER_DOLLAR || 1);
 // Convert USD -> points. Use your real rule; fallback $1 => 100 pts.
 const usdToPoints = (usd) => Math.round(Number(usd) * 100);
+const MID_RE = /^[A-Z0-9]{6,12}$/;
+const normMid = s => (s || '').toString().trim().toUpperCase();
+
+function extractMemberHint(p) {
+  const c = [];
+
+  // obvious keys / metadata
+  c.push(p.member_id, p.memberId, p.ff_member_id, p.metadata?.member_id, p.custom_fields?.member_id);
+
+  // Zap / Zeffy custom field names
+  c.push(p['Fortified Fantasy Member Id'], p['fortified_fantasy_member_id']);
+
+  // Q&A arrays e.g. [{question:'Fortified Fantasy Member Id', answer:'BADASS01'}]
+  if (Array.isArray(p.answers)) {
+    for (const a of p.answers) {
+      if (typeof a?.question === 'string' && a.question.toLowerCase().includes('member')) {
+        c.push(a.answer);
+      }
+    }
+  }
+
+  const hit = c.map(normMid).find(v => MID_RE.test(v));
+  return hit || null;
+}
 
 // NOTE: choose ONE source of truth below.
 
@@ -120,23 +144,31 @@ async function ensureTables() {
 ensureTables().catch(console.error);
 
 // --- Helpers ---
-async function creditPointsIfPossible({ donorEmail, amountCents, paymentId }) {
-  if (!donorEmail) return; // no email to map — silently skip
+async function creditPointsIfPossible({ memberIdHint, donorEmail, amountCents, paymentId }) {
+  let memberId = null;
 
-  // Map donor email -> member_id (tweak to your schema if emails live elsewhere)
-  const { rows } = await pool.query(
-    `SELECT member_id FROM ff_member WHERE LOWER(email)=LOWER($1) LIMIT 1`,
-    [donorEmail]
-  );
-  if (!rows.length) return;
+  if (memberIdHint) {
+    const mid = normMid(memberIdHint);
+    const r = await pool.query(`SELECT member_id FROM ff_member WHERE member_id=$1 LIMIT 1`, [mid]);
+    if (r.rows.length) memberId = r.rows[0].member_id;
+  }
+
+  if (!memberId && donorEmail) {
+    const r = await pool.query(
+      `SELECT member_id FROM ff_member WHERE LOWER(email)=LOWER($1) LIMIT 1`,
+      [donorEmail]
+    );
+    if (r.rows.length) memberId = r.rows[0].member_id;
+  }
+
+  if (!memberId) return; // nothing to map
 
   const points = Math.max(0, Math.floor((amountCents / 100) * POINTS_PER_DOLLAR));
-
   await pool.query(
     `INSERT INTO ff_points_credits (member_id, source, source_id, points)
      VALUES ($1,'zeffy',$2,$3)
      ON CONFLICT (source, source_id) DO NOTHING`,
-    [rows[0].member_id, paymentId, points]
+    [memberId, paymentId, points]
   );
 }
 
@@ -146,11 +178,8 @@ router.post('/webhook', express.json(), async (req, res) => {
     if (!WEBHOOK_SECRET || req.get('X-Zeffy-Signature') !== WEBHOOK_SECRET) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
-
-    // Zapier "Webhooks by Zapier → POST" should send Zeffy fields through as JSON
     const p = req.body || {};
 
-    // Try common field names; adjust if your Zap names differ
     const paymentId   = String(p.payment_id ?? p.id ?? '');
     const amountCents = Number(p.amount_cents ?? p.amount ?? 0);
     const currency    = String(p.currency || 'USD');
@@ -158,29 +187,59 @@ router.post('/webhook', express.json(), async (req, res) => {
     const donorName   = String(p.donor_name ?? p.name ?? '').trim();
     const formId      = String(p.form_id ?? p.form ?? '').trim();
     const occurredAt  = new Date(p.created_at || p.timestamp || Date.now());
+    const memberHint  = extractMemberHint(p);
 
-    if (!paymentId) {
-      return res.status(400).json({ ok: false, error: 'missing_payment_id' });
-    }
+    if (!paymentId) return res.status(400).json({ ok:false, error:'missing_payment_id' });
 
-    // Idempotent write
     await pool.query(
       `INSERT INTO zeffy_payments
-       (payment_id, amount_cents, currency, donor_email, donor_name, form_id, occurred_at, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (payment_id) DO NOTHING`,
-      [paymentId, amountCents, currency, donorEmail, donorName, formId, occurredAt, p]
+         (payment_id, amount_cents, currency, donor_email, donor_name, form_id, occurred_at, raw, member_hint)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         raw = EXCLUDED.raw,
+         member_hint = COALESCE(NULLIF(EXCLUDED.member_hint,''), zeffy_payments.member_hint)`,
+      [paymentId, amountCents, currency, donorEmail, donorName, formId, occurredAt, p, memberHint]
     );
 
-    // Fire-and-forget points credit (mapped by donor email)
-    creditPointsIfPossible({ donorEmail, amountCents, paymentId })
+    creditPointsIfPossible({ memberIdHint: memberHint, donorEmail, amountCents, paymentId })
       .catch(err => console.error('points_credit_failed', err));
 
-    return res.json({ ok: true });
+    return res.json({ ok:true });
   } catch (err) {
     console.error('zeffy_webhook_failed', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+async function fetchUncreditedDonationsForMemberFromDB(memberId) {
+  const q = `
+    SELECT p.payment_id, p.amount_cents, p.donor_email, p.member_hint, p.occurred_at
+    FROM zeffy_payments p
+    LEFT JOIN ff_points_credits c
+      ON c.source='zeffy' AND c.source_id=p.payment_id
+    LEFT JOIN ff_member m
+      ON m.member_id = $1
+    WHERE c.id IS NULL
+      AND (
+        UPPER(p.member_hint) = UPPER($1) -- PRIMARY: typed member id
+        OR (m.email_is_verified = true AND LOWER(p.donor_email) = LOWER(m.email)) -- fallback by email
+      )
+    ORDER BY p.occurred_at DESC
+  `;
+  const { rows } = await pool.query(q, [memberId]);
+  return rows;
+}
+
+async function creditIfNew({ memberId, paymentId, amountUsd }) {
+  const points = Math.max(0, Math.floor(amountUsd * POINTS_PER_DOLLAR));
+  const q = `
+    INSERT INTO ff_points_credits (member_id, source, source_id, points)
+    VALUES ($1,'zeffy',$2,$3)
+    ON CONFLICT (source, source_id) DO NOTHING
+    RETURNING id, points
+  `;
+  const { rows } = await pool.query(q, [memberId, paymentId, points]);
+  return rows[0]?.points || 0;
+}
+
 
 module.exports = router;
