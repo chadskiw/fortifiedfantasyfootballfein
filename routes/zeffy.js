@@ -232,14 +232,15 @@ async function fetchUncreditedDonationsForMemberFromDB(memberId) {
       ON m.member_id = $1
     WHERE c.id IS NULL
       AND (
-        UPPER(p.member_hint) = UPPER($1) -- PRIMARY: typed member id
-        OR (m.email_is_verified = true AND LOWER(p.donor_email) = LOWER(m.email)) -- fallback by email
+        UPPER(p.member_hint) = UPPER($1)         -- PRIMARY: typed member id
+        OR (LOWER(p.donor_email) = LOWER(m.email)) -- fallback by email (no verified flag)
       )
     ORDER BY p.occurred_at DESC
   `;
   const { rows } = await pool.query(q, [memberId]);
   return rows;
 }
+
 
 async function creditIfNew({ memberId, paymentId, amountUsd }) {
   const points = Math.max(0, Math.floor(amountUsd * POINTS_PER_DOLLAR));
