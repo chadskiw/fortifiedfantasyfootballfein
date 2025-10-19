@@ -9,7 +9,7 @@ const pool = new Pool({
 });
 
 // $ per point conversion: points / PPD = USD
-const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 1); // e.g. 1 => 1pt = $1, 100 => 100pts = $1
+const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 100); // e.g. 1 => 1pt = $1, 100 => 100pts = $1
 
 router.get('/balance', requireMember, async (req, res) => {
   try {

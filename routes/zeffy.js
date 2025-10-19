@@ -14,7 +14,7 @@ const pool = new Pool({
 
 // --- Config ---
 const WEBHOOK_SECRET = process.env.ZEFFY_WEBHOOK_SECRET || '';
-const POINTS_PER_DOLLAR = Number(process.env.FF_POINTS_PER_DOLLAR || 1);
+const POINTS_PER_DOLLAR = Number(process.env.FF_POINTS_PER_DOLLAR || 100);
 // Convert USD -> points. Use your real rule; fallback $1 => 100 pts.
 const usdToPoints = (usd) => Math.round(Number(usd) * 100);
 const MID_RE = /^[A-Z0-9]{6,12}$/;
