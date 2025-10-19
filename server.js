@@ -142,7 +142,7 @@ app.use((req, res, next) => {
 });
 
 // ===== Mount the ESPN Link UI (must be before generic espnRouter/catch-alls) =====
-app.use('/api/espn', espnLink); // serves GET /api/espn/link page + POST /api/espn/link/ingest
+app.use('/api/espn', espnConnectRouter); // serves GET /api/espn/link page + POST /api/espn/link/ingest
 
 // ===== ESPN auth/platform namespace =====
 app.use('/api/platforms/espn', espnAuthRouter({ pool, cookieDomain: 'fortifiedfantasy.com' }));
