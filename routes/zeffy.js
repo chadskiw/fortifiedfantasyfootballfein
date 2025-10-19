@@ -79,67 +79,79 @@ async function creditIfNew({ memberId, externalId, amountUsd, source = 'zeffy' }
   return row[0]?.points || 0;
 }
 
+// Sync any uncredited Zeffy payments to this member's points
 router.post('/sync', requireMember, async (req, res) => {
   try {
-    const memberId = req.member_id || req.body.memberId;
-    if (!memberId) return res.status(401).json({ ok:false, error:'unauthorized' });
+    const memberId = req.member_id || req.body?.memberId;
+    if (!memberId) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
-    // Pick A or B based on what you have today
-    let donations = await fetchUncreditedDonationsForMemberFromDB(memberId);
+    // pulls from zeffy_payments with member_hint/email fallback
+    const donations = await fetchUncreditedDonationsForMemberFromDB(memberId);
+
     if (!donations?.length) {
-      donations = await fetchUncreditedDonationsForMemberFromZeffyAPI(memberId);
+      // optional Zeffy API fallback, if you wire it later
+      // const fromApi = await fetchUncreditedDonationsForMemberFromZeffyAPI(memberId);
+      // if (!fromApi?.length) return res.status(200).json({ ok: false, error: 'No new credits found' });
+      return res.status(200).json({ ok: false, error: 'No new credits found' });
     }
 
-    let totalPoints = 0, count = 0;
+    let totalPoints = 0;
+    let count = 0;
+
     for (const d of donations) {
+      // creditIfNew() writes to ff_points_credits with unique (source, source_id)
       const added = await creditIfNew({
         memberId,
-        externalId: d.external_id || `zeffy:${d.id}`,
-        amountUsd: d.amount_usd
+        paymentId: d.payment_id,
+        amountUsd: d.amount_cents / 100
       });
       if (added > 0) {
         totalPoints += added;
         count += 1;
-        // mark local webhook row as credited, if you have it
-        if (d.id) {
-          await sql/*sql*/`UPDATE zeffy_events SET credited_at = NOW() WHERE id = ${d.id}`;
-        }
       }
     }
 
-    if (count === 0) return res.status(200).json({ ok:false, error:'No new credits found' });
-    res.json({ ok:true, count, total_points: totalPoints });
+    if (count === 0) return res.status(200).json({ ok: false, error: 'No new credits found' });
+    return res.json({ ok: true, count, total_points: totalPoints });
   } catch (e) {
-    res.status(400).json({ ok:false, error: e.message });
+    console.error('zeffy_sync_failed', e);
+    return res.status(400).json({ ok: false, error: e.message });
   }
 });
+
 // Ensure tables exist (cheap, safe to call at boot)
 async function ensureTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS zeffy_payments (
-      payment_id     text PRIMARY KEY,
-      amount_cents   integer NOT NULL,
-      currency       text NOT NULL,
-      donor_email    text,
-      donor_name     text,
-      form_id        text,
-      occurred_at    timestamptz NOT NULL,
-      raw            jsonb NOT NULL,
-      created_at     timestamptz NOT NULL DEFAULT now()
-    );
-  `);
+// in ensureTables()
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS zeffy_payments (
+    payment_id   text PRIMARY KEY,
+    amount_cents integer NOT NULL,
+    currency     text NOT NULL,
+    donor_email  text,
+    donor_name   text,
+    form_id      text,
+    occurred_at  timestamptz NOT NULL,
+    raw          jsonb NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+  );
+`);
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ff_points_credits (
-      id            bigserial PRIMARY KEY,
-      member_id     text NOT NULL,
-      source        text NOT NULL, -- 'zeffy'
-      source_id     text NOT NULL, -- payment_id
-      points        integer NOT NULL,
-      created_at    timestamptz NOT NULL DEFAULT now(),
-      UNIQUE (source, source_id)
-    );
-  `);
+// NEW: add member_hint + index
+await pool.query(`ALTER TABLE zeffy_payments ADD COLUMN IF NOT EXISTS member_hint text;`);
+await pool.query(`CREATE INDEX IF NOT EXISTS idx_zeffy_payments_member_hint ON zeffy_payments (UPPER(member_hint));`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS ff_points_credits (
+    id         bigserial PRIMARY KEY,
+    member_id  text NOT NULL,
+    source     text NOT NULL,
+    source_id  text NOT NULL,
+    points     integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (source, source_id)
+  );
+`);
+
 }
 ensureTables().catch(console.error);
 
