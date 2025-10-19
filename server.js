@@ -140,12 +140,6 @@ app.use((req, res, next) => {
   );
   next();
 });
-// server.js (place BEFORE your /api/* 404 handler)
-app.get('/api/espn/link', (req, res) => {
-  const qs = new URLSearchParams(req.query).toString();
-  const target = '/espnconnect' + (qs ? `?${qs}` : '');
-  res.redirect(302, target); // use 308 if you want a permanent redirect
-});
 
 // ===== Mount the ESPN Link UI (must be before generic espnRouter/catch-alls) =====
 app.use('/api/espn', espnLink); // serves GET /api/espn/link page + POST /api/espn/link/ingest
