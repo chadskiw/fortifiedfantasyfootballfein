@@ -1,17 +1,24 @@
 // routes/espn/_fetch.js
-async function fetchJsonWithCred(url, cand) {
+// Wraps fetch to add ESPN Cookie header when creds present.
+
+async function fetchJsonWithCred(url, cand = {}) {
   const headers = {
     'Accept': 'application/json, text/plain, */*',
-    'User-Agent': 'ff-platform-service/1.0',
+    'User-Agent': 'ff-platform-service/1.0'
   };
-  if (cand?.s2 && cand?.swid) {
-    headers['Cookie'] = `espn_s2=${cand.s2}; SWID=${cand.swid}`;
-    // (Optional) pass-thru headers too
-    headers['x-espn-s2'] = cand.s2; headers['x-espn-swid'] = cand.swid;
+
+  const s2   = (cand && cand.s2)   ? String(cand.s2).trim() : '';
+  const swid = (cand && cand.swid) ? String(cand.swid).trim() : '';
+
+  if (s2 && swid) {
+    headers['Cookie'] = `espn_s2=${s2}; SWID=${swid}`;
   }
+
   const r = await fetch(url, { headers });
-  const text = await r.text().catch(()=> '');
+  const text = await r.text().catch(()=>'');
   let json = null; try { json = JSON.parse(text); } catch {}
+
   return { ok: r.ok, status: r.status, statusText: r.statusText, text, json };
 }
+
 module.exports = { fetchJsonWithCred };
