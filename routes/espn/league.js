@@ -242,36 +242,43 @@ function toTeamsPayload(data = {}) {
 }
 
 // routes/espn/league.js
- router.get('/league', async (req, res) => {
-   try {
-
+// routes/espn/league.js
+router.get('/league', async (req, res) => {
+  try {
     const season   = Number(req.query.season);
-    const leagueId = String(req.query.leagueId || '');
-    // accept teamId or teamIds=3,8 (first wins)
-    const teamId = (() => {
+    const leagueId = (req.query.leagueId || '').trim();
+    const teamId   = (() => {
       if (req.query.teamId != null) return Number(req.query.teamId);
-            if (req.query.teamIds) {
-        const first = String(req.query.teamIds).split(',').map(s=>Number(s.trim())).find(Number.isFinite);
-        if (Number.isFinite(first)) return first;
+      if (req.query.teamIds) {
+        const first = String(req.query.teamIds)
+          .split(',').map(s => Number(s.trim()))
+          .find(Number.isFinite);
+        return first;
       }
       return undefined;
-          })();
-    const ffMember = (req.headers['x-ff-member'] || '').trim() || undefined;
+    })();
 
-     if (!season || !leagueId) {
-       return res.status(400).json({ ok:false, error:'missing_params' });
-     }
+    if (!Number.isFinite(season) || !leagueId) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
+    }
 
-    const raw = await fetchLeagueTeamsFromESPN({ season, leagueId, req, teamId, ffMember });
-    try {
-      res.set('x-ff-ctx', JSON.stringify({ leagueId, teamId: teamId ?? null, ffMember: ffMember ?? null }));
-    } catch {}
+    // Resolve ESPN cookies strictly server-side
+    const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
+    if (!candidates.length) {
+      return res.status(401).json({ ok:false, error:'no_espn_cred' });
+    }
 
-  } catch (err) {
-    console.error('[espn/league] error:', err);
-    return res.status(500).json({ ok:false, error:String(err?.message || err) });
+    const url =
+      `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}` +
+      `?view=mSettings&view=mMatchup&view=mMatchupScore&view=mTeam`;
+
+    const r = await fetchJsonWithCred(url, candidates); // your existing helper that tries each cred
+    return res.json({ ok:true, league: r });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
 });
+
 
 
 /* ---------------- exports ---------------- */

@@ -216,83 +216,39 @@ async function getRosterFromUpstream({ season, leagueId, week, teamId, req, debu
 /* -------------------- Routes -------------------- */
 router.get('/roster/selftest', (_req, res) => res.json({ ok:true, msg:'roster router mounted' }));
 
+// routes/espn/roster.js
 router.get('/roster', async (req, res) => {
   try {
     const season   = Number(req.query.season);
-    const leagueId = String(req.query.leagueId || '');
-    const teamId   = req.query.teamId != null ? Number(req.query.teamId) : null;
-    const week     = safeWeek(req);
+    const leagueId = (req.query.leagueId || '').trim();
+    const teamId   = Number(req.query.teamId);
+    const rawWeek  = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp ?? req.query.w;
+    const week     = (() => {
+      const n = Number(rawWeek);
+      if (Number.isFinite(n) && n >= 1 && n <= 18) return n;
+      return CURRENT_WEEK; // whatever you set for in-season default
+    })();
 
-    if (!season || !leagueId) {
+    if (!Number.isFinite(season) || !leagueId || !Number.isFinite(teamId)) {
       return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
-    const raw = await getRosterFromUpstream({ season, leagueId, week, teamId, req });
-
-    // CORS (align with FA endpoints)
-    res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-    res.set('Access-Control-Allow-Credentials', 'true');
-    res.set('Cache-Control', 'no-store, private');
-
-    // Helper to convert an ESPN entry into our canonical FA-style + legacy roster fields
-    const entryToCanon = (entry, teamMeta, konaIndex) => {
-      const p = entry.playerPoolEntry?.player || entry.player || entry || {};
-      const proTeamId = Number.isFinite(+p.proTeamId) ? +p.proTeamId : null;
-      const teamAbbrFromId = TEAM_ABBR[proTeamId] || null;
-      const teamAbbr = p.proTeamAbbreviation || teamAbbrFromId || p.proTeam || null;
-      const position = POS[p.defaultPositionId] || p.position || p.defaultPosition || (p.id < 0 ? 'DST' : '');
-      const slot     = SLOT[entry.lineupSlotId] || entry.slot || 'BN';
-      const isStarter = !['BE','BN','IR'].includes(String(slot).toUpperCase());
-      const headshot = resolveHeadshot(p, position, teamAbbr);
-      const fpId = p.fantasyProsId || p.fpId || p?.externalIds?.fantasyProsId || p?.externalIds?.fpid;
-      const pid = Number(p.id || entry.playerId);
-
-      const extras = konaIndex.get(pid) || {};
-      return toCanonicalPlayer({
-        id: p.id || entry.playerId,
-        name: p.fullName || p.displayName || p.name,
-        position,
-        proTeamId: extras.proTeamId ?? proTeamId,
-        teamAbbr: extras.teamAbbr ?? teamAbbr,
-        proj: extras.proj ?? null,
-        rank: extras.rank ?? null,
-        opponentAbbr: extras.opponentAbbr ?? null,
-        defensiveRank: extras.defensiveRank ?? null,
-        byeWeek: extras.byeWeek ?? null,
-        fmv: extras.fmv ?? null,
-        slot,
-        isStarter,
-        headshot,
-        fpId,
-        teamMeta
-      });
-    };
-
-    if (teamId != null) {
-      const teamMeta = { type:'TEAM', teamId, team_name: raw.team_name };
-      const players = (raw.entries || []).map(e => entryToCanon(e, teamMeta, raw.konaIndex));
-      return res.json({ ok:true, platform:'espn', leagueId, season, week, teamId, team_name: raw.team_name, players });
+    const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
+    if (!candidates.length) {
+      return res.status(401).json({ ok:false, error:'no_espn_cred' });
     }
 
-    const teams = (raw.teams || []).map(t => {
-      const meta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
-      return {
-        teamId: t.teamId,
-        team_name: t.team_name,
-        players: (t.entries || []).map(e => entryToCanon(e, meta, raw.konaIndex))
-      };
-    });
+    const url =
+      `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}` +
+      `?scoringPeriodId=${week}&matchupPeriodId=${week}&forTeamId=${teamId}&view=mRoster&view=mBoxscore`;
 
-    return res.json({ ok:true, platform:'espn', leagueId, season, week, teams });
-  } catch (err) {
-    const status = err?.meta?.status >= 500 ? 502 : 500;
-    return res.status(status).json({
-      ok: false,
-      error: err.message || 'server_error',
-      status: err?.meta?.status || status,
-      detail: err?.meta?.text || undefined
-    });
+    const data = await fetchJsonWithCred(url, candidates);
+    // ...normalize to your shape...
+    return res.json({ ok:true, players: normalizeRoster(data, week) });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
 });
+
 
 module.exports = router;
