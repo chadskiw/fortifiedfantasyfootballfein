@@ -1,7 +1,7 @@
 // routes/espn/roster.js
 const express = require('express');
 const router  = express.Router();
-const { resolveEspnCredCandidates } = require('./_espnCred');
+const { resolveEspnCredCandidates } = require('./_cred');
 
 let fetchJsonWithCred = null;
 try { ({ fetchJsonWithCred } = require('./_fetch')); } catch {}
