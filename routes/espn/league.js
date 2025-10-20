@@ -90,6 +90,7 @@ async function fetchLeagueTeamsFromESPN({ season, leagueId, req, teamId, debug }
   // ESPN league metadata/teams: mTeam + mSettings (no roster needed here)
   const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
   const url  = `${base}?view=mTeam&view=mSettings`;
+    const ffMember = (req.headers['x-ff-member'] || '').trim() || undefined;
 
   // Try candidates in order: public → request cookies → db (member-linked)
  const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId: ffMember });
