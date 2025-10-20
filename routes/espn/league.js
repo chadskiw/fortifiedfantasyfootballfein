@@ -92,7 +92,7 @@ async function fetchLeagueTeamsFromESPN({ season, leagueId, req, teamId, debug }
   const url  = `${base}?view=mTeam&view=mSettings`;
 
   // Try candidates in order: public → request cookies → db (member-linked)
-  const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
+ const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId: ffMember });
   if (!candidates.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
 
   let data = null;
@@ -241,94 +241,31 @@ function toTeamsPayload(data = {}) {
 }
 
 // routes/espn/league.js
-router.get('/league', async (req, res) => {
-  try {
+ router.get('/league', async (req, res) => {
+   try {
+
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '');
-   const teamId = (() => {
-   if (req.query.teamId != null) return Number(req.query.teamId);
-   if (req.query.teamIds) {
-     const first = String(req.query.teamIds).split(',').map(s=>Number(s.trim())).find(n=>Number.isFinite(n));
-     if (Number.isFinite(first)) return first;
-   }
-   return undefined;
- })();
-    const debug    = String(req.query.debug || '') === '1';
-    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'season and leagueId are required' });
-
-    const base = `${ESPN_BASE_HOST}/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
-    const url  = `${base}?view=mTeam&view=mSettings`;
-
-     const cands0 = await resolveEspnCredCandidates({ req, leagueId, teamId, debug });
-
-    if (!cands0.length) console.warn('[espn/league] no ESPN creds available for league', { leagueId });
-
-    // always include a public try
-    const candidates = (cands0.length ? cands0 : []).concat([{ source:'public', swid:'', s2:'' }]);
-
-    let data = null;
-    let last = null;
-
-    for (const cand of candidates) {
-      const r = await fetchJsonWithCred(url, cand);
-      last = { cand, res: r };
-
-      if (r.ok && r.json) {
-        data = r.json;
-        try { res.set('x-espn-cred-source', cand.source || 'unknown'); } catch {}
-        break;
+    // accept teamId or teamIds=3,8 (first wins)
+    const teamId = (() => {
+      if (req.query.teamId != null) return Number(req.query.teamId);
+            if (req.query.teamIds) {
+        const first = String(req.query.teamIds).split(',').map(s=>Number(s.trim())).find(Number.isFinite);
+        if (Number.isFinite(first)) return first;
       }
+      return undefined;
+          })();
+    const ffMember = (req.headers['x-ff-member'] || '').trim() || undefined;
 
-      if (r.status === 401) {
-        console.warn('[espn/league] 401 with candidate', {
-          leagueId, teamId, source: cand.source, member_id: cand.member_id || null,
-          bodySnippet: (r.text || '').slice(0, 240)
-        });
-      } else if (String(r.status || '').startsWith('5')) {
-        console.warn('[espn/league] upstream 5xx', {
-          leagueId, status: r.status, statusText: r.statusText,
-          bodySnippet: (r.text || '').slice(0, 240)
-        });
-      }
-    }
+     if (!season || !leagueId) {
+       return res.status(400).json({ ok:false, error:'missing_params' });
+     }
 
-    if (!data) {
-      console.warn(
-        `[espn/league] repro: curl -i '${url}' -H 'Accept: application/json, text/plain, */*' ` +
-        `-H 'User-Agent: ff-platform-service/1.0' -H 'Cookie: espn_s2=${last?.cand?.s2 || ''}; SWID=${last?.cand?.swid || ''}'`
-      );
-      const status = last?.res?.status || 401;
-      return res.status(status).json({ ok:false, error:'ESPN league fetch failed', status, detail:last?.res?.statusText || '' });
-    }
+    const raw = await fetchLeagueTeamsFromESPN({ season, leagueId, req, teamId, ffMember });
+    try {
+      res.set('x-ff-ctx', JSON.stringify({ leagueId, teamId: teamId ?? null, ffMember: ffMember ?? null }));
+    } catch {}
 
-    // normalize for FE
-    const teamNameOf = (t) => {
-      const loc = t?.location || t?.teamLocation || '';
-      const nick = t?.nickname || t?.teamNickname || '';
-      const joined = `${loc} ${nick}`.trim();
-      return joined || t?.name || `Team ${t?.id}`;
-    };
-
-    const teams = (data?.teams || []).map(t => ({
-      teamId: t?.id,
-      team_name: teamNameOf(t),
-      logo: t?.logo || t?.logoUrl || t?.teamLogoUrl || null,
-      wins: t?.record?.overall?.wins ?? 0,
-      losses: t?.record?.overall?.losses ?? 0,
-      ties: t?.record?.overall?.ties ?? 0,
-    }));
-
-    return res.json({
-      ok: true,
-      leagueId,
-      season,
-      teamCount: teams.length,
-      teams,
-      meta: {
-        scoringPeriodId: data?.scoringPeriodId,
-        status: data?.status?.type?.name,
-      }
-    });
   } catch (err) {
     console.error('[espn/league] error:', err);
     return res.status(500).json({ ok:false, error:String(err?.message || err) });
