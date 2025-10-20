@@ -1,19 +1,29 @@
-// routes/espn/league.js
 const express = require('express');
 const router  = express.Router();
 
 const { resolveEspnCredCandidates } = require('./_espnCred');
-const { fetchJsonWithCred } = require('./_fetch');
 
-// Small helper to call ESPN with a given credential
+// Try to use shared helper if present; else do a local fetch with cookie header.
+let fetchJsonWithCred = null;
+try { ({ fetchJsonWithCred } = require('./_fetch')); } catch {}
+
 async function espnGET(url, cand) {
-  const res = await fetchJsonWithCred(url, cand);
-  return res; // { ok, status, statusText, json, text }
+  if (fetchJsonWithCred) {
+    // Most robust path: your shared helper may already rotate through candidates.
+    const r = await fetchJsonWithCred(url, cand);
+    return r; // expect { ok, status, json? }
+  }
+  const fetch = global.fetch || (await import('node-fetch')).default;
+  const headers = {
+    // This cookie is the ONLY thing ESPN needs for private leagues
+    cookie: `espn_s2=${cand.s2}; SWID=${cand.swid};`,
+    'x-fantasy-platform': 'web',
+    'x-fantasy-source': 'kona',
+  };
+  const resp = await fetch(url, { headers });
+  const json = await resp.json().catch(() => null);
+  return { ok: resp.ok, status: resp.status, json };
 }
-
-router.get('/league/selftest', (_req, res) => {
-  res.json({ ok:true, msg:'league router mounted' });
-});
 
 // GET /api/platforms/espn/league?season=2025&leagueId=123456[&teamId=7]
 router.get('/league', async (req, res) => {
@@ -26,34 +36,26 @@ router.get('/league', async (req, res) => {
       return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
-    // Resolve ESPN cookies strictly server-side (no member id from client)
     const candidates = await resolveEspnCredCandidates({ req, leagueId, teamId });
-
-    if (!candidates.length) {
-      return res.status(401).json({ ok:false, error:'no_espn_cred' });
-    }
+    if (!candidates.length) return res.status(401).json({ ok:false, error:'no_espn_cred' });
 
     const url =
       `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}` +
       `?view=mSettings&view=mMatchup&view=mMatchupScore&view=mTeam`;
 
-    let data = null, last = null, used = null;
+    let used = null, data = null, lastStatus = 0;
     for (const cand of candidates) {
       const r = await espnGET(url, cand);
-      last = r;
-      if (r.ok && r.json) { data = r.json; used = cand; break; }
-      if (r.status === 401) continue; // try next candidate
+      lastStatus = r.status || 0;
+      if (r.ok && r.json) { used = cand; data = r.json; break; }
+      if (r.status === 401) continue;
     }
-
-    if (!data) {
-      const status = last?.status || 401;
-      return res.status(status).json({ ok:false, error:`upstream_${status}` });
-    }
+    if (!data) return res.status(lastStatus || 401).json({ ok:false, error: `upstream_${lastStatus||'error'}` });
 
     try { res.set('x-espn-cred-source', used?.source || 'unknown'); } catch {}
     return res.json({ ok:true, league: data });
   } catch (e) {
-    return res.status(500).json({ ok:false, error:String(e?.message || e) });
+    return res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
 });
 

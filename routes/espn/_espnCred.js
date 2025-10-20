@@ -1,6 +1,7 @@
-// routes/espn/_espnCred.js
 // Resolve ESPN credentials strictly on the server using DB lookups.
-// We do NOT accept member id from the client and we do NOT read SWID/S2 from client cookies.
+// No frontend member id; no client cookies.
+
+const getDb = (req) => req.db || req.pg || req.app?.get?.('db');
 
 const SQL = {
   ownerByTeam: `
@@ -27,69 +28,61 @@ const SQL = {
   `
 };
 
-const cleanStr = v => (v == null ? undefined : String(v).trim() || undefined);
-const cleanInt = v => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
-};
+const s = (v) => (v == null ? undefined : String(v).trim() || undefined);
+const n = (v) => { const x = Number(v); return Number.isFinite(x) ? x : undefined; };
 const normalizeSwid = (v) => {
-  const s = cleanStr(v);
-  if (!s) return undefined;
-  // Accept raw GUID or {GUID}, force {lowercase}
-  const m = s.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
-  if (!m) return undefined;
-  return `{${m[0].toLowerCase()}}`;
+  const q = s(v);
+  if (!q) return undefined;
+  const m = q.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
+  return m ? `{${m[0].toLowerCase()}}` : undefined;
 };
 
 async function resolveEspnCredCandidates({ req, leagueId, teamId }) {
-  const LID = cleanStr(leagueId);
-  const TID = cleanInt(teamId);
+  const db = getDb(req);
+  if (!db) return [];
 
-  // 1) Infer member_id from league/team ownership (server-side only)
+  const LID = s(leagueId);
+  const TID = n(teamId);
+
+  // 1) Infer member_id from league/team ownership
   let memberId;
   if (LID && TID != null) {
     try {
-      const row = await req.db.oneOrNone(SQL.ownerByTeam, [LID, TID]);
-      if (row?.member_id) memberId = cleanStr(row.member_id);
+      const row = await db.oneOrNone(SQL.ownerByTeam, [LID, TID]);
+      if (row?.member_id) memberId = s(row.member_id);
     } catch {}
   }
 
-  // 2) If we can't infer from team, try the authenticated session (still server-side only)
+  // 2) If not found via team, try authenticated session (server-side only)
   if (!memberId) {
     memberId =
-      cleanStr(req?.auth?.member_id) ||
-      cleanStr(req?.user?.member_id) ||
-      cleanStr(req?.session?.member_id) ||
-      cleanStr(req?.cookies?.ff_member_id) || // only read server-side; never echo to client
+      s(req?.auth?.member_id) ||
+      s(req?.user?.member_id) ||
+      s(req?.session?.member_id) ||
+      s(req?.cookies?.ff_member_id) || // server-side read only; never echoed to client
       undefined;
   }
 
-  // 3) Map member -> quick_snap (== SWID), then SWID -> espn_s2
+  // 3) member -> quick_snap (SWID) -> ff_espn_cred (espn_s2)
   let swid;
   if (memberId) {
     try {
-      const qh = await req.db.oneOrNone(SQL.quickSnapByMember, [memberId]);
+      const qh = await db.oneOrNone(SQL.quickSnapByMember, [memberId]);
       swid = normalizeSwid(qh?.quick_snap);
     } catch {}
   }
 
-  const candidates = [];
+  const out = [];
   if (swid) {
     try {
-      const cred = await req.db.oneOrNone(SQL.credBySwid, [swid]);
+      const cred = await db.oneOrNone(SQL.credBySwid, [swid]);
       if (cred?.espn_s2) {
-        candidates.push({
-          source: 'quickhitter_swid',
-          swid: cred.swid,
-          s2: cred.espn_s2
-        });
+        out.push({ source: 'quickhitter_swid', swid: cred.swid, s2: cred.espn_s2 });
       }
     } catch {}
   }
 
-  // Optional: add other internal fallbacks here if you have them.
-
-  return candidates; // array for fetchJsonWithCred to try in order
+  return out;
 }
 
 module.exports = { resolveEspnCredCandidates };
