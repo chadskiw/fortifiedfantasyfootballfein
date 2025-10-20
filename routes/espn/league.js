@@ -14,6 +14,42 @@ async function espnGET(url, cand) {
   const text = await resp.text(); let json=null; try{ json=JSON.parse(text);}catch{}
   return { ok:resp.ok, status:resp.status, json, text };
 }
+// routes/espn/roster.js (core fetch bit)
+import { resolveLeagueCred } from './_espnCred.js';
+
+export async function getRoster(req, res, db){
+  const season   = String(req.query.season || new Date().getUTCFullYear());
+  const leagueId = String(req.query.leagueId || '');
+  const teamId   = req.query.teamId ? String(req.query.teamId) : null;
+  const scope    = (req.query.scope === 'season') ? 'season' : 'week';
+  const week     = req.query.week ? String(req.query.week) : null;
+
+  if (!leagueId) return res.status(400).json({ ok:false, error:'leagueId required' });
+
+  const viewerMemberId = req.user?.member_id || null;
+  const cred = await resolveLeagueCred(db, { leagueId, viewerMemberId });
+
+  const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
+  const qs   = new URLSearchParams();
+  qs.set('view','mRoster');
+  if (scope === 'week' && week) qs.set('scoringPeriodId', week);
+
+  const url = `${base}?${qs.toString()}`;
+  const cookie = cred.espn_s2 ? `espn_s2=${cred.espn_s2}; SWID=${cred.swid}` : '';
+
+  let r = await fetch(url, { headers: { 'User-Agent': 'ff-platform-service/1.0', ...(cookie ? { cookie } : {}) } });
+  if (r.status === 401) r = await fetch(url, { headers: { 'User-Agent': 'ff-platform-service/1.0' } }); // public fallback
+
+  if (!r.ok) return res.status(r.status).json({ ok:false, status:r.status, error:'ESPN roster fetch failed' });
+
+  const j = await r.json();
+
+  // Optional: narrow to teamId if provided
+  const teams = Array.isArray(j?.teams) ? j.teams : [];
+  const subset = teamId ? teams.filter(t => String(t?.id) === teamId) : teams;
+
+  return res.json({ ok:true, data: subset });
+}
 
 router.get('/league', async (req, res) => {
   try{

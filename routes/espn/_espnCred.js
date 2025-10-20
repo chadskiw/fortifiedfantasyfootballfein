@@ -45,6 +45,51 @@ const normalizeSwid = (v) => {
   const m = q.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
   return m ? `{${m[0].toLowerCase()}}` : undefined;
 };
+// routes/espn/_espnCred.js
+// Resolve a (swid, espn_s2) for a given leagueId using only server-side tables.
+export async function resolveLeagueCred(db, { leagueId, viewerMemberId=null }) {
+  // 1) Prefer the viewer’s own cred *if* they’re in the league
+  const rowMine = await db.oneOrNone(`
+    with lm as (
+      select distinct f.member_id
+      from ff_sport_ffl f
+      where f.league_id = $1 and f.member_id = $2
+    )
+    select c.swid, c.espn_s2
+    from lm
+    join ff_quickhitter q on q.member_id = lm.member_id
+    join ff_espn_cred  c on c.swid = q.quick_snap
+    where coalesce(c.espn_s2,'') <> '' and coalesce(c.swid,'') <> ''
+    limit 1
+  `, [String(leagueId), viewerMemberId || null]);
+
+  if (rowMine) return { ...rowMine, source: 'viewer_link' };
+
+  // 2) Otherwise, borrow any league member’s cred (ghost-friendly)
+  const rowAny = await db.oneOrNone(`
+    with league_members as (
+      select distinct f.member_id
+      from ff_sport_ffl f
+      where f.league_id = $1
+    ),
+    snaps as (
+      select q.member_id, q.quick_snap swid
+      from ff_quickhitter q
+      join league_members lm on lm.member_id = q.member_id
+    )
+    select c.swid, c.espn_s2
+    from snaps s
+    join ff_espn_cred c on c.swid = s.swid
+    where coalesce(c.espn_s2,'') <> '' and coalesce(c.swid,'') <> ''
+    order by c.last_seen desc nulls last
+    limit 1
+  `, [String(leagueId)]);
+
+  if (rowAny) return { ...rowAny, source: 'league_peer' };
+
+  // 3) No cred → caller should try a public fetch
+  return { swid: '', espn_s2: '', source: 'public' };
+}
 
 async function resolveEspnCredCandidates({ req, leagueId, teamId }) {
   const db = getDb(req);
