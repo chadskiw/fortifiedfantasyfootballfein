@@ -7,7 +7,8 @@ const SQL = {
   ownerByTeam: `
     select member_id
     from ff_sport_ffl
-    where platform = '018' and league_id = $1 and team_id = $2
+ WHERE (platform = '018' OR platform = 'espn')
+ and league_id = $1 and team_id = $2
     limit 1
   `,
   quickSnapByMember: `
