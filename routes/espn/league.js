@@ -1,7 +1,7 @@
 // routes/espn/league.js
 const express = require('express');
 const router  = express.Router();
-const { resolveEspnCredCandidates } = require('./cred');
+const { resolveEspnCredCandidates } = require('./_cred');
 
 let fetchJsonWithCred = null;
 try { ({ fetchJsonWithCred } = require('./_fetch')); } catch {}
