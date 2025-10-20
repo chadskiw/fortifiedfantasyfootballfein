@@ -8,7 +8,8 @@ const { fetchJsonWithCred } = require('./_fetch');
 const NFL_MAX_WEEK = 18;
 const CURRENT_WEEK = 7;
 function safeWeek(req){
-  const w = Number(req.query.week);
+  const raw = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp ?? req.query.w;
+  const w = Number(raw);
   if (Number.isFinite(w) && w >= 1) return Math.min(w, NFL_MAX_WEEK);
   return CURRENT_WEEK;
 }
