@@ -25,9 +25,14 @@ function normSwid(swid) {
 }
 
 
+// keep helpers s(), n(), normSwid() as you already have
+
+// 1) Owner lookup with guards + league-level fallback when teamId is blank or no match
 async function memberIdsForContext({ season, leagueId, teamId }) {
   const params = [String(season||''), String(leagueId||'')];
-  let sql = `
+
+  // First try: with team filter (only if numeric)
+  let withTeamSQL = `
     SELECT DISTINCT member_id
     FROM ff_sport_ffl
     WHERE (platform = '018' OR lower(platform) = 'espn')
@@ -35,11 +40,67 @@ async function memberIdsForContext({ season, leagueId, teamId }) {
       AND league_id = $2
       AND member_id IS NOT NULL
   `;
-  const tid = n(teamId);
-  if (Number.isFinite(tid)) { params.push(tid); sql += ` AND team_id = $3::int`; }
-  const { rows } = await pool.query(sql, params);
-  return rows.map(r => r.member_id).filter(Boolean);
+
+  const tid = Number(teamId);
+  let withTeamRows = [];
+  if (Number.isFinite(tid)) {
+    const sql = withTeamSQL + ` AND team_id = $3::int`;
+    const { rows } = await pool.query(sql, [...params, tid]);
+    withTeamRows = rows;
+  }
+
+  if (withTeamRows.length) {
+    return withTeamRows.map(r => r.member_id).filter(Boolean);
+  }
+
+  // Second try: league-level (any member from this league/season)
+  const { rows: leagueRows } = await pool.query(
+    `
+      SELECT DISTINCT member_id
+      FROM ff_sport_ffl
+      WHERE (platform = '018' OR lower(platform) = 'espn')
+        AND season = $1
+        AND league_id = $2
+        AND member_id IS NOT NULL
+    `,
+    params
+  );
+  if (leagueRows.length) {
+    return leagueRows.map(r => r.member_id).filter(Boolean);
+  }
+
+  // Third (optional): try any season (handles stale season mapping)
+  const { rows: anyRows } = await pool.query(
+    `
+      SELECT DISTINCT member_id
+      FROM ff_sport_ffl
+      WHERE (platform = '018' OR lower(platform) = 'espn')
+        AND league_id = $1
+        AND member_id IS NOT NULL
+      ORDER BY updated_at DESC NULLS LAST
+    `,
+    [String(leagueId)]
+  );
+  return anyRows.map(r => r.member_id).filter(Boolean);
 }
+
+// 2) Top-level resolver now calls memberIdsForContext() and continues as before
+async function resolveEspnCredCandidates({ req, season, leagueId, teamId }) {
+  const out = [];
+  try {
+    const members = await memberIdsForContext({ season, leagueId, teamId });
+
+    // Prefer quick_snap-matched SWID first (most accurate account)
+    out.push(...await credsViaQuickSnap(members));
+
+    // Fallback: any cred rows tied to those members
+    if (!out.length) out.push(...await credsForMembers(members));
+  } catch (e) {
+    console.warn('[espn/_cred] member lookup failed:', e.message);
+  }
+  return out.map(c => ({ ...c, stale: isStale(c.last_seen, 3) }));
+}
+
 
 // First: use the member's *current* quick_snap SWID, then pull cred by SWID
 async function credsViaQuickSnap(memberIds) {
