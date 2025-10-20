@@ -245,7 +245,14 @@ router.get('/league', async (req, res) => {
   try {
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '');
-    const teamId   = req.query.teamId != null ? Number(req.query.teamId) : undefined;
+   const teamId = (() => {
+   if (req.query.teamId != null) return Number(req.query.teamId);
+   if (req.query.teamIds) {
+     const first = String(req.query.teamIds).split(',').map(s=>Number(s.trim())).find(n=>Number.isFinite(n));
+     if (Number.isFinite(first)) return first;
+   }
+   return undefined;
+ })();
     const debug    = String(req.query.debug || '') === '1';
     if (!season || !leagueId) return res.status(400).json({ ok:false, error:'season and leagueId are required' });
 
