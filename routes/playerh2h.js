@@ -97,24 +97,23 @@ router.get('/quote', async (req, res) => {
       getWeeklyProjection(client, season, week, playerB),
     ]);
     const q = quoteFromProjs(projA, projB);
-+    return res.json({
-+      ok: true,
-+      duel: {
-+        duel_id: null,                 // not created yet; keep key to satisfy UI
-+        season, week,
-+        playerA: { id: playerA, proj: +projA.toFixed(2) },
-+        playerB: { id: playerB, proj: +projB.toFixed(2) },
-+      },
-+      quote: {                         // keep pricing grouped but predictable
-+        favored: q.favored,
-+        line: q.line,
-+        probA: q.probA,
-+        probB: q.probB,
-+        delta: q.delta,
-+        model: 'ppr'
-+      },
-+      ts: Date.now()
-+    });
+    return res.json({
+      ok: true,
+      duel: {
+        duel_id: null,                 // not created yet; keep key to satisfy UI+        season, week,
+        playerA: { id: playerA, proj: +projA.toFixed(2) },
+        playerB: { id: playerB, proj: +projB.toFixed(2) },
+      },
+      quote: {                         // keep pricing grouped but predictable
+        favored: q.favored,
+        line: q.line,
+        probA: q.probA,
+        probB: q.probB,
+        delta: q.delta,
+        model: 'ppr'
+      },
+      ts: Date.now()
+    });
   } catch (err) {
     console.error('[ph2h/quote] error', err);
     return res.status(500).json({ ok:false, soft:true, error:'server_error' });
@@ -149,16 +148,16 @@ router.post('/create', express.json(), async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,'open',$7)`,
       [duel_id, season, week, playerA, playerB, member, memo]
     );
-+    return res.json({
-+      ok: true,
-+      duel: {
-+        duel_id, season, week,
-+        status: 'open',
-+        playerA: { id: playerA },
-+        playerB: { id: playerB },
-+        memo
-+      }
-+    });  } catch (err) {
+    return res.json({
+      ok: true,
+      duel: {
+        duel_id, season, week,
+       status: 'open',
+        playerA: { id: playerA },
+        playerB: { id: playerB },
+        memo
+      }
+    });  } catch (err) {
     console.error('[ph2h/create] error', err);
     return res.status(500).json({ ok:false, soft:true, error:'server_error' });
   } finally {
@@ -220,22 +219,22 @@ router.post('/wager', express.json(), async (req, res) => {
       `SELECT pot_a, pot_b FROM ff_player_h2h WHERE duel_id=$1`, [duel_id]
     );
 
-+    await client.query('COMMIT');
-+    return res.json({
-+      ok: true,
-+      duel: {
-+        duel_id,
-+        pot: { A: pots[0].pot_a, B: pots[0].pot_b }
-+      },
-+      wager: {
-+        wager_id,
-+        side,
-+        amount,
-+        hold_id,
-+        status: 'held'
-+      },
-+      pending: amount
-+    });
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      duel: {
+        duel_id,
+        pot: { A: pots[0].pot_a, B: pots[0].pot_b }
+      },
+      wager: {
+        wager_id,
+        side,
+        amount,
+        hold_id,
+        status: 'held'
+      },
+      pending: amount
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[ph2h/wager] error', err);
