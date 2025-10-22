@@ -11,6 +11,7 @@ const pool = new Pool({
 
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
 const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
+const SCORE_COL = { PPR: ['proj_ppr','ppr','proj'], HALF: ['proj_half','half'], STD: ['proj_std','std'] };
 
 const asInt = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
 const posInt = (v) => Math.max(0, asInt(v, 0));
@@ -31,30 +32,53 @@ async function tableExists(client, qname) {
   return !!rows[0]?.t;
 }
 
-// Try a few likely projection sources; gracefully fallback to 0
-async function getWeeklyProjection(client, season, week, espnPlayerId) {
-  // 1) FantasyPros weekly (if you have it): ff_fp_points_week(season,week,espn_id|player_id, proj_ppr)
+// Try multiple tables/columns; return first numeric projection we find
+async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='PPR') {
+  const cols = SCORE_COL[String(scoring).toUpperCase()] || SCORE_COL.PPR;
+  const id = String(espnPlayerId);
+
+  // helpers
+  const tryQ = async (sql, params) => {
+    try { const { rows } = await client.query(sql, params); return rows?.[0]?.proj; } catch { return null; }
+  };
+  const pickCol = async (table, idCols) => {
+    for (const c of cols) {
+      const whereId = idCols.map(ic => `${ic} = $3::bigint`).join(' OR ');
+      const sql = `SELECT ${c} AS proj FROM ${table} WHERE season=$1 AND week=$2 AND (${whereId}) AND ${c} IS NOT NULL ORDER BY ${c} DESC LIMIT 1`;
+      const v = await tryQ(sql, [season, week, id]);
+      if (v != null && isFinite(v)) return Number(v);
+    }
+    return null;
+  };
+
+  // 1) FantasyPros weekly
   if (await tableExists(client, 'public.ff_fp_points_week')) {
-    try {
-      const { rows } = await client.query(
-        `SELECT proj_ppr AS proj
-           FROM ff_fp_points_week
-          WHERE season=$1 AND week=$2
-            AND (espn_id = $3::bigint OR player_id = $3::bigint)
-          ORDER BY proj_ppr DESC
-          LIMIT 1`,
-        [season, week, espnPlayerId]
-      );
-      if (rows[0]?.proj != null) return Number(rows[0].proj);
-    } catch {}
+    const v = await pickCol('ff_fp_points_week', ['espn_id','espn_player_id','player_id']);
+    if (v != null) return v;
   }
-
-  // 2) Any cache you keep per week (example): ff_team_points_cache has per-player? If not, skip.
-
-  // 3) Fallback: 0 (pick'em)
-  return 0;
+  // 2) ESPN-derived weekly
+  if (await tableExists(client, 'public.ff_espn_week_proj')) {
+    const v = await pickCol('ff_espn_week_proj', ['espn_id','espn_player_id','player_id']);
+    if (v != null) return v;
+  }
+  // 3) Generic canonical weekly
+  if (await tableExists(client, 'public.ff_player_week_proj')) {
+    const v = await pickCol('ff_player_week_proj', ['espn_id','espn_player_id','player_id']);
+    if (v != null) return v;
+  }
+  // 4) Last-ditch: any *week* *proj* table with a single 'proj' column
+  // (e.g., import dumps). We’ll try a couple of common names.
+  for (const t of ['public.fp_week_proj','public.week_proj','public.player_week_proj']) {
+    if (await tableExists(client, t)) {
+      const v = await tryQ(
+        `SELECT proj FROM ${t} WHERE season=$1 AND week=$2 AND (espn_id=$3::bigint OR espn_player_id=$3::bigint OR player_id=$3::bigint) AND proj IS NOT NULL ORDER BY proj DESC LIMIT 1`,
+        [season, week, id]
+      );
+      if (v != null && isFinite(v)) return Number(v);
+    }
+  }
+  return 0; // fallback: pick'em
 }
-
 // A tiny prob model from projection delta (tweak sigma as you like)
 function quoteFromProjs(pA, pB) {
   const delta = Number((pA - pB).toFixed(2));
@@ -88,13 +112,15 @@ router.get('/quote', async (req, res) => {
   const week    = asInt(req.query.week,   FALLBACK_WEEK);
   const playerA = asInt(req.query.playerA);
   const playerB = asInt(req.query.playerB);
+    const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
+
   if (!playerA || !playerB) return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
 
   const client = await pool.connect();
   try {
     const [projA, projB] = await Promise.all([
-      getWeeklyProjection(client, season, week, playerA),
-      getWeeklyProjection(client, season, week, playerB),
+      getWeeklyProjection(client, season, week, playerA, scoring),
+      getWeeklyProjection(client, season, week, playerB, scoring),
     ]);
     const q = quoteFromProjs(projA, projB);
     return res.json({
@@ -110,7 +136,7 @@ router.get('/quote', async (req, res) => {
         probA: q.probA,
         probB: q.probB,
         delta: q.delta,
-        model: 'ppr'
+        model: scoring.toLowerCase()
       },
       ts: Date.now()
     });
