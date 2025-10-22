@@ -20,6 +20,7 @@ const SCORE_COL = {
 };
 
 const asInt  = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
+const asId   = (v) => v == null ? null : String(v).trim(); // keep as text; DB compare uses ::text
 const posInt = (v) => Math.max(0, asInt(v, 0));
 const rid    = (p) => `${p}_${crypto.randomUUID().replace(/-/g,'').slice(0,8)}`;
 
@@ -32,13 +33,13 @@ const getMember = (req) =>
 /* -----------------------------------------------------------
    Helpers: projections + safe table checks
 ----------------------------------------------------------- */
-
 async function tableExists(client, qname) {
   const { rows } = await client.query(`SELECT to_regclass($1) AS t`, [qname]);
   return !!rows[0]?.t;
 }
 
 // Try multiple tables/columns; return first numeric projection we find
+// Strategy:
 // 1) exact season+week
 // 2) nearest available week in that season (if exact week not present)
 async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='PPR') {
@@ -58,7 +59,7 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
     for (const c of cols) {
       const whereId = idCols.map(ic => `${ic}::text = $3::text`).join(' OR ');
 
-      // Phase 1: exact week
+      // exact week
       const sqlExact = `
         SELECT ${c} AS proj
           FROM ${table}
@@ -70,7 +71,7 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
       const vExact = await tryQ(sqlExact, [season, week, id]);
       if (vExact != null && isFinite(vExact)) return Number(vExact);
 
-      // Phase 2: nearest week fallback (if exact missing)
+      // nearest week fallback
       const sqlNearest = `
         SELECT ${c} AS proj
           FROM ${table}
@@ -136,14 +137,14 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
   return 0;
 }
 
-// A tiny prob model from projection delta (tweak sigma as you like)
+// Tiny prob model from projection delta (tweak sigma as you like)
 function quoteFromProjs(pA, pB) {
-  const delta  = Number((pA - pB).toFixed(2));
+  const delta   = Number((pA - pB).toFixed(2));
   const favored = (delta === 0) ? 'pick' : (delta > 0 ? 'A' : 'B');
-  const line   = Math.abs(delta);   // “A by X pts”
-  const sigma  = 6;                 // spread sensitivity
-  const probA  = 1 / (1 + Math.exp(-(pA - pB) / sigma));
-  const probB  = 1 - probA;
+  const line    = Math.abs(delta);   // “A by X pts”
+  const sigma   = 6;                 // spread sensitivity
+  const probA   = 1 / (1 + Math.exp(-(pA - pB) / sigma));
+  const probB   = 1 - probA;
   return { favored, line, probA: +probA.toFixed(3), probB: +probB.toFixed(3), delta };
 }
 
@@ -167,12 +168,13 @@ async function createHold(client, { member_id, amount, memo, duel_id }) {
 router.get('/quote', async (req, res) => {
   const season  = asInt(req.query.season, FALLBACK_SEASON);
   const week    = asInt(req.query.week,   FALLBACK_WEEK);
-  const playerA = asInt(req.query.playerA);
-  const playerB = asInt(req.query.playerB);
+  const playerA = asId(req.query.playerA);
+  const playerB = asId(req.query.playerB);
   const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
 
-  if (!playerA || !playerB)
+  if (!playerA || !playerB) {
     return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  }
 
   const client = await pool.connect();
   try {
@@ -230,12 +232,11 @@ router.post('/create', express.json(), async (req, res) => {
 
   const season  = asInt(req.body?.season, FALLBACK_SEASON);
   const week    = asInt(req.body?.week,   FALLBACK_WEEK);
-  const playerA = asInt(req.body?.playerA);
-  const playerB = asInt(req.body?.playerB);
+  const playerA = asId(req.body?.playerA);
+  const playerB = asId(req.body?.playerB);
   const memo    = (req.body?.memo || '').toString().slice(0, 240);
 
-  if (!playerA || !playerB)
-    return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  if (!playerA || !playerB) return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
 
   const client = await pool.connect();
   try {
