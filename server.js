@@ -12,6 +12,8 @@ const espnConnectRouter = require('./routes/espnconnect');
 const coinsignalRouter = require('./routes/coinsignal');
 const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
+// server.js
+const playerh2h = require('./routes/playerh2h');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -78,6 +80,7 @@ app.use('/api/zeffy', zeffyRoutes);
 app.use('/api/zeffy', require('./routes/zeffy_embed_credit'));
 app.use('/api/points', require('./routes/points'));
 app.use('/api/wallet', wallet);
+app.use('/api/playerh2h', playerh2h);
 
 // ===== CORS (CF fronted) =====
 const allow = {
