@@ -14,6 +14,7 @@ const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
 // server.js
 const playerh2h = require('./routes/playerh2h');
+const playerMeta = require('./routes/playerMeta'); // path to the file from the canvas
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -81,6 +82,7 @@ app.use('/api/zeffy', require('./routes/zeffy_embed_credit'));
 app.use('/api/points', require('./routes/points'));
 app.use('/api/wallet', wallet);
 app.use('/api/playerh2h', playerh2h);
+app.use('/api', playerMeta);
 
 // ===== CORS (CF fronted) =====
 const allow = {
