@@ -12,11 +12,11 @@ const pool = new Pool({
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
 const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
 
-// which columns to try for each scoring flavor (in order)
+// Which columns to try for each scoring flavor (in order)
 const SCORE_COL = {
   PPR:  ['proj_ppr','ppr','proj'],
   HALF: ['proj_half','half'],
-  STD:  ['proj_std','std']
+  STD:  ['proj_std','std'],
 };
 
 const asInt  = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
@@ -39,11 +39,12 @@ async function tableExists(client, qname) {
 }
 
 // Try multiple tables/columns; return first numeric projection we find
+// 1) exact season+week
+// 2) nearest available week in that season (if exact week not present)
 async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='PPR') {
   const cols = SCORE_COL[String(scoring).toUpperCase()] || SCORE_COL.PPR;
   const id   = String(espnPlayerId);
 
-  // helpers
   const tryQ = async (sql, params) => {
     try {
       const { rows } = await client.query(sql, params);
@@ -53,20 +54,34 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
     }
   };
 
-  // choose first non-null projection column from a table
   const pickCol = async (table, idCols) => {
     for (const c of cols) {
-      // compare as TEXT so we work whether id columns are bigint or text
       const whereId = idCols.map(ic => `${ic}::text = $3::text`).join(' OR ');
-      const sql = `SELECT ${c} AS proj
-                     FROM ${table}
-                    WHERE season=$1 AND week=$2
-                      AND (${whereId})
-                      AND ${c} IS NOT NULL
-                    ORDER BY ${c} DESC
-                    LIMIT 1`;
-      const v = await tryQ(sql, [season, week, id]);
-      if (v != null && isFinite(v)) return Number(v);
+
+      // Phase 1: exact week
+      const sqlExact = `
+        SELECT ${c} AS proj
+          FROM ${table}
+         WHERE season=$1 AND week=$2
+           AND (${whereId})
+           AND ${c} IS NOT NULL
+         ORDER BY ${c} DESC
+         LIMIT 1`;
+      const vExact = await tryQ(sqlExact, [season, week, id]);
+      if (vExact != null && isFinite(vExact)) return Number(vExact);
+
+      // Phase 2: nearest week fallback (if exact missing)
+      const sqlNearest = `
+        SELECT ${c} AS proj
+          FROM ${table}
+         WHERE season=$1
+           AND (${whereId})
+           AND ${c} IS NOT NULL
+           AND week IS NOT NULL
+         ORDER BY CASE WHEN week=$2 THEN 0 ELSE ABS(week - $2) END ASC
+         LIMIT 1`;
+      const vNear = await tryQ(sqlNearest, [season, week, id]);
+      if (vNear != null && isFinite(vNear)) return Number(vNear);
     }
     return null;
   };
@@ -89,7 +104,8 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
   // 4) Last-ditch: any *week* *proj* table with a single 'proj' column
   for (const t of ['public.fp_week_proj','public.week_proj','public.player_week_proj']) {
     if (await tableExists(client, t)) {
-      const v = await tryQ(
+      // exact
+      let v = await tryQ(
         `SELECT proj
            FROM ${t}
           WHERE season=$1 AND week=$2
@@ -100,10 +116,23 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
         [season, week, id]
       );
       if (v != null && isFinite(v)) return Number(v);
+
+      // nearest
+      v = await tryQ(
+        `SELECT proj
+           FROM ${t}
+          WHERE season=$1
+            AND (espn_id::text=$2::text OR espn_player_id::text=$2::text OR player_id::text=$2::text)
+            AND proj IS NOT NULL AND week IS NOT NULL
+          ORDER BY CASE WHEN week=$3 THEN 0 ELSE ABS(week - $3) END ASC
+          LIMIT 1`,
+        [season, id, week]
+      );
+      if (v != null && isFinite(v)) return Number(v);
     }
   }
 
-  // fallback: pick'em
+  // Fallback: pick’em
   return 0;
 }
 
@@ -142,9 +171,8 @@ router.get('/quote', async (req, res) => {
   const playerB = asInt(req.query.playerB);
   const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
 
-  if (!playerA || !playerB) {
+  if (!playerA || !playerB)
     return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
-  }
 
   const client = await pool.connect();
   try {
@@ -157,7 +185,7 @@ router.get('/quote', async (req, res) => {
     const body = {
       ok: true,
       duel: {
-        duel_id: null, // not created yet; key present to satisfy UI
+        duel_id: null, // not created yet; keep key to satisfy UI
         season, week,
         playerA: { id: playerA, proj: +projA.toFixed(2) },
         playerB: { id: playerB, proj: +projB.toFixed(2) },
@@ -170,7 +198,7 @@ router.get('/quote', async (req, res) => {
         delta: q.delta,
         model: scoring.toLowerCase(),
       },
-      ts: Date.now()
+      ts: Date.now(),
     };
 
     // Legacy mirrors so existing FE keeps working
@@ -206,7 +234,8 @@ router.post('/create', express.json(), async (req, res) => {
   const playerB = asInt(req.body?.playerB);
   const memo    = (req.body?.memo || '').toString().slice(0, 240);
 
-  if (!playerA || !playerB) return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  if (!playerA || !playerB)
+    return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
 
   const client = await pool.connect();
   try {
@@ -287,7 +316,7 @@ router.post('/wager', express.json(), async (req, res) => {
       [wager_id, duel_id, member, side, amount, hold_id]
     );
 
-    // update open pots
+    // Update open pots
     const col = (side === 'A') ? 'pot_a' : 'pot_b';
     await client.query(
       `UPDATE ff_player_h2h SET ${col} = ${col} + $2 WHERE duel_id=$1`,
