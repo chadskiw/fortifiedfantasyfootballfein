@@ -12,15 +12,15 @@ const pool = new Pool({
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
 const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
 
-// Which columns to try for each scoring flavor (in order)
+// which columns to try for each scoring flavor (in order)
 const SCORE_COL = {
   PPR:  ['proj_ppr','ppr','proj'],
   HALF: ['proj_half','half'],
-  STD:  ['proj_std','std'],
+  STD:  ['proj_std','std']
 };
 
 const asInt  = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
-const asId   = (v) => v == null ? null : String(v).trim(); // keep as text; DB compare uses ::text
+const asId   = (v) => v == null ? null : String(v).trim();
 const posInt = (v) => Math.max(0, asInt(v, 0));
 const rid    = (p) => `${p}_${crypto.randomUUID().replace(/-/g,'').slice(0,8)}`;
 
@@ -39,110 +39,83 @@ async function tableExists(client, qname) {
 }
 
 // Try multiple tables/columns; return first numeric projection we find
-// Strategy:
-// 1) exact season+week
-// 2) nearest available week in that season (if exact week not present)
+// 1) exact season+week; 2) nearest available week within season
 async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='PPR') {
   const cols = SCORE_COL[String(scoring).toUpperCase()] || SCORE_COL.PPR;
   const id   = String(espnPlayerId);
 
   const tryQ = async (sql, params) => {
-    try {
-      const { rows } = await client.query(sql, params);
-      return rows?.[0]?.proj;
-    } catch {
-      return null;
-    }
+    try { const { rows } = await client.query(sql, params); return rows?.[0]?.proj; }
+    catch { return null; }
   };
 
   const pickCol = async (table, idCols) => {
     for (const c of cols) {
       const whereId = idCols.map(ic => `${ic}::text = $3::text`).join(' OR ');
 
-      // exact week
       const sqlExact = `
-        SELECT ${c} AS proj
-          FROM ${table}
-         WHERE season=$1 AND week=$2
-           AND (${whereId})
-           AND ${c} IS NOT NULL
-         ORDER BY ${c} DESC
-         LIMIT 1`;
+        SELECT ${c} AS proj FROM ${table}
+        WHERE season=$1 AND week=$2 AND (${whereId}) AND ${c} IS NOT NULL
+        ORDER BY ${c} DESC LIMIT 1`;
       const vExact = await tryQ(sqlExact, [season, week, id]);
       if (vExact != null && isFinite(vExact)) return Number(vExact);
 
-      // nearest week fallback
       const sqlNearest = `
-        SELECT ${c} AS proj
-          FROM ${table}
-         WHERE season=$1
-           AND (${whereId})
-           AND ${c} IS NOT NULL
-           AND week IS NOT NULL
-         ORDER BY CASE WHEN week=$2 THEN 0 ELSE ABS(week - $2) END ASC
-         LIMIT 1`;
+        SELECT ${c} AS proj FROM ${table}
+        WHERE season=$1 AND (${whereId}) AND ${c} IS NOT NULL AND week IS NOT NULL
+        ORDER BY CASE WHEN week=$2 THEN 0 ELSE ABS(week - $2) END ASC
+        LIMIT 1`;
       const vNear = await tryQ(sqlNearest, [season, week, id]);
       if (vNear != null && isFinite(vNear)) return Number(vNear);
     }
     return null;
   };
 
-  // 1) FantasyPros weekly
   if (await tableExists(client, 'public.ff_fp_points_week')) {
     const v = await pickCol('ff_fp_points_week', ['espn_id','espn_player_id','player_id']);
     if (v != null) return v;
   }
-  // 2) ESPN-derived weekly
   if (await tableExists(client, 'public.ff_espn_week_proj')) {
     const v = await pickCol('ff_espn_week_proj', ['espn_id','espn_player_id','player_id']);
     if (v != null) return v;
   }
-  // 3) Generic canonical weekly
   if (await tableExists(client, 'public.ff_player_week_proj')) {
     const v = await pickCol('ff_player_week_proj', ['espn_id','espn_player_id','player_id']);
     if (v != null) return v;
   }
-  // 4) Last-ditch: any *week* *proj* table with a single 'proj' column
   for (const t of ['public.fp_week_proj','public.week_proj','public.player_week_proj']) {
     if (await tableExists(client, t)) {
-      // exact
       let v = await tryQ(
-        `SELECT proj
-           FROM ${t}
-          WHERE season=$1 AND week=$2
-            AND (espn_id::text=$3::text OR espn_player_id::text=$3::text OR player_id::text=$3::text)
-            AND proj IS NOT NULL
-          ORDER BY proj DESC
-          LIMIT 1`,
+        `SELECT proj FROM ${t}
+         WHERE season=$1 AND week=$2
+           AND (espn_id::text=$3::text OR espn_player_id::text=$3::text OR player_id::text=$3::text)
+           AND proj IS NOT NULL
+         ORDER BY proj DESC LIMIT 1`,
         [season, week, id]
       );
       if (v != null && isFinite(v)) return Number(v);
 
-      // nearest
       v = await tryQ(
-        `SELECT proj
-           FROM ${t}
-          WHERE season=$1
-            AND (espn_id::text=$2::text OR espn_player_id::text=$2::text OR player_id::text=$2::text)
-            AND proj IS NOT NULL AND week IS NOT NULL
-          ORDER BY CASE WHEN week=$3 THEN 0 ELSE ABS(week - $3) END ASC
-          LIMIT 1`,
+        `SELECT proj FROM ${t}
+         WHERE season=$1
+           AND (espn_id::text=$2::text OR espn_player_id::text=$2::text OR player_id::text=$2::text)
+           AND proj IS NOT NULL AND week IS NOT NULL
+         ORDER BY CASE WHEN week=$3 THEN 0 ELSE ABS(week - $3) END ASC
+         LIMIT 1`,
         [season, id, week]
       );
       if (v != null && isFinite(v)) return Number(v);
     }
   }
-
-  // Fallback: pick’em
   return 0;
 }
 
-// Tiny prob model from projection delta (tweak sigma as you like)
+// Prob model from projection delta
 function quoteFromProjs(pA, pB) {
   const delta   = Number((pA - pB).toFixed(2));
   const favored = (delta === 0) ? 'pick' : (delta > 0 ? 'A' : 'B');
-  const line    = Math.abs(delta);   // “A by X pts”
-  const sigma   = 6;                 // spread sensitivity
+  const line    = Math.abs(delta);
+  const sigma   = 6;
   const probA   = 1 / (1 + Math.exp(-(pA - pB) / sigma));
   const probB   = 1 - probA;
   return { favored, line, probA: +probA.toFixed(3), probB: +probB.toFixed(3), delta };
@@ -161,9 +134,23 @@ async function createHold(client, { member_id, amount, memo, duel_id }) {
   return hold_id;
 }
 
+// If duel_id is synthetic like "syn_<A>_<B>_<season>_<week>", ensure there is a row
+async function ensureSynDuel(client, duel_id, created_by) {
+  if (!duel_id || !duel_id.startsWith('syn_')) return;
+  const m = /^syn_(\d+)_(\d+)_(\d{4})_(\d{1,2})$/.exec(duel_id);
+  if (!m) return;
+  const [, a, b, s, w] = m;
+  await client.query(
+    `INSERT INTO ff_player_h2h
+       (duel_id, season, week, player_a_id, player_b_id, created_by, status)
+     VALUES ($1,$2,$3,$4,$5,$6,'open')
+     ON CONFLICT (duel_id) DO NOTHING`,
+    [duel_id, asInt(s, FALLBACK_SEASON), asInt(w, FALLBACK_WEEK), asInt(a, 0), asInt(b, 0), created_by || 'system']
+  );
+}
+
 /* -----------------------------------------------------------
    GET /api/playerh2h/quote
-   -> { ok, duel:{...}, quote:{...}, plus legacy top-level keys }
 ----------------------------------------------------------- */
 router.get('/quote', async (req, res) => {
   const season  = asInt(req.query.season, FALLBACK_SEASON);
@@ -172,9 +159,8 @@ router.get('/quote', async (req, res) => {
   const playerB = asId(req.query.playerB);
   const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
 
-  if (!playerA || !playerB) {
+  if (!playerA || !playerB)
     return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
-  }
 
   const client = await pool.connect();
   try {
@@ -200,10 +186,10 @@ router.get('/quote', async (req, res) => {
         delta: q.delta,
         model: scoring.toLowerCase(),
       },
-      ts: Date.now(),
+      ts: Date.now()
     };
 
-    // Legacy mirrors so existing FE keeps working
+    // legacy mirrors
     body.favored = body.quote.favored;
     body.line    = body.quote.line;
     body.probA   = body.quote.probA;
@@ -223,8 +209,6 @@ router.get('/quote', async (req, res) => {
 
 /* -----------------------------------------------------------
    POST /api/playerh2h/create
-   body: { season, week, playerA, playerB, memo? }
-   -> { ok, duel:{...} }
 ----------------------------------------------------------- */
 router.post('/create', express.json(), async (req, res) => {
   const member = getMember(req);
@@ -245,7 +229,7 @@ router.post('/create', express.json(), async (req, res) => {
       `INSERT INTO ff_player_h2h
          (duel_id, season, week, player_a_id, player_b_id, created_by, status, memo)
        VALUES ($1,$2,$3,$4,$5,$6,'open',$7)`,
-      [duel_id, season, week, playerA, playerB, member, memo]
+      [duel_id, season, week, asInt(playerA), asInt(playerB), member, memo]
     );
 
     return res.json({
@@ -270,26 +254,37 @@ router.post('/create', express.json(), async (req, res) => {
 
 /* -----------------------------------------------------------
    POST /api/playerh2h/wager
-   body: { duel_id, side:'A'|'B', amount, memo?, hold_id? }
-   - If no hold_id provided, creates a real hold tied to this duel
-   -> { ok, duel:{...}, wager:{...}, pending }
+   Accepts: { duel_id, side:'A'|'B', amount? | stake_points?, memo?, hold_id? }
 ----------------------------------------------------------- */
 router.post('/wager', express.json(), async (req, res) => {
   const member = getMember(req);
   if (!member) return res.status(401).json({ ok:false, soft:true, error:'unauthorized' });
 
-  const duel_id = (req.body?.duel_id || '').toString();
-  const side    = (req.body?.side || '').toUpperCase();
-  const amount  = posInt(req.body?.amount);
-  const memo    = (req.body?.memo || '').toString().slice(0,240);
-  let   hold_id = (req.body?.hold_id || '').toString();
+  let duel_id = asId(req.body?.duel_id || req.body?.duelId || req.body?.duel);
+  const side  = (req.body?.side || req.body?.pick || req.body?.choice || '').toString().toUpperCase();
 
-  if (!duel_id || !['A','B'].includes(side) || !amount)
+  // Support aliases for the wager amount
+  const amount = posInt(
+    req.body?.amount ??
+    req.body?.stake_points ??
+    req.body?.stakePoints ??
+    req.body?.stake ??
+    req.body?.points
+  );
+
+  const memo    = (req.body?.memo || '').toString().slice(0,240);
+  let   hold_id = (req.body?.hold_id || req.body?.holdId || '').toString();
+
+  if (!duel_id || !['A','B'].includes(side) || !amount) {
     return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // If it's a synthetic ID, upsert the duel row
+    await ensureSynDuel(client, duel_id, member);
 
     const { rows: drows } = await client.query(
       `SELECT duel_id, status FROM ff_player_h2h WHERE duel_id=$1 FOR UPDATE`,
@@ -317,7 +312,7 @@ router.post('/wager', express.json(), async (req, res) => {
       [wager_id, duel_id, member, side, amount, hold_id]
     );
 
-    // Update open pots
+    // update open pots
     const col = (side === 'A') ? 'pot_a' : 'pot_b';
     await client.query(
       `UPDATE ff_player_h2h SET ${col} = ${col} + $2 WHERE duel_id=$1`,
