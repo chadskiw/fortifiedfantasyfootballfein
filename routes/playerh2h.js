@@ -11,11 +11,17 @@ const pool = new Pool({
 
 const FALLBACK_SEASON = Number(process.env.FF_CURRENT_SEASON || new Date().getFullYear());
 const FALLBACK_WEEK   = Number(process.env.FF_CURRENT_WEEK   || 1);
-const SCORE_COL = { PPR: ['proj_ppr','ppr','proj'], HALF: ['proj_half','half'], STD: ['proj_std','std'] };
 
-const asInt = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
+// which columns to try for each scoring flavor (in order)
+const SCORE_COL = {
+  PPR:  ['proj_ppr','ppr','proj'],
+  HALF: ['proj_half','half'],
+  STD:  ['proj_std','std']
+};
+
+const asInt  = (v, d=0) => Number.isFinite(+v) ? Math.round(+v) : d;
 const posInt = (v) => Math.max(0, asInt(v, 0));
-const rid = (p) => `${p}_${crypto.randomUUID().replace(/-/g,'').slice(0,8)}`;
+const rid    = (p) => `${p}_${crypto.randomUUID().replace(/-/g,'').slice(0,8)}`;
 
 const getMember = (req) =>
   req.headers['x-ff-member'] ||
@@ -35,16 +41,30 @@ async function tableExists(client, qname) {
 // Try multiple tables/columns; return first numeric projection we find
 async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='PPR') {
   const cols = SCORE_COL[String(scoring).toUpperCase()] || SCORE_COL.PPR;
-  const id = String(espnPlayerId);
+  const id   = String(espnPlayerId);
 
   // helpers
   const tryQ = async (sql, params) => {
-    try { const { rows } = await client.query(sql, params); return rows?.[0]?.proj; } catch { return null; }
+    try {
+      const { rows } = await client.query(sql, params);
+      return rows?.[0]?.proj;
+    } catch {
+      return null;
+    }
   };
+
+  // choose first non-null projection column from a table
   const pickCol = async (table, idCols) => {
     for (const c of cols) {
-      const whereId = idCols.map(ic => `${ic} = $3::bigint`).join(' OR ');
-      const sql = `SELECT ${c} AS proj FROM ${table} WHERE season=$1 AND week=$2 AND (${whereId}) AND ${c} IS NOT NULL ORDER BY ${c} DESC LIMIT 1`;
+      // compare as TEXT so we work whether id columns are bigint or text
+      const whereId = idCols.map(ic => `${ic}::text = $3::text`).join(' OR ');
+      const sql = `SELECT ${c} AS proj
+                     FROM ${table}
+                    WHERE season=$1 AND week=$2
+                      AND (${whereId})
+                      AND ${c} IS NOT NULL
+                    ORDER BY ${c} DESC
+                    LIMIT 1`;
       const v = await tryQ(sql, [season, week, id]);
       if (v != null && isFinite(v)) return Number(v);
     }
@@ -67,26 +87,34 @@ async function getWeeklyProjection(client, season, week, espnPlayerId, scoring='
     if (v != null) return v;
   }
   // 4) Last-ditch: any *week* *proj* table with a single 'proj' column
-  // (e.g., import dumps). We’ll try a couple of common names.
   for (const t of ['public.fp_week_proj','public.week_proj','public.player_week_proj']) {
     if (await tableExists(client, t)) {
       const v = await tryQ(
-        `SELECT proj FROM ${t} WHERE season=$1 AND week=$2 AND (espn_id=$3::bigint OR espn_player_id=$3::bigint OR player_id=$3::bigint) AND proj IS NOT NULL ORDER BY proj DESC LIMIT 1`,
+        `SELECT proj
+           FROM ${t}
+          WHERE season=$1 AND week=$2
+            AND (espn_id::text=$3::text OR espn_player_id::text=$3::text OR player_id::text=$3::text)
+            AND proj IS NOT NULL
+          ORDER BY proj DESC
+          LIMIT 1`,
         [season, week, id]
       );
       if (v != null && isFinite(v)) return Number(v);
     }
   }
-  return 0; // fallback: pick'em
+
+  // fallback: pick'em
+  return 0;
 }
+
 // A tiny prob model from projection delta (tweak sigma as you like)
 function quoteFromProjs(pA, pB) {
-  const delta = Number((pA - pB).toFixed(2));
+  const delta  = Number((pA - pB).toFixed(2));
   const favored = (delta === 0) ? 'pick' : (delta > 0 ? 'A' : 'B');
-  const line = Math.abs(delta);             // “A by X pts”
-  const sigma = 6;                          // spread sensitivity
-  const probA = 1 / (1 + Math.exp(-(pA - pB) / sigma));
-  const probB = 1 - probA;
+  const line   = Math.abs(delta);   // “A by X pts”
+  const sigma  = 6;                 // spread sensitivity
+  const probA  = 1 / (1 + Math.exp(-(pA - pB) / sigma));
+  const probB  = 1 - probA;
   return { favored, line, probA: +probA.toFixed(3), probB: +probB.toFixed(3), delta };
 }
 
@@ -105,16 +133,18 @@ async function createHold(client, { member_id, amount, memo, duel_id }) {
 
 /* -----------------------------------------------------------
    GET /api/playerh2h/quote
-   -> { ok, season, week, playerA:{id,proj}, playerB:{id,proj}, favored, line, probA, probB }
+   -> { ok, duel:{...}, quote:{...}, plus legacy top-level keys }
 ----------------------------------------------------------- */
 router.get('/quote', async (req, res) => {
   const season  = asInt(req.query.season, FALLBACK_SEASON);
   const week    = asInt(req.query.week,   FALLBACK_WEEK);
   const playerA = asInt(req.query.playerA);
   const playerB = asInt(req.query.playerB);
-    const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
+  const scoring = (req.query.scoring || 'PPR').toString().toUpperCase(); // STD|HALF|PPR
 
-  if (!playerA || !playerB) return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  if (!playerA || !playerB) {
+    return res.status(400).json({ ok:false, soft:true, error:'bad_args' });
+  }
 
   const client = await pool.connect();
   try {
@@ -123,23 +153,36 @@ router.get('/quote', async (req, res) => {
       getWeeklyProjection(client, season, week, playerB, scoring),
     ]);
     const q = quoteFromProjs(projA, projB);
-    return res.json({
+
+    const body = {
       ok: true,
       duel: {
-        duel_id: null,                 // not created yet; keep key to satisfy UI+        season, week,
+        duel_id: null, // not created yet; key present to satisfy UI
+        season, week,
         playerA: { id: playerA, proj: +projA.toFixed(2) },
         playerB: { id: playerB, proj: +projB.toFixed(2) },
       },
-      quote: {                         // keep pricing grouped but predictable
+      quote: {
         favored: q.favored,
         line: q.line,
         probA: q.probA,
         probB: q.probB,
         delta: q.delta,
-        model: scoring.toLowerCase()
+        model: scoring.toLowerCase(),
       },
       ts: Date.now()
-    });
+    };
+
+    // Legacy mirrors so existing FE keeps working
+    body.favored = body.quote.favored;
+    body.line    = body.quote.line;
+    body.probA   = body.quote.probA;
+    body.probB   = body.quote.probB;
+    body.delta   = body.quote.delta;
+    body.projA   = body.duel.playerA.proj;
+    body.projB   = body.duel.playerB.proj;
+
+    return res.json(body);
   } catch (err) {
     console.error('[ph2h/quote] error', err);
     return res.status(500).json({ ok:false, soft:true, error:'server_error' });
@@ -151,7 +194,7 @@ router.get('/quote', async (req, res) => {
 /* -----------------------------------------------------------
    POST /api/playerh2h/create
    body: { season, week, playerA, playerB, memo? }
-   -> { ok, duel_id, status:'open' }
+   -> { ok, duel:{...} }
 ----------------------------------------------------------- */
 router.post('/create', express.json(), async (req, res) => {
   const member = getMember(req);
@@ -174,16 +217,20 @@ router.post('/create', express.json(), async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,'open',$7)`,
       [duel_id, season, week, playerA, playerB, member, memo]
     );
+
     return res.json({
       ok: true,
       duel: {
-        duel_id, season, week,
-       status: 'open',
+        duel_id,
+        season,
+        week,
+        status: 'open',
         playerA: { id: playerA },
         playerB: { id: playerB },
         memo
       }
-    });  } catch (err) {
+    });
+  } catch (err) {
     console.error('[ph2h/create] error', err);
     return res.status(500).json({ ok:false, soft:true, error:'server_error' });
   } finally {
@@ -195,7 +242,7 @@ router.post('/create', express.json(), async (req, res) => {
    POST /api/playerh2h/wager
    body: { duel_id, side:'A'|'B', amount, memo?, hold_id? }
    - If no hold_id provided, creates a real hold tied to this duel
-   -> { ok, duel_id, wager_id, hold_id, pending, pot:{A,B} }
+   -> { ok, duel:{...}, wager:{...}, pending }
 ----------------------------------------------------------- */
 router.post('/wager', express.json(), async (req, res) => {
   const member = getMember(req);
@@ -218,8 +265,14 @@ router.post('/wager', express.json(), async (req, res) => {
       `SELECT duel_id, status FROM ff_player_h2h WHERE duel_id=$1 FOR UPDATE`,
       [duel_id]
     );
-    if (!drows.length) { await client.query('ROLLBACK'); return res.status(404).json({ ok:false, soft:true, error:'duel_not_found' }); }
-    if (drows[0].status !== 'open') { await client.query('ROLLBACK'); return res.status(409).json({ ok:false, soft:true, error:'duel_not_open' }); }
+    if (!drows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok:false, soft:true, error:'duel_not_found' });
+    }
+    if (drows[0].status !== 'open') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok:false, soft:true, error:'duel_not_open' });
+    }
 
     // Create a real hold if one wasn't provided
     if (!hold_id) {
