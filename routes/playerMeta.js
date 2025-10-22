@@ -192,16 +192,6 @@ router.get('/player/meta', async (req, res) => {
     res.json(out);
   }catch(err){ console.error('meta error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
-    const season   = req.query.season ? Number(req.query.season) : undefined;
-    const week     = req.query.week   ? Number(req.query.week)   : undefined;
-    const leagueId = req.query.leagueId ? Number(req.query.leagueId) : undefined;
-    const teamId   = req.query.teamId   ? Number(req.query.teamId)   : undefined;
-
-    const out = await buildMeta({ pid, season, week, leagueId, teamId });
-    res.json(out);
-  }catch(err){ console.error('meta error', err); res.status(500).json({ ok:false, error:'internal' }); }
-});
-
 router.get('/player/meta/batch', async (req, res) => {
   try{
     const ids = String(req.query.pid||'').split(',').map(s=>s.trim()).filter(isDigits);
@@ -212,15 +202,6 @@ router.get('/player/meta/batch', async (req, res) => {
     res.json({ ok:true, data: out });
   }catch(err){ console.error('meta batch error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
-    const season   = req.query.season ? Number(req.query.season) : undefined;
-    const week     = req.query.week   ? Number(req.query.week)   : undefined;
-    const leagueId = req.query.leagueId ? Number(req.query.leagueId) : undefined;
-    const teamId   = req.query.teamId   ? Number(req.query.teamId)   : undefined;
 
-    const out = {};
-    await Promise.all(ids.map(async pid => { out[pid] = await buildMeta({ pid, season, week, leagueId, teamId }); }));
-    res.json({ ok:true, data: out });
-  }catch(err){ console.error('meta batch error', err); res.status(500).json({ ok:false, error:'internal' }); }
-});
 
 module.exports = router;
