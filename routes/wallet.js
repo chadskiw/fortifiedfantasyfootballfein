@@ -71,23 +71,15 @@ router.post('/hold', express.json(), async (req, res) => {
 
       const hold_id = newId();
 // routes/wallet.js (inside POST /hold)
--    const expiresSQL = `now() + make_interval(secs => $1::int)`;
-...
--      const insert = await client.query(
--        `INSERT INTO ff_holds
--           (hold_id, member_id, currency, amount_held, status, expires_at, scope_type, scope_id, memo, idempotency_key)
--         VALUES ($1,$2,$3,$4,'held', ${expiresSQL}, $5,$6,$7,$8)
--         RETURNING hold_id, amount_held`,
--        [hold_id, member, currency, amt, scope_type, scope_id, memo, idempotency_key]
--      );
-+      const ttl = clampPosInt(ttlSeconds ?? 900); // default 15 min
-+      const insert = await client.query(
-+        `INSERT INTO ff_holds
-+           (hold_id, member_id, currency, amount_held, status, expires_at, scope_type, scope_id, memo, idempotency_key)
-+         VALUES ($1,$2,$3,$4,'held', (now() + ($9::int) * INTERVAL '1 second'), $5,$6,$7,$8)
-+         RETURNING hold_id, amount_held`,
-+        [hold_id, member, currency, amt, scope_type, scope_id, memo, idempotency_key, ttl]
-+      );
+
+      const ttl = clampPosInt(ttlSeconds ?? 900); // default 15 min
+      const insert = await client.query(
+        `INSERT INTO ff_holds
+           (hold_id, member_id, currency, amount_held, status, expires_at, scope_type, scope_id, memo, idempotency_key)
+         VALUES ($1,$2,$3,$4,'held', (now() + ($9::int) * INTERVAL '1 second'), $5,$6,$7,$8)
+         RETURNING hold_id, amount_held`,
+        [hold_id, member, currency, amt, scope_type, scope_id, memo, idempotency_key, ttl]
+      );
 
 
       await client.query('COMMIT');
