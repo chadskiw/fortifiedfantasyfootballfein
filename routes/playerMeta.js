@@ -1,12 +1,3 @@
-# FEIN Meta & Duel v3 — server + client
-
-This drop includes **(1) the CommonJS Player Meta router** with `require` and **(2) the Duel HTML (v3)** wired to consume `ECR`, `DVP`, `BYE`, and `FMV` from the new meta endpoint. Paste the router into your server (e.g., `routes/playerMeta.js`), mount it, and open the HTML.
-
----
-
-## 1) `routes/playerMeta.js` — CommonJS router (require)
-
-```js
 /**
  * Player Meta API — CommonJS (require) + Express Router
  * Enriches ESPN pid with: proj (from your roster), bye week, ECR, DVP, FMV, opponent, bio, news.
