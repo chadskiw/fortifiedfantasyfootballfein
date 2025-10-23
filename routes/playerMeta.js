@@ -23,6 +23,7 @@ try {
 
 // --- Config ---
 const FF_BASE = process.env.FF_BASE || 'https://fortifiedfantasy.com';
+const DEFAULT_LEAGUE_ID = Number(process.env.FF_DEFAULT_LEAGUE_ID || 1634950747);
 const MEM_TTL_MS = 12 * 60 * 1000; // 12m
 const REDIS_TTL_SEC = 15 * 60;     // 15m
 
@@ -69,9 +70,11 @@ function hydrateCtx(req){
   let leagueId = parseNum(pick(q.leagueId, h['x-ff-league']));
   let teamId = parseNum(pick(q.teamId, h['x-ff-team']));
   const ref = req.get && req.get('referer');
-  if((!leagueId || !teamId) && ref){
+  if((!leagueId || !teamId || !season || !week) && ref){
     try{ const u = new URL(ref); leagueId = leagueId || parseNum(u.searchParams.get('leagueId')); teamId = teamId || parseNum(u.searchParams.get('teamId')); season = season || parseNum(u.searchParams.get('season')); week = week || parseNum(u.searchParams.get('week')); }catch{}
   }
+  // Default league if still missing
+  if(!leagueId) leagueId = DEFAULT_LEAGUE_ID;
   return { season, week, leagueId, teamId };
 }
 
@@ -203,6 +206,7 @@ router.get('/player/meta', async (req, res) => {
   }catch(err){ console.error('meta error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
 
+
 router.get('/player/meta/batch', async (req, res) => {
   try{
     const ids = String(req.query.pid||'').split(',').map(s=>s.trim()).filter(isDigits);
@@ -228,5 +232,6 @@ router.get('/player/meta/batch', async (req, res) => {
     res.json({ ok:true, data: out });
   }catch(err){ console.error('meta batch error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
+
 
 module.exports = router;
