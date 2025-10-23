@@ -77,6 +77,38 @@ router.post('/hold', requireMember, async (req, res) => {
     return res.status(400).json({ ok:false, error:e.message });
   }
 });
+// routes/points.js (add this alongside your other handlers)
+router.get('/cte', requireMember, async (req, res) => {
+  try {
+    const sql = `
+      WITH zeffy AS (
+        SELECT member_id, COALESCE(SUM(points),0)::bigint AS cte
+        FROM ff_points_credits
+        WHERE source = 'zeffy'
+        GROUP BY member_id
+      ),
+      holds AS (
+        SELECT member_id, COALESCE(SUM(amount_held),0)::bigint AS exposure
+        FROM ff_holds
+        WHERE status='held' AND expires_at > NOW()
+        GROUP BY member_id
+      )
+      SELECT
+        $1::text AS member_id,
+        COALESCE(z.cte,0)        AS cte,        -- <-- headline number
+        COALESCE(h.exposure,0)   AS exposure,   -- open holds
+        GREATEST(COALESCE(z.cte,0) - COALESCE(h.exposure,0), 0) AS available
+      FROM (SELECT 1) AS _
+      LEFT JOIN zeffy z ON z.member_id = $1
+      LEFT JOIN holds h ON h.member_id = $1
+    `;
+    const { rows } = await pool.query(sql, [req.member_id]);
+    return res.json({ ok: true, ...rows[0] });
+  } catch (e) {
+    console.error('points.cte.error', e);
+    return res.status(400).json({ ok:false, error:e.message });
+  }
+});
 
 // (Optional) release timed-out holds: POST /api/points/release-expired
 router.post('/release-expired', async (_req, res) => {
