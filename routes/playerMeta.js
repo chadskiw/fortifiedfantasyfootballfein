@@ -189,19 +189,57 @@ router.get('/player/meta', async (req, res) => {
     const { season, week, leagueId, teamId } = hydrateCtx(req);
 
     const out = await buildMeta({ pid, season, week, leagueId, teamId });
+
+    // --- projected-only mode ---
+    const mode = String(req.query.view||req.query.only||req.query.fields||'').toLowerCase();
+    const projectedOnly = mode==='projected' || mode==='proj' || String(req.query.projected||'')==='1';
+    if(projectedOnly){
+      const projected = (out && out.meta && out.meta.fantasy && out.meta.fantasy.proj != null) ? Number(out.meta.fantasy.proj) : null;
+      const source = (out && out.meta && out.meta.fantasy && out.meta.fantasy.source) || (out && out.sources && out.sources.roster ? 'espn-roster' : null);
+      return res.json({ ok:true, pid, season, week, leagueId, teamId, projected, source });
+    }
+
     res.json(out);
   }catch(err){ console.error('meta error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
+    const { season, week, leagueId, teamId } = hydrateCtx(req);
+
+    const out = await buildMeta({ pid, season, week, leagueId, teamId });
+    res.json(out);
+
+    const season   = req.query.season ? Number(req.query.season) : undefined;
+    const week     = req.query.week   ? Number(req.query.week)   : undefined;
+    const leagueId = req.query.leagueId ? Number(req.query.leagueId) : undefined;
+    const teamId   = req.query.teamId   ? Number(req.query.teamId)   : undefined;
+
+    const out = await buildMeta({ pid, season, week, leagueId, teamId });
+    res.json(out);
+
+
 router.get('/player/meta/batch', async (req, res) => {
   try{
     const ids = String(req.query.pid||'').split(',').map(s=>s.trim()).filter(isDigits);
     if(!ids.length) return res.status(400).json({ ok:false, error:'pid comma-list required' });
     const ctx = hydrateCtx(req);
+
+    const mode = String(req.query.view||req.query.only||req.query.fields||'').toLowerCase();
+    const projectedOnly = mode==='projected' || mode==='proj' || String(req.query.projected||'')==='1';
+
+    if(projectedOnly){
+      const data = {};
+      await Promise.all(ids.map(async pid => {
+        const out = await buildMeta({ pid, ...ctx });
+        const projected = (out && out.meta && out.meta.fantasy && out.meta.fantasy.proj != null) ? Number(out.meta.fantasy.proj) : null;
+        const source = (out && out.meta && out.meta.fantasy && out.meta.fantasy.source) || (out && out.sources && out.sources.roster ? 'espn-roster' : null);
+        data[pid] = { projected, source };
+      }));
+      return res.json({ ok:true, season:ctx.season, week:ctx.week, leagueId:ctx.leagueId, teamId:ctx.teamId, data });
+    }
+
     const out = {};
     await Promise.all(ids.map(async pid => { out[pid] = await buildMeta({ pid, ...ctx }); }));
     res.json({ ok:true, data: out });
   }catch(err){ console.error('meta batch error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
-
 
 module.exports = router;
