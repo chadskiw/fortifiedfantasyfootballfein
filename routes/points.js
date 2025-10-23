@@ -8,7 +8,7 @@ const pool = new Pool({
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 100);     // points per $1
+const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 1000);     // points per $1
 const HOLD_TTL_MIN = Number(process.env.FF_HOLD_TTL_MINUTES || 15);
 const HOUSE_ID = process.env.FF_HOUSE_MEMBER || 'HOUSE';
 const ALLOW_QUERY_MEMBER = process.env.FF_ALLOW_QUERY_MEMBER === 'true'; // dev helper
@@ -229,7 +229,7 @@ router.post('/sync-zeffy', async (req, res) => {
 
     let imported = 0;
     for (const r of rows) {
-      const points = Math.round((r.amount_cents / 100) * PPD);
+      const points = Math.round((r.amount_cents / 1000) * PPD);
       const idem = idemKey({ k: 'deposit_zeffy', payment_id: r.payment_id, member_id: r.member_id, points });
       const q = await pool.query(`
         INSERT INTO ff_points_ledger
