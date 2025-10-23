@@ -81,8 +81,6 @@ async function findTeamIdInLeague({ season, week, leagueId }, pid){
   }
   return null;
 }
-  return null;
-}
 
 // ---- Sources (no local try/catch) ----
 async function fromRoster(ctx, pid){
