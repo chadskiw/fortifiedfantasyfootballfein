@@ -191,6 +191,29 @@ async function buildMeta({ pid, season, week, leagueId, teamId }){
   return payload;
 }
 
+// ---- Shape helpers ----
+function toDuelShape(out, ctx){
+  const m = out && out.meta || {}; const f = m.fantasy || {}; const s = out && out.sources || {};
+  return {
+    ok: true,
+    pid: String(ctx.pid),
+    season: ctx.season, week: ctx.week, leagueId: ctx.leagueId, teamId: ctx.teamId,
+    name: m.name || null,
+    position: m.position || null,
+    team: (m.team && m.team.abbr) || null,
+    headshot: m.headshot || null,
+    proj: (f.proj!=null ? Number(f.proj) : null),
+    ecrPos: (f.ecr && f.ecr.posRank!=null ? Number(f.ecr.posRank) : null),
+    ecrOverall: (f.ecr && f.ecr.overall!=null ? Number(f.ecr.overall) : null),
+    dvp: (f.dvp && f.dvp.rank!=null ? Number(f.dvp.rank) : null),
+    opp: (f.dvp && f.dvp.opp) || m.oppAbbr || null,
+    bye: (m.byeWeek!=null ? Number(m.byeWeek) : null),
+    fmv: (f.fmv && f.fmv.value!=null ? Number(f.fmv.value) : null),
+    fmvUnit: (f.fmv && f.fmv.unit) || null,
+    sources: s
+  };
+}
+
 // ---- Routes (single error boundary) ----
 router.get('/player/meta', async (req, res) => {
   const pid = String(req.query.pid||'');
@@ -200,13 +223,18 @@ router.get('/player/meta', async (req, res) => {
   try{
     const out = await buildMeta({ pid, season, week, leagueId, teamId });
 
-    // projected-only mode
+    // views: projected-only | duel(flat) | full
     const mode = String(req.query.view||req.query.only||req.query.fields||'').toLowerCase();
     const projectedOnly = mode==='projected' || mode==='proj' || String(req.query.projected||'')==='1';
+    const duelView = mode==='duel' || mode==='flat' || mode==='simple';
+
     if(projectedOnly){
       const projected = (out.meta && out.meta.fantasy && out.meta.fantasy.proj != null) ? Number(out.meta.fantasy.proj) : null;
       const source = (out.meta && out.meta.fantasy && out.meta.fantasy.source) || (out.sources && out.sources.roster ? 'espn-roster' : null);
       return res.json({ ok:true, pid, season, week, leagueId, teamId, projected, source });
+    }
+    if(duelView){
+      return res.json(toDuelShape(out, { pid, season, week, leagueId, teamId }));
     }
 
     res.json(out);
