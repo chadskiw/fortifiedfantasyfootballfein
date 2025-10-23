@@ -15,7 +15,6 @@ const wallet = require('./routes/wallet');
 // server.js
 const playerh2h = require('./routes/playerh2h');
 const playerMeta = require('./routes/playerMeta'); // path to the file from the canvas
-const compression = require('compression');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -33,23 +32,32 @@ const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-// If you use compression(), skip this file so CF handles compression
-app.use(compression({
-  filter: (req, res) => req.path !== '/ff-mini.js' && compression.filter(req, res)
-}));
 
+// REPLACE your current /ff-mini.js route with this one:
 app.get('/ff-mini.js', (req, res) => {
-  res.set({
-    'Content-Type': 'application/javascript; charset=utf-8',
-    'Cache-Control': 'public, max-age=14400, must-revalidate',
-    'X-Content-Type-Options': 'nosniff',
-    'Cache-Tag': 'ff-mini',
-    // Important: stop intermediaries from transforming/compressing twice
-    'Cache-Control': 'public, max-age=14400, must-revalidate, no-transform'
-  });
-  // Do NOT set Content-Encoding yourself here.
-  res.sendFile(path.join(process.cwd(), 'public', 'ff-mini.js'));
+  try {
+    const filePath = path.join(__dirname, 'public', 'ff-mini.js');
+    const stat = fs.statSync(filePath);
+
+    // Absolute “don’t touch this” headers + correct length
+    res.status(200);
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=14400, must-revalidate, no-transform');
+    res.setHeader('Content-Encoding', 'identity');     // explicitly identity
+    res.setHeader('Content-Length', String(stat.size)); // exact byte length
+    res.setHeader('Accept-Ranges', 'none');             // avoid range/partial gotchas
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Vary', 'Accept-Encoding');
+
+    // Stream raw bytes (no compression middleware involved)
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => res.status(500).end());
+    stream.pipe(res);
+  } catch (e) {
+    res.status(404).type('text/plain').send('ff-mini.js not found');
+  }
 });
+
 // ===== Parsers & logs =====
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
