@@ -32,7 +32,24 @@ const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+// If you use compression(), skip this file so CF handles compression
+const compression = require('compression');
+app.use(compression({
+  filter: (req, res) => req.path !== '/ff-mini.js' && compression.filter(req, res)
+}));
 
+app.get('/ff-mini.js', (req, res) => {
+  res.set({
+    'Content-Type': 'application/javascript; charset=utf-8',
+    'Cache-Control': 'public, max-age=14400, must-revalidate',
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Tag': 'ff-mini',
+    // Important: stop intermediaries from transforming/compressing twice
+    'Cache-Control': 'public, max-age=14400, must-revalidate, no-transform'
+  });
+  // Do NOT set Content-Encoding yourself here.
+  res.sendFile(path.join(process.cwd(), 'public', 'ff-mini.js'));
+});
 // ===== Parsers & logs =====
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
