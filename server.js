@@ -59,6 +59,12 @@ app.get('/ff-mini.js', (req, res) => {
     res.status(404).type('text/plain').send('ff-mini.js not found');
   }
 });
+// existing identity/me middleware should set req.member_id
+app.use('/api/points', require('./routes/points'));
+app.use('/api/duels',  require('./routes/duels'));
+app.use('/api/h2h',    require('./routes/h2h'));
+app.use('/api/withdraws', require('./routes/withdraws'));
+
 
 // ===== Parsers & logs =====
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));

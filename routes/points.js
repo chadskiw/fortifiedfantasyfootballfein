@@ -1,6 +1,7 @@
 // routes/points.js
 const router = require('express').Router();
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const { requireMember } = require('./identity/me');
 
 const pool = new Pool({
@@ -8,114 +9,141 @@ const pool = new Pool({
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-// Config
-const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 100); // 100 pts = $1
-const HOLD_TTL_MINUTES = Number(process.env.FF_HOLD_TTL_MINUTES || 15);
+// ENV
+const PPD = Number(process.env.FF_POINTS_PER_DOLLAR || 100);     // points per $1
+const HOLD_TTL_MIN = Number(process.env.FF_HOLD_TTL_MINUTES || 15);
+const HOUSE_ID = process.env.FF_HOUSE_MEMBER || 'HOUSE';
 
-async function getTotals(memberId) {
-  const [{ rows: c1 }, { rows: c2 }] = await Promise.all([
-    pool.query(`SELECT COALESCE(SUM(points),0)::bigint AS pts FROM ff_points_credits WHERE member_id=$1`, [memberId]),
-    pool.query(`
-      SELECT COALESCE(SUM(amount_held),0)::bigint AS held
-      FROM ff_holds
-      WHERE member_id=$1 AND currency='points' AND status='held' AND expires_at > NOW()
-    `, [memberId]),
-  ]);
-  const credits = Number(c1[0]?.pts || 0);
-  const held    = Number(c2[0]?.held || 0);
-  const available = Math.max(0, credits - held);
-  return { credits, held, available, usd: credits / PPD };
+// ---------------------------------------------
+// helpers
+// ---------------------------------------------
+function idemKey(obj) {
+  return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
 }
 
-// GET /api/points/balance -> {ok, points, held, available, usd}
+async function getMemberTotals(memberId) {
+  // One round-trip: zeffy deposits (live), sum ledger, open holds
+  const sql = `
+    WITH zeffy AS (
+      SELECT
+        COALESCE(zp.member_hint, m.member_id) AS member_id,
+        COALESCE(SUM( (zp.amount_cents/100.0) * $2 ),0)::bigint AS cte
+      FROM zeffy_payments zp
+      LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
+      WHERE COALESCE(zp.member_hint, m.member_id) IS NOT NULL
+        AND COALESCE(zp.member_hint, m.member_id) = $1
+      GROUP BY 1
+    ),
+    ledger AS (
+      SELECT member_id, COALESCE(SUM(delta_points),0)::bigint AS delta_points
+      FROM ff_points_ledger
+      WHERE member_id = $1
+      GROUP BY 1
+    ),
+    holds AS (
+      SELECT member_id, COALESCE(SUM(amount_held),0)::bigint AS exposure
+      FROM ff_holds
+      WHERE member_id=$1 AND status='held' AND expires_at > now()
+      GROUP BY 1
+    )
+    SELECT
+      COALESCE(z.cte,0)      AS cte,
+      COALESCE(l.delta_points,0) AS delta,
+      COALESCE(h.exposure,0) AS exposure
+    FROM (SELECT 1) _
+    LEFT JOIN zeffy z ON true
+    LEFT JOIN ledger l ON true
+    LEFT JOIN holds  h ON true
+  `;
+  const { rows } = await pool.query(sql, [memberId, PPD]);
+  const { cte=0, delta=0, exposure=0 } = rows[0] || {};
+  const balance = Number(cte) + Number(delta);
+  const available = Math.max(0, balance - Number(exposure));
+  return {
+    cte: Number(cte),
+    ledger: Number(delta),
+    balance,
+    exposure: Number(exposure),
+    available,
+    usd: (Number(cte) / PPD) + (Number(delta) / PPD),
+  };
+}
+
+// ---------------------------------------------
+// GET /api/points/balance
+// ---------------------------------------------
 router.get('/balance', requireMember, async (req, res) => {
   try {
-    const t = await getTotals(req.member_id);
-    return res.json({ ok: true, points: t.credits, held: t.held, available: t.available, usd: t.usd });
+    const t = await getMemberTotals(req.member_id);
+    return res.json({ ok: true, ...t });
   } catch (e) {
     console.error('points.balance.error', e);
-    return res.status(400).json({ ok: false, error: e.message });
+    return res.status(400).json({ ok:false, error:e.message });
   }
 });
 
-// POST /api/points/hold  (Duels + H2H use this)
+// ---------------------------------------------
+// POST /api/points/hold
+// body: { amount, product, season, week, scoring, playerA, playerB, memo, idem_hint? }
+// ---------------------------------------------
 router.post('/hold', requireMember, async (req, res) => {
   try {
-    const { amount, product='duels-1v1', season, week, scoring, playerA, playerB, memo } = req.body || {};
+    const { amount, product='duels', season, week, scoring, playerA, playerB, memo, idem_hint } = req.body || {};
     const amt = Math.max(0, Math.floor(Number(amount || 0)));
     if (!amt) return res.status(400).json({ ok:false, error:'bad_amount' });
 
-    // Balance check
-    const t = await getTotals(req.member_id);
+    const t = await getMemberTotals(req.member_id);
     if (amt > t.available) return res.status(400).json({ ok:false, error:'insufficient_funds', available: t.available });
 
-    // Insert hold
+    const meta = { season, week, scoring, playerA, playerB, product };
+    const scopeId = (playerA && playerB) ? `${playerA}_${playerB}` : null;
+    const computedMemo = memo || `${product}:${season||''}:${week||''}:${scoring||''}:${playerA||''}vs${playerB||''}`;
+    const key = idemKey({ member: req.member_id, amt, product, season, week, scoring, playerA, playerB, idem_hint: idem_hint||null });
+
     const { rows } = await pool.query(`
-      INSERT INTO ff_holds
-        (hold_id, member_id, currency, amount_held, amount_captured, amount_released, status,
-         expires_at, scope_type, scope_id, memo, meta, created_at, updated_at)
-      VALUES (
-        concat('hold_', replace(gen_random_uuid()::text,'-','')),
-        $1, 'points', $2, 0, 0, 'held',
-        NOW() + ($3 || ' minutes')::interval,
-        $4, $5, $6, $7::jsonb, NOW(), NOW()
+      WITH ins AS (
+        INSERT INTO ff_holds
+          (hold_id, member_id, currency, amount_held, amount_captured, amount_released, status,
+           expires_at, scope_type, scope_id, memo, meta, idempotency_key, created_at, updated_at)
+        VALUES (
+          concat('hold_', replace(gen_random_uuid()::text,'-','')),
+          $1, 'points', $2, 0, 0, 'held',
+          NOW() + ($3 || ' minutes')::interval,
+          $4, $5, $6, $7::jsonb, $8, NOW(), NOW()
+        )
+        ON CONFLICT (idempotency_key) DO NOTHING
+        RETURNING hold_id, expires_at
       )
-      RETURNING hold_id, expires_at
+      SELECT * FROM ins
+      UNION ALL
+      SELECT hold_id, expires_at
+      FROM ff_holds
+      WHERE idempotency_key = $8
+      LIMIT 1
     `, [
-      req.member_id,
-      amt,
-      HOLD_TTL_MINUTES,
-      product,                      // scope_type
-      (playerA && playerB) ? `${playerA}_${playerB}` : null, // scope_id
-      memo || `${product}:${season||''}:${week||''}:${scoring||''}:${playerA||''}vs${playerB||''}`,
-      JSON.stringify({ season, week, scoring, playerA, playerB })
+      req.member_id, amt, HOLD_TTL_MIN,
+      product, scopeId, computedMemo, JSON.stringify(meta), key
     ]);
 
+    if (!rows[0]) return res.status(409).json({ ok:false, error:'duplicate_hold' });
     return res.json({ ok:true, hold_id: rows[0].hold_id, expires_at: rows[0].expires_at });
   } catch (e) {
     console.error('points.hold.error', e);
     return res.status(400).json({ ok:false, error:e.message });
   }
 });
-// routes/points.js (add this alongside your other handlers)
-router.get('/cte', requireMember, async (req, res) => {
-  try {
-    const sql = `
-      WITH zeffy AS (
-        SELECT member_id, COALESCE(SUM(points),0)::bigint AS cte
-        FROM ff_points_credits
-        WHERE source = 'zeffy'
-        GROUP BY member_id
-      ),
-      holds AS (
-        SELECT member_id, COALESCE(SUM(amount_held),0)::bigint AS exposure
-        FROM ff_holds
-        WHERE status='held' AND expires_at > NOW()
-        GROUP BY member_id
-      )
-      SELECT
-        $1::text AS member_id,
-        COALESCE(z.cte,0)        AS cte,        -- <-- headline number
-        COALESCE(h.exposure,0)   AS exposure,   -- open holds
-        GREATEST(COALESCE(z.cte,0) - COALESCE(h.exposure,0), 0) AS available
-      FROM (SELECT 1) AS _
-      LEFT JOIN zeffy z ON z.member_id = $1
-      LEFT JOIN holds h ON h.member_id = $1
-    `;
-    const { rows } = await pool.query(sql, [req.member_id]);
-    return res.json({ ok: true, ...rows[0] });
-  } catch (e) {
-    console.error('points.cte.error', e);
-    return res.status(400).json({ ok:false, error:e.message });
-  }
-});
 
-// (Optional) release timed-out holds: POST /api/points/release-expired
+// ---------------------------------------------
+// POST /api/points/release-expired
+// ---------------------------------------------
 router.post('/release-expired', async (_req, res) => {
   try {
     const { rowCount } = await pool.query(`
       UPDATE ff_holds
-      SET status='released', amount_released=amount_held, released_at=NOW(), updated_at=NOW()
+      SET status='released',
+          amount_released=amount_held,
+          released_at=NOW(),
+          updated_at=NOW()
       WHERE status='held' AND expires_at < NOW()
     `);
     return res.json({ ok:true, released: rowCount });
@@ -125,57 +153,64 @@ router.post('/release-expired', async (_req, res) => {
   }
 });
 
-// (Optional) capture a hold after result settles
-// body: { hold_id, winner:boolean, payout_points?:number, house_member?:'HOUSE' }
-router.post('/capture', async (req, res) => {
-  const { hold_id, winner, payout_points=0, house_member='HOUSE', memo } = req.body || {};
-  if (!hold_id) return res.status(400).json({ ok:false, error:'missing_hold_id' });
-
-  const cli = await pool.connect();
+// ---------------------------------------------
+// GET /api/points/history  (ledger entries)
+// ---------------------------------------------
+router.get('/history', requireMember, async (req, res) => {
   try {
-    await cli.query('BEGIN');
-
-    const { rows: hrows } = await cli.query(
-      `SELECT * FROM ff_holds WHERE hold_id=$1 FOR UPDATE`, [hold_id]
-    );
-    const h = hrows[0];
-    if (!h) throw new Error('hold_not_found');
-    if (h.status !== 'held') throw new Error('invalid_status');
-
-    // 1) mark captured
-    await cli.query(
-      `UPDATE ff_holds SET status='captured', amount_captured=amount_held, captured_at=NOW(), updated_at=NOW() WHERE hold_id=$1`,
-      [hold_id]
-    );
-
-    // 2) if winner, credit payout (includes stake + winnings based on your model); if loser, nothing goes back
-    if (winner && payout_points > 0) {
-      await cli.query(
-        `INSERT INTO ff_points_credits (member_id, source, source_id, points)
-         VALUES ($1, 'duels', $2, $3)
-         ON CONFLICT (source, source_id) DO NOTHING`,
-        [h.member_id, `${hold_id}:payout`, Math.floor(payout_points)]
-      );
-    }
-
-    // 3) optional house rake
-    if (memo) {
-      await cli.query(
-        `INSERT INTO ff_points_credits (member_id, source, source_id, points)
-         VALUES ($1, 'duels', $2, $3)
-         ON CONFLICT (source, source_id) DO NOTHING`,
-        [house_member, `${hold_id}:rake`, Math.max(0, Math.floor((h.amount_held*2) - payout_points))]
-      );
-    }
-
-    await cli.query('COMMIT');
-    return res.json({ ok:true });
+    const { rows } = await pool.query(`
+      SELECT entry_id, created_at, delta_points, kind, source, source_id, ref_type, ref_id, memo
+      FROM ff_points_ledger
+      WHERE member_id=$1
+      ORDER BY created_at DESC
+      LIMIT 500
+    `, [req.member_id]);
+    return res.json({ ok:true, items: rows });
   } catch (e) {
-    await cli.query('ROLLBACK');
-    console.error('points.capture.error', e);
+    console.error('points.history.error', e);
     return res.status(400).json({ ok:false, error:e.message });
-  } finally {
-    cli.release();
+  }
+});
+
+// ---------------------------------------------
+// POST /api/points/sync-zeffy  (idempotent import -> ledger)
+// body: { since?: ISO }  // optional
+// ---------------------------------------------
+router.post('/sync-zeffy', async (req, res) => {
+  try {
+    const since = req.body?.since ? new Date(req.body.since) : null;
+    const params = [];
+    let where = `COALESCE(zp.member_hint, m.member_id) IS NOT NULL`;
+    if (since) {
+      where += ` AND zp.occurred_at >= $1`;
+      params.push(since.toISOString());
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        zp.payment_id,
+        COALESCE(zp.member_hint, m.member_id) AS member_id,
+        zp.amount_cents
+      FROM zeffy_payments zp
+      LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
+      WHERE ${where}
+    `, params);
+
+    let inserted = 0;
+    for (const r of rows) {
+      const points = Math.round((r.amount_cents/100) * PPD);
+      const idem = idemKey({ k:'deposit_zeffy', payment_id: r.payment_id, member_id: r.member_id, points });
+      await pool.query(`
+        INSERT INTO ff_points_ledger
+          (member_id, currency, delta_points, kind, source, source_id, memo, idempotency_key)
+        VALUES ($1,'points',$2,'deposit_zeffy','zeffy',$3,'Zeffy deposit',$4)
+        ON CONFLICT (idempotency_key) DO NOTHING
+      `, [r.member_id, points, r.payment_id, idem]).then(q => { inserted += q.rowCount; });
+    }
+    return res.json({ ok:true, imported: inserted });
+  } catch (e) {
+    console.error('points.sync_zeffy.error', e);
+    return res.status(400).json({ ok:false, error:e.message });
   }
 });
 
