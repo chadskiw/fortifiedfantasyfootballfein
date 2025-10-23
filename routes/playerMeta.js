@@ -202,19 +202,6 @@ router.get('/player/meta', async (req, res) => {
     res.json(out);
   }catch(err){ console.error('meta error', err); res.status(500).json({ ok:false, error:'internal' }); }
 });
-    const { season, week, leagueId, teamId } = hydrateCtx(req);
-
-    const out = await buildMeta({ pid, season, week, leagueId, teamId });
-    res.json(out);
-
-    const season   = req.query.season ? Number(req.query.season) : undefined;
-    const week     = req.query.week   ? Number(req.query.week)   : undefined;
-    const leagueId = req.query.leagueId ? Number(req.query.leagueId) : undefined;
-    const teamId   = req.query.teamId   ? Number(req.query.teamId)   : undefined;
-
-    const out = await buildMeta({ pid, season, week, leagueId, teamId });
-    res.json(out);
-
 
 router.get('/player/meta/batch', async (req, res) => {
   try{
