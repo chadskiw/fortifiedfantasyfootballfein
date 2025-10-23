@@ -83,7 +83,44 @@ async function findTeamIdInLeague({ season, week, leagueId }, pid){
 }
 
 // ---- Sources (no local try/catch) ----
-async function fromRoster(ctx, pid){$1
+async function fromEspnAthlete(pid){
+  const url = `https://site.api.espn.com/apis/common/v3/sports/football/nfl/athletes/${pid}`;
+  const j = await fetchJson(url, 1800);
+  const a = j && (j.athlete || j); if(!a) return null;
+  const team = a.team || a.collegeTeam || a.proTeam || {};
+  const injury = (a.injuries && a.injuries[0]) || a.defaultInjury || {};
+  const expYears = (a.experience && a.experience.years) || a.experience;
+  return {
+    id:String(a.id||pid), name:a.fullName||a.displayName, firstName:a.firstName, lastName:a.lastName,
+    jersey:a.jersey, position:(a.position && (a.position.abbreviation||a.position.displayName))||a.position,
+    team:{ id: a.teamId?String(a.teamId):(team.id?String(team.id):undefined), abbr:team.abbreviation, name:team.displayName||team.name },
+    headshot:(a.headshot && a.headshot.href) || headshotUrl(pid),
+    physical:{ heightIn:a.height?Number(a.height):undefined, weightLb:a.weight?Number(a.weight):undefined, age:a.age, birthDate:a.dateOfBirth },
+    experience:{ years:expYears?Number(expYears):undefined, display:a.experience && a.experience.displayValue },
+    college:(a.college && a.college.name) || a.college,
+    draft: a.draft ? { year:a.draft.year, round:a.draft.round, pick:a.draft.selection, team:a.draft.team && a.draft.team.abbreviation } : undefined,
+    status:{ active:a.active, rosterStatus:(a.status && a.status.type) || a.status },
+    injury: (injury && (injury.status||injury.details||injury.description)) ? { status:injury.status, description:injury.details||injury.description, date:injury.date } : undefined,
+  };
+}
+async function fromECR(ctx, pid, pos){
+  const { season } = ctx; if(!season) return null;
+  const j = await firstFulfilled([
+    `${FF_BASE}/api/consensus/ecr?season=${season}&pid=${pid}`,
+    `${FF_BASE}/api/consensus/ecr?season=${season}&pos=${encodeURIComponent(pos||'')}`,
+    `${FF_BASE}/api/aggregates/ecr?season=${season}&pid=${pid}`,
+    `${FF_BASE}/api/ranks/ecr?season=${season}&pid=${pid}`
+  ], 1500);
+  if(!j) return null;
+  if(j.rank || j.overall || j.posRank) return { overall:j.overall||j.rank||null, posRank:j.posRank||j.positionRank||null, source:j.source||'ff-ecr' };
+  if(Array.isArray(j.players)){
+    const p = j.players.find(x=>String(x.playerId||x.id)===String(pid));
+    if(p) return { overall:p.overall||p.rank||null, posRank:p.posRank||p.positionRank||null, source:j.source||'ff-ecr' };
+  }
+  return null;
+}
+async function fromRoster(ctx, pid){
+  let { season, week, leagueId, teamId } = ctx;
   if(!(season && leagueId)) return null;
   if(!teamId){
     const guessed = await findTeamIdInLeague({ season, week, leagueId }, pid);
