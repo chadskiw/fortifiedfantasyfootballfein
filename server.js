@@ -15,6 +15,7 @@ const wallet = require('./routes/wallet');
 // server.js
 const playerh2h = require('./routes/playerh2h');
 const playerMeta = require('./routes/playerMeta'); // path to the file from the canvas
+const compression = require('compression');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -33,7 +34,6 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 // If you use compression(), skip this file so CF handles compression
-const compression = require('compression');
 app.use(compression({
   filter: (req, res) => req.path !== '/ff-mini.js' && compression.filter(req, res)
 }));
