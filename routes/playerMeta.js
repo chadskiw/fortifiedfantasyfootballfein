@@ -43,7 +43,7 @@ function hydrateCtx(req){
   const q=req.query||{}; const h=req.headers||{};
   let season=parseNum(pick(q.season, h['x-ff-season']));
   let week=parseNum(pick(q.week, h['x-ff-week']));
-  let leagueId=parseNum(pick(q.leagueId, h['x-ff-league'])) || DEFAULT_LEAGUE_ID;
+  let leagueId=parseNum(pick(q.leagueId, h['x-ff-league']));
   let teamId=parseNum(pick(q.teamId, h['x-ff-team']));
   const ref=req.get && req.get('referer');
   if(ref){ try{ const u=new URL(ref); season=season||parseNum(u.searchParams.get('season')); week=week||parseNum(u.searchParams.get('week')); leagueId=leagueId||parseNum(u.searchParams.get('leagueId')); teamId=teamId||parseNum(u.searchParams.get('teamId')); }catch{} }
@@ -83,9 +83,7 @@ async function findTeamIdInLeague({ season, week, leagueId }, pid){
 }
 
 // ---- Sources (no local try/catch) ----
-async function fromRoster(ctx, pid){
-  let { season, week, leagueId, teamId } = ctx;
-  if(!leagueId) leagueId = DEFAULT_LEAGUE_ID;
+async function fromRoster(ctx, pid){$1
   if(!(season && leagueId)) return null;
   if(!teamId){
     const guessed = await findTeamIdInLeague({ season, week, leagueId }, pid);
