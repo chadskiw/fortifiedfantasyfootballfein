@@ -7,6 +7,8 @@ console.log('[R2] endpoint =', process.env.R2_ENDPOINT);
 const express       = require('express');
 const morgan        = require('morgan');
 const cookieParser  = require('cookie-parser');
+const fs = require('fs');
+
 const path          = require('path');
 const espnConnectRouter = require('./routes/espnconnect');
 const coinsignalRouter = require('./routes/coinsignal');
