@@ -73,7 +73,7 @@ async function availablePoints(cli, memberId) {
 
 // --- Claim a side ---
 // body: { ch_id, side: 'home'|'away', roster_json? }
-router.post('/api/h2h/claim', async (req, res) => {
+router.post('/claim', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
     const { ch_id, side, roster_json } = req.body || {};
