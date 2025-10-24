@@ -14,6 +14,36 @@ const DEFAULT_HOUSE_RATE = Number(process.env.FF_H2H_HOUSE_RATE || 0.045);
 function idemKey(obj) {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
 }
+// GET /api/h2h/open?teams=lid:tid,lid:tid   or  /api/h2h/open?me=1
+router.get('/api/h2h/open', async (req,res)=>{
+  const teams = String(req.query.teams||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const me    = (req.query.me === '1') ? (req.cookies?.ff_member_id || null) : null;
+
+  const where = [];
+  const params = [];
+  if (teams.length){
+    where.push(`(s.league_id || ':' || s.team_id) = ANY($${params.push(teams)}::text[])`);
+  }
+  if (me){
+    where.push(`(s.owner_member_id = $${params.push(me)} OR s.claimed_by_member_id = $${params.push(me)})`);
+  }
+  where.push(`c.status IN ('open','pending')`);
+
+  const sql = `
+    SELECT c.id, c.season, c.week, c.status, c.stake_points, c.updated_at,
+           jsonb_agg(jsonb_build_object(
+             'side', s.side, 'league_id', s.league_id, 'team_id', s.team_id,
+             'team_name', s.team_name, 'locked_at', s.locked_at, 'points_final', s.points_final
+           ) ORDER BY s.side) AS sides
+    FROM ff_challenge c
+    JOIN ff_challenge_side s ON s.challenge_id = c.id
+    WHERE ${where.join(' AND ')}
+    GROUP BY c.id
+    ORDER BY c.updated_at DESC
+    LIMIT 50`;
+  const { rows } = await pool.query(sql, params);
+  res.json({ ok:true, items: rows });
+});
 
 /**
  * POST /api/h2h/settle
