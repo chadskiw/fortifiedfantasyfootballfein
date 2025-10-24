@@ -62,11 +62,15 @@ function pickProjected(stats, week) {
 
 function pickActual(stats, week) {
   if (!Array.isArray(stats)) return null;
-  const exact = stats.find(s => Number(s?.statSourceId) === 0 && Number(s?.scoringPeriodId) === Number(week));
-  if (exact && Number.isFinite(+exact.appliedTotal)) return +exact.appliedTotal;
-  const any = stats.find(s => Number(s?.statSourceId) === 0 && Number.isFinite(+s.appliedTotal));
-  return any ? +any.appliedTotal : null;
+  // Only count the exact scoring period for statSourceId=0 (actuals). No fallbacks.
+  const exact = stats.find(s =>
+    Number(s?.statSourceId) === 0 &&
+    Number(s?.scoringPeriodId) === Number(week) &&
+    Number.isFinite(+s.appliedTotal)           // 0 is valid
+  );
+  return exact ? +exact.appliedTotal : null;   // null ⇒ “no actuals yet”
 }
+
 
 function teamNameOf(t) {
   return `${t?.location || t?.teamLocation || ''} ${t?.nickname || t?.teamNickname || ''}`.trim()
@@ -86,38 +90,32 @@ function mapEntriesToPlayers(entries, week) {
     const stats = p?.stats || e?.playerStats || [];
 
     // Raw values from ESPN (may be null)
-    const projRaw = pickProjected(stats, week);   // can be null on bye/missing
-    const ptsRaw  = pickActual(stats, week);      // null until real stats exist (0 is valid)
+// inside mapEntriesToPlayers(...)
+const projRaw = pickProjected(stats, week);                  // can be null on byes
+const ptsRaw  = pickActual(stats, week);                     // null unless the WEEK row exists
+const hasActual  = (ptsRaw != null);
+const projZero   = projRaw == null ? 0 : Number(projRaw);    // bye ⇒ 0
+const points     = hasActual ? Number(ptsRaw) : null;        // raw actuals (nullable)
+const appliedPts = isStarter ? (points ?? 0) : 0;            // starter total (zero until live)
+const projApplied= isStarter ? projZero : 0;
 
-    // Our semantics
-    const hasActual  = (ptsRaw != null);                       // real box score present (0 is allowed)
-    const projZero   = projRaw == null ? 0 : Number(projRaw);  // zero-fill projections (bye => 0)
-    const points     = hasActual ? Number(ptsRaw) : null;      // keep nullable for UI to detect "no actuals yet"
-    const appliedPts = isStarter ? (points ?? 0) : 0;          // counts toward team; zero until stats; bench always 0
-    const projApplied= isStarter ? projZero : 0;               // starter-weighted projection
-
-    // Heuristic bye flag: no projection AND no actual for this week
-    const bye = (projRaw == null && ptsRaw == null);
-
-    return {
-      // === existing fields (kept) ===
-      slot, isStarter,
+return {
+  slot, isStarter,
       name: p?.fullName || [p?.firstName, p?.lastName].filter(Boolean).join(' ') || p?.name || '',
-      position: pos,
-      teamAbbr: abbr || '',
-      proj: projZero,                     // 🔁 was nullable; now zero-filled (bye ⇒ 0)
-      points,                             // raw actuals; null until ESPN posts (0 is valid actual)
-      appliedPoints: appliedPts,          // starter-weighted actuals (zero-filled)
-      headshot: headshotFor(p, pos, abbr),
-      playerId: p?.id,
-      lineupSlotId: slotId,
+  position: pos,
+  teamAbbr: abbr || '',
+  proj: projZero,                  // now zero-filled
+  points,                          // only set when week actual exists (0 allowed)
+  appliedPoints: appliedPts,       // numeric always (starters zero-filled)
+  headshot: headshotFor(p, pos, abbr),
+  playerId: p?.id,
+  lineupSlotId: slotId,
 
-      // === new, non-breaking extras ===
-      proj_raw: projRaw == null ? null : Number(projRaw), // original ESPN projection
-      projApplied,                                        // starter-weighted projection
-      hasActual,                                          // boolean signal for UI
-      bye                                                 // boolean (best-effort)
-    };
+  // optional helpers you already added
+  proj_raw: projRaw == null ? null : Number(projRaw),
+  projApplied, hasActual, bye: (projRaw == null && ptsRaw == null)
+};
+
   });
 }
 
