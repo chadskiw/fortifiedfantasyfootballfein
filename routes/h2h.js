@@ -47,26 +47,26 @@ router.get('/api/h2h/open', async (req,res)=>{
 // --- Helpers ---
 // Replace your old getMemberId(req) with this:
 
+// Server-side: resolve "../identity/me" relative to the current request URL
 async function getMemberId(req) {
-  // Build an origin that works behind proxies/CF/Render
-  const origin =
-    process.env.INTERNAL_ORIGIN ||
-    `${(req.headers['x-forwarded-proto'] || req.protocol || 'https')}://${(req.headers['x-forwarded-host'] || req.headers.host)}`;
+  const proto  = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host   = req.headers['x-forwarded-host']  || req.headers.host;
+  const origin = process.env.INTERNAL_ORIGIN || `${proto}://${host}`;
 
-  const r = await fetch(`./identity/me`, {
-    headers: {
-      // forward auth cookies so /api/identity/me can resolve the session
-      cookie: req.headers.cookie || ''
-    }
+  // Make the current request URL the base (e.g. /api/h2h/claim)
+  const base  = new URL(req.originalUrl || '/', origin);
+  // ../identity/me resolves to /api/identity/me when called from /api/h2h/*
+  const idUrl = new URL('../identity/me', base);
+
+  const r = await fetch(idUrl, {
+    headers: { cookie: req.headers.cookie || '' },
   });
-
   if (!r.ok) throw new Error('not_authenticated');
 
   const me = await r.json();
-  const id =
-    me.member_id || me.memberId || me.identity?.member_id || me.identity?.memberId;
-
+  const id = me.member_id || me.memberId || me.identity?.member_id || me.identity?.memberId;
   if (!id) throw new Error('not_authenticated');
+
   return String(id);
 }
 
