@@ -10,78 +10,32 @@ const pool = new Pool({
 
 const HOUSE_ID = process.env.FF_HOUSE_MEMBER || 'HOUSE';
 const DEFAULT_HOUSE_RATE = Number(process.env.FF_H2H_HOUSE_RATE || 0.045);
+
+// --- utils ---
 function sideToNum(s) {
   const t = String(s ?? '').toLowerCase();
   if (t === 'home' || t === 'left'  || t === 'a' || t === '1') return 1;
   if (t === 'away' || t === 'right' || t === 'b' || t === '2') return 2;
-  const n = Number(t); return Number.isFinite(n) && (n === 1 || n === 2) ? n : null;
+  const n = Number(t);
+  return Number.isFinite(n) && (n === 1 || n === 2) ? n : null;
 }
-
 function idemKey(obj) {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
 }
-// GET /api/h2h/open?teams=lid:tid,lid:tid   or  /api/h2h/open?me=1
-router.get('/api/h2h/open', async (req,res)=>{
-  const teams = String(req.query.teams||'').split(',').map(x=>x.trim()).filter(Boolean);
-  const me    = (req.query.me === '1') ? (req.cookies?.ff_member_id || null) : null;
 
-  const where = [];
-  const params = [];
-  if (teams.length){
-    where.push(`(s.league_id || ':' || s.team_id) = ANY($${params.push(teams)}::text[])`);
-  }
-  if (me){
-    where.push(`(s.owner_member_id = $${params.push(me)} OR s.claimed_by_member_id = $${params.push(me)})`);
-  }
-  where.push(`c.status IN ('open','pending')`);
-
-  const sql = `
-    SELECT c.id, c.season, c.week, c.status, c.stake_points, c.updated_at,
-           jsonb_agg(jsonb_build_object(
-             'side', s.side, 'league_id', s.league_id, 'team_id', s.team_id,
-             'team_name', s.team_name, 'locked_at', s.locked_at, 'points_final', s.points_final
-           ) ORDER BY s.side) AS sides
-    FROM ff_challenge c
-    JOIN ff_challenge_side s ON s.challenge_id = c.id
-    WHERE ${where.join(' AND ')}
-    GROUP BY c.id
-    ORDER BY c.updated_at DESC
-    LIMIT 50`;
-  const { rows } = await pool.query(sql, params);
-  res.json({ ok:true, items: rows });
-});
-// --- Helpers ---
-// Replace your old getMemberId(req) with this:
-
-// Server-side: resolve "../identity/me" relative to the current request URL
+// identity helper (server-side, relative to current route)
 async function getMemberId(req) {
   const proto  = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   const host   = req.headers['x-forwarded-host']  || req.headers.host;
   const origin = process.env.INTERNAL_ORIGIN || `${proto}://${host}`;
-
-  // Make the current request URL the base (e.g. /api/h2h/claim)
-  const base  = new URL(req.originalUrl || '/', origin);
-  // ../identity/me resolves to /api/identity/me when called from /api/h2h/*
-  const idUrl = new URL('../identity/me', base);
-
-  const r = await fetch(idUrl, {
-    headers: { cookie: req.headers.cookie || '' },
-  });
+  const base   = new URL(req.originalUrl || '/', origin);
+  const idUrl  = new URL('../identity/me', base);
+  const r = await fetch(idUrl, { headers: { cookie: req.headers.cookie || '' }});
   if (!r.ok) throw new Error('not_authenticated');
-
   const me = await r.json();
   const id = me.member_id || me.memberId || me.identity?.member_id || me.identity?.memberId;
   if (!id) throw new Error('not_authenticated');
-
   return String(id);
-}
-
-function normSide(s) {
-  const t = String(s ?? '').toLowerCase();
-  if (t === 'home' || t === 'left' || t === 'a' || t === '1') return 1;
-  if (t === 'away' || t === 'right' || t === 'b' || t === '2') return 2;
-  const n = Number(t);
-  return (n === 1 || n === 2) ? n : null;
 }
 
 async function withTx(fn) {
@@ -93,70 +47,107 @@ async function withTx(fn) {
 
 async function availablePoints(cli, memberId) {
   const { rows: [w] } = await cli.query(`
-    WITH bal AS (
-      SELECT COALESCE(SUM(delta_points),0) AS pts FROM ff_points_ledger WHERE member_id=$1
-    ),
-    held AS (
-      SELECT COALESCE(SUM(amount_held),0) AS held FROM ff_holds WHERE member_id=$1 AND status='held'
-    )
+    WITH bal AS ( SELECT COALESCE(SUM(delta_points),0) AS pts FROM ff_points_ledger WHERE member_id=$1 ),
+         held AS ( SELECT COALESCE(SUM(amount_held),0)   AS held FROM ff_holds         WHERE member_id=$1 AND status='held' )
     SELECT (bal.pts - held.held) AS available FROM bal, held
   `, [memberId]);
   return Number(w?.available || 0);
 }
 
-// --- Claim a side ---
- // body: { ch_id, side: 1|2|'home'|'away', roster_json? }
- router.post('/claim', async (req, res) => {
-   try {
-     const memberId = await getMemberId(req);
+/* ===========================
+   LIST OPEN/PENDING (Mini Hub)
+   GET /api/h2h/open?teams=lid:tid,lid:tid or ?me=1
+   =========================== */
+router.get('/open', async (req, res) => {
+  try {
+    const teamsCsv = String(req.query.teams || '').trim();
+    const teams = teamsCsv ? teamsCsv.split(',').map(x => x.trim()).filter(Boolean) : [];
+    const wantMine = req.query.me === '1';
 
+    const where = [`c.status IN ('open','pending')`];
+    const params = [];
+
+    if (teams.length) where.push(`(s.league_id || ':' || s.team_id) = ANY($${params.push(teams)}::text[])`);
+
+    if (wantMine) {
+      // use identity, not cookie
+      let meId = null;
+      try { meId = await getMemberId(req); } catch {}
+      if (!meId) return res.json({ ok: true, items: [] });
+      where.push(`(s.owner_member_id = $${params.push(meId)} OR s.claimed_by_member_id = $${params.push(meId)})`);
+    }
+
+    const sql = `
+      SELECT c.id, c.season, c.week, c.status, c.stake_points, c.updated_at,
+             jsonb_agg(jsonb_build_object(
+               'side', s.side, 'league_id', s.league_id, 'team_id', s.team_id,
+               'team_name', s.team_name, 'locked_at', s.locked_at, 'points_final', s.points_final
+             ) ORDER BY s.side) AS sides
+      FROM ff_challenge c
+      JOIN ff_challenge_side s ON s.challenge_id = c.id
+      WHERE ${where.join(' AND ')}
+      GROUP BY c.id
+      ORDER BY c.updated_at DESC
+      LIMIT 50`;
+    const { rows } = await pool.query(sql, params);
+    res.json({ ok: true, items: rows });
+  } catch (e) {
+    console.error('h2h.open.error', e);
+    res.status(400).json({ ok:false, error: e.message });
+  }
+});
+
+/* ===========================
+   CLAIM A SIDE
+   POST /api/h2h/claim
+   body: { ch_id, side: 1|2|'home'|'away', roster_json? }
+   =========================== */
+router.post('/claim', async (req, res) => {
+  try {
+    const memberId = await getMemberId(req);
     const { ch_id, side, roster_json } = req.body || {};
-    const sideNum = normSide(side);
+    const sideNum = sideToNum(side);
     if (!ch_id || !sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
 
-     const out = await withTx(async (cli) => {
-       // Load challenge + sides
-       const { rows: [ch] } = await cli.query(
-         `SELECT id, season, week, status, stake_points FROM ff_challenge WHERE id=$1 FOR UPDATE`,
-         [ch_id]
-       );
-       if (!ch) throw new Error('challenge_not_found');
-       if (!['open','pending'].includes(ch.status)) throw new Error('challenge_not_open');
+    const out = await withTx(async (cli) => {
+      const { rows: [ch] } = await cli.query(
+        `SELECT id, season, week, status, stake_points FROM ff_challenge WHERE id=$1 FOR UPDATE`, [ch_id]
+      );
+      if (!ch) throw new Error('challenge_not_found');
+      if (!['open','pending'].includes(ch.status)) throw new Error('challenge_not_open');
 
-       const { rows: sides } = await cli.query(
-         `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
-          FROM ff_challenge_side WHERE challenge_id=$1 FOR UPDATE`, [ch_id]);
-
+      const { rows: sides } = await cli.query(
+        `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
+           FROM ff_challenge_side WHERE challenge_id=$1 FOR UPDATE`, [ch_id]
+      );
 
       const meSide = sides.find(s => Number(s.side) === sideNum);
       const other  = sides.find(s => Number(s.side) !== sideNum);
-       if (!meSide) throw new Error('side_not_found');
-       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
+      if (!meSide) throw new Error('side_not_found');
+      if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
-       const stake = Number(ch.stake_points || 0);
-       if (stake <= 0) throw new Error('invalid_stake');
+      const stake = Number(ch.stake_points || 0);
+      if (stake <= 0) throw new Error('invalid_stake');
 
-       // Funds check and HOLD
-       const avail = await availablePoints(cli, memberId);
-       if (avail < stake) throw new Error('insufficient_funds');
+      const avail = await availablePoints(cli, memberId);
+      if (avail < stake) throw new Error('insufficient_funds');
 
-      const memo = `h2h:${ch_id}:${sideNum === 1 ? 'home' : 'away'}`;
-       const holdId = crypto.randomUUID();
-       await cli.query(`
-         INSERT INTO ff_holds (hold_id, member_id, amount_held, status, memo, created_at, updated_at)
-         VALUES ($1,$2,$3,'held',$4,NOW(),NOW())
-       `, [holdId, memberId, stake, memo]);
+      const memo   = `h2h:${ch_id}:${sideNum === 1 ? 'home' : 'away'}`;
+      const holdId = crypto.randomUUID();
+      await cli.query(
+        `INSERT INTO ff_holds (hold_id, member_id, amount_held, status, memo, created_at, updated_at)
+         VALUES ($1,$2,$3,'held',$4,NOW(),NOW())`,
+        [holdId, memberId, stake, memo]
+      );
 
-       // Claim the side + seed roster if first time
-       const rosterSeed = (meSide.roster_json || roster_json) || { starters: [], bench: [] };
-       await cli.query(`
-         UPDATE ff_challenge_side
+      const rosterSeed = (meSide.roster_json || roster_json) || { starters: [], bench: [] };
+      await cli.query(
+        `UPDATE ff_challenge_side
             SET claimed_by_member_id=$1, claimed_at=NOW(), hold_id=$2, roster_json=$3, updated_at=NOW()
-          WHERE challenge_id=$4 AND side=$5
-      `, [memberId, holdId, rosterSeed, ch_id, sideNum]);
+          WHERE challenge_id=$4 AND side=$5`,
+        [memberId, holdId, rosterSeed, ch_id, sideNum]
+      );
 
-
-      // If the other side is already claimed, lock the whole challenge
       const isSecond = !!other?.claimed_by_member_id;
       if (isSecond) {
         await cli.query(`UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`, [ch_id]);
@@ -166,7 +157,7 @@ async function availablePoints(cli, memberId) {
       }
 
       const newAvail = await availablePoints(cli, memberId);
-      return { status: isSecond ? 'locked' : 'pending', hold_id: holdId, available_points: newAvail };
+      return { status: isSecond ? 'locked' : 'pending', hold_id: holdId, available_points: newAvail, side: sideNum };
     });
 
     res.json({ ok:true, ...out });
@@ -176,11 +167,11 @@ async function availablePoints(cli, memberId) {
   }
 });
 
-// --- Swap lineup for a claimed side (bench <-> starter) ---
-// body: { ch_id, side, promote_pid, demote_pid }
-// If you don't already have this helper in the file:
-
-// Mounted router at app.use('/api/h2h', router) → path here should be '/lineup/swap'
+/* ===========================
+   SWAP LINEUP (bench <-> starter)
+   POST /api/h2h/lineup/swap
+   body: { ch_id, side, promote_pid, demote_pid }
+   =========================== */
 router.post('/lineup/swap', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
@@ -195,15 +186,12 @@ router.post('/lineup/swap', async (req, res) => {
     }
 
     const out = await withTx(async (cli) => {
-      // Lock challenge row
       const { rows: [ch] } = await cli.query(
-        `SELECT id, status FROM ff_challenge WHERE id=$1 FOR UPDATE`,
-        [ch_id]
+        `SELECT id, status FROM ff_challenge WHERE id=$1 FOR UPDATE`, [ch_id]
       );
       if (!ch) throw new Error('challenge_not_found');
       if (ch.status === 'locked') throw new Error('challenge_locked');
 
-      // Lock the side row we are editing
       const { rows: [s] } = await cli.query(
         `SELECT roster_json, claimed_by_member_id
            FROM ff_challenge_side
@@ -212,28 +200,22 @@ router.post('/lineup/swap', async (req, res) => {
         [ch_id, sideNum]
       );
       if (!s) throw new Error('side_not_found');
-      if (String(s.claimed_by_member_id) !== String(memberId)) {
-        throw new Error('not_your_side');
-      }
+      if (String(s.claimed_by_member_id) !== String(memberId)) throw new Error('not_your_side');
 
-      // Current roster
       const r = s.roster_json || { starters: [], bench: [] };
       const starters = Array.isArray(r.starters) ? [...r.starters] : [];
       const bench    = Array.isArray(r.bench)    ? [...r.bench]    : [];
 
-      // Find indices
       const bIdx = bench.findIndex(p => String(p.pid) === String(promote_pid));
       const sIdx = starters.findIndex(p => String(p.pid) === String(demote_pid));
       if (bIdx === -1 || sIdx === -1) throw new Error('players_not_found');
 
-      // Swap bench <-> starter
       const benchPlayer   = bench[bIdx];
       const starterPlayer = starters[sIdx];
       starters[sIdx] = benchPlayer;
       bench[bIdx]    = starterPlayer;
 
       const newRoster = { starters, bench };
-
       await cli.query(
         `UPDATE ff_challenge_side
             SET roster_json=$1, updated_at=NOW()
@@ -251,10 +233,11 @@ router.post('/lineup/swap', async (req, res) => {
   }
 });
 
-
-// --- List MY live H2Hs (pending + locked) for hub ---
-// GET /api/h2h/my?states=pending,locked
-router.get('/api/h2h/my', async (req, res) => {
+/* ===========================
+   MY LIVE H2Hs (pending + locked)
+   GET /api/h2h/my?states=pending,locked
+   =========================== */
+router.get('/my', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
     const states = String(req.query.states||'pending,locked').split(',').map(s=>s.trim());
@@ -279,20 +262,15 @@ router.get('/api/h2h/my', async (req, res) => {
     `, [states, memberId]);
     res.json({ ok:true, items: rows });
   } catch (e) {
+    console.error('h2h.my.error', e);
     res.status(400).json({ ok:false, error: e.message });
   }
 });
 
-/**
- * POST /api/h2h/settle
- * body: { ch_id, winner: 'home'|'away', house_rate?:number }
- * Uses ff_holds rows with memo like 'h2h:ch_<id>:home' and 'h2h:ch_<id>:away'
- * Effect:
- *  - capture both holds
- *  - ledger: -stake (for both sides)
- *  - winner: +pot*(1-houseRate)
- *  - house: +rake
- */
+/* ===========================
+   SETTLE (unchanged)
+   POST /api/h2h/settle
+   =========================== */
 router.post('/settle', async (req, res) => {
   const { ch_id, winner, house_rate } = req.body || {};
   if (!ch_id || !['home','away'].includes(winner)) {
@@ -303,8 +281,6 @@ router.post('/settle', async (req, res) => {
   const cli = await pool.connect();
   try {
     await cli.query('BEGIN');
-
-    // fetch & lock both sides
     const { rows: holds } = await cli.query(
       `SELECT * FROM ff_holds WHERE status='held' AND memo IN ($1,$2) FOR UPDATE`,
       [`h2h:${ch_id}:home`, `h2h:${ch_id}:away`]
@@ -314,14 +290,12 @@ router.post('/settle', async (req, res) => {
     const away = holds.find(h => h.memo.endsWith(':away'));
     if (!home || !away) throw new Error('both_sides_required');
 
-    // capture both
     await cli.query(
       `UPDATE ff_holds SET status='captured', amount_captured=amount_held, captured_at=NOW(), updated_at=NOW()
        WHERE hold_id = ANY($1::text[])`,
       [[home.hold_id, away.hold_id]]
     );
 
-    // ledger: -stake for both
     const mkStakeRow = (h) => cli.query(`
       INSERT INTO ff_points_ledger (member_id, currency, delta_points, kind, source, source_id, ref_type, ref_id, memo, idempotency_key)
       VALUES ($1,'points',$2,'stake_captured_h2h','h2h',$3,'hold',$4,'Stake captured', $5)
@@ -335,14 +309,12 @@ router.post('/settle', async (req, res) => {
     const rake   = pot - payout;
     const winnerMember = (winner === 'home') ? home.member_id : away.member_id;
 
-    // winner payout
     await cli.query(`
       INSERT INTO ff_points_ledger (member_id, currency, delta_points, kind, source, source_id, memo, idempotency_key)
       VALUES ($1,'points',$2,'h2h_payout','h2h',$3,'Winner payout', $4)
       ON CONFLICT (idempotency_key) DO NOTHING
     `, [winnerMember, payout, ch_id, idemKey({k:'h2h_payout', ch_id, winner: winnerMember, payout})]);
 
-    // house rake
     await cli.query(`
       INSERT INTO ff_points_ledger (member_id, currency, delta_points, kind, source, source_id, memo, idempotency_key)
       VALUES ($1,'points',$2,'rake','h2h',$3,'House rake', $4)
