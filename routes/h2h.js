@@ -13,12 +13,16 @@ const DEFAULT_HOUSE_RATE = Number(process.env.FF_H2H_HOUSE_RATE || 0.045);
 
 // --- utils ---
 function sideToNum(s) {
-  const t = String(s ?? '').toLowerCase();
-  if (t === 'home' || t === 'left'  || t === 'a' || t === '1') return 1;
-  if (t === 'away' || t === 'right' || t === 'b' || t === '2') return 2;
-  const n = Number(t);
-  return Number.isFinite(n) && (n === 1 || n === 2) ? n : null;
+  const t = String(s ?? '').trim().toLowerCase();
+  if (t === '1' || t === 'home' || t === 'left' || t === 'a') return 1;
+  if (t === '2' || t === 'away' || t === 'right' || t === 'b') return 2;
+  return null;
 }
+function sideTokens(n) {
+  return n === 1 ? ['1','home','left','a'] :
+         n === 2 ? ['2','away','right','b'] : [];
+}
+
 function idemKey(obj) {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
 }
@@ -110,19 +114,13 @@ router.post('/claim', async (req, res) => {
     if (!ch_id || !sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
 
     const out = await withTx(async (cli) => {
-      const { rows: [ch] } = await cli.query(
-        `SELECT id, season, week, status, stake_points FROM ff_challenge WHERE id=$1 FOR UPDATE`, [ch_id]
-      );
-      if (!ch) throw new Error('challenge_not_found');
-      if (!['open','pending'].includes(ch.status)) throw new Error('challenge_not_open');
-
       const { rows: sides } = await cli.query(
-        `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
-           FROM ff_challenge_side WHERE challenge_id=$1 FOR UPDATE`, [ch_id]
-      );
-
-      const meSide = sides.find(s => Number(s.side) === sideNum);
-      const other  = sides.find(s => Number(s.side) !== sideNum);
+   `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
+      FROM ff_challenge_side
+     WHERE challenge_id=$1
+     FOR UPDATE`, [ch_id]);
+ const meSide = sides.find(s => sideToNum(s.side) === sideNum);
+ const other  = sides.find(s => sideToNum(s.side) !== sideNum);
       if (!meSide) throw new Error('side_not_found');
       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
@@ -144,9 +142,9 @@ router.post('/claim', async (req, res) => {
       await cli.query(
         `UPDATE ff_challenge_side
             SET claimed_by_member_id=$1, claimed_at=NOW(), hold_id=$2, roster_json=$3, updated_at=NOW()
-          WHERE challenge_id=$4 AND side=$5`,
-        [memberId, holdId, rosterSeed, ch_id, sideNum]
-      );
+     WHERE challenge_id=$4
+       AND lower(side::text) = ANY($5::text[])
+`, [memberId, holdId, rosterSeed, ch_id, sideTokens(sideNum)]);
 
       const isSecond = !!other?.claimed_by_member_id;
       if (isSecond) {
@@ -192,13 +190,14 @@ router.post('/lineup/swap', async (req, res) => {
       if (!ch) throw new Error('challenge_not_found');
       if (ch.status === 'locked') throw new Error('challenge_locked');
 
-      const { rows: [s] } = await cli.query(
-        `SELECT roster_json, claimed_by_member_id
-           FROM ff_challenge_side
-          WHERE challenge_id=$1 AND side=$2
-          FOR UPDATE`,
-        [ch_id, sideNum]
-      );
+       const { rows: [s] } = await cli.query(
+   `SELECT roster_json, claimed_by_member_id
+      FROM ff_challenge_side
+     WHERE challenge_id=$1
+       AND lower(side::text) = ANY($2::text[])
+     FOR UPDATE`,
+   [ch_id, sideTokens(sideNum)]
+ );
       if (!s) throw new Error('side_not_found');
       if (String(s.claimed_by_member_id) !== String(memberId)) throw new Error('not_your_side');
 
@@ -219,8 +218,9 @@ router.post('/lineup/swap', async (req, res) => {
       await cli.query(
         `UPDATE ff_challenge_side
             SET roster_json=$1, updated_at=NOW()
-          WHERE challenge_id=$2 AND side=$3`,
-        [newRoster, ch_id, sideNum]
+     WHERE challenge_id=$2
+       AND lower(side::text) = ANY($3::text[])`,
+   [newRoster, ch_id, sideTokens(sideNum)]
       );
 
       return { roster_json: newRoster };
