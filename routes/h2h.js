@@ -10,6 +10,8 @@ const pool = new Pool({
 
 const HOUSE_ID = process.env.FF_HOUSE_MEMBER || 'HOUSE';
 const DEFAULT_HOUSE_RATE = Number(process.env.FF_H2H_HOUSE_RATE || 0.045);
+// near the top with your other consts
+const HOLD_TTL_MIN = Number(process.env.FF_HOLD_TTL_MINUTES || 15);
 
 // --- utils ---
 function sideToNum(s) {
@@ -52,8 +54,11 @@ async function withTx(fn) {
 async function availablePoints(cli, memberId) {
   const { rows: [w] } = await cli.query(`
     WITH bal AS ( SELECT COALESCE(SUM(delta_points),0) AS pts FROM ff_points_ledger WHERE member_id=$1 ),
-         held AS ( SELECT COALESCE(SUM(amount_held),0)   AS held FROM ff_holds         WHERE member_id=$1 AND status='held' )
-    SELECT (bal.pts - held.held) AS available FROM bal, held
+   held AS (
+     SELECT COALESCE(SUM(amount_held),0) AS held
+     FROM ff_holds
+     WHERE member_id=$1 AND status='held' AND expires_at > NOW()
+   )    SELECT (bal.pts - held.held) AS available FROM bal, held
   `, [memberId]);
   return Number(w?.available || 0);
 }
@@ -156,11 +161,16 @@ router.post('/claim', async (req, res) => {
 
       const memo   = `h2h:${ch_id}:${sideNum === 1 ? 'home' : 'away'}`;
       const holdId = crypto.randomUUID();
-      await cli.query(
-        `INSERT INTO ff_holds (hold_id, member_id, amount_held, status, memo, created_at, updated_at)
-         VALUES ($1,$2,$3,'held',$4,NOW(),NOW())`,
-        [holdId, memberId, stake, memo]
-      );
+// inside /claim right before the UPDATE ff_challenge_side
+
+ await cli.query(`
+   INSERT INTO ff_holds
+     (hold_id, member_id, currency, amount_held, status, memo, expires_at, created_at, updated_at)
+   VALUES
+     ($1,      $2,        'points', $3,          'held', $4,   NOW() + ($5 || ' minutes')::interval, NOW(), NOW())
+ `, [holdId, memberId, stake, memo, String(HOLD_TTL_MIN)]);
+
+  
 
       // 4) mark claim + roster seed
       const rosterSeed = (meSide.roster_json || roster_json) || { starters: [], bench: [] };
