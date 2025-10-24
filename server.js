@@ -107,6 +107,7 @@ async function fanProxyHandler(req, res){
     res.status(502).json({ ok:false, error:'espn_fan_upstream_failed' });
   }
 }
+app.use('/api', require('./routes/users'));
 
 app.get('/api/platforms/espn/fan/me', fanProxyHandler);
 app.get('/api/platforms/espn/fan/:id', fanProxyHandler);
