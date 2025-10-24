@@ -74,21 +74,28 @@ function mapEntriesToPlayers(entries, week) {
     const abbr = p?.proTeamAbbreviation || (p?.proTeamId ? TEAM_ABBR[p.proTeamId] : null);
     const stats = p?.stats || e?.playerStats || [];
 
-    const proj = pickProjected(stats, week);
-    const pts  = pickActual(stats, week);
+// inside mapEntriesToPlayers(...)
+const proj = pickProjected(stats, week);
+const pts  = pickActual(stats, week);
 
-    return {
-      slot, isStarter,
+const points        = (pts == null ? null : Number(pts));                 // raw actuals (nullable)
+const appliedPoints = isStarter ? (points ?? 0) : 0;                      // counts to team, zero-filled
+const projApplied   = isStarter ? (proj == null ? 0 : Number(proj)) : 0;  // counts to team projection
+
+return {
+  slot, isStarter,
       name: p?.fullName || [p?.firstName, p?.lastName].filter(Boolean).join(' ') || p?.name || '',
-      position: pos,
-      teamAbbr: abbr || '',
-      proj: proj == null ? null : Number(proj),
-      points: pts == null ? null : Number(pts),
-      appliedPoints: pts == null ? null : Number(pts),
-      headshot: headshotFor(p, pos, abbr),
-      playerId: p?.id,
-      lineupSlotId: slotId
-    };
+  position: pos,
+  teamAbbr: abbr || '',
+  proj: proj == null ? null : Number(proj), // keep raw proj too if you want
+  projApplied,                               // starter-weighted proj
+  points,                                    // raw actuals (nullable)
+  appliedPoints,                             // starter-weighted *and* zero-filled
+  headshot: headshotFor(p, pos, abbr),
+  playerId: p?.id,
+  lineupSlotId: slotId
+};
+
   });
 }
 
