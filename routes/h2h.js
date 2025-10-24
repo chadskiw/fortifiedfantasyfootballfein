@@ -10,6 +10,12 @@ const pool = new Pool({
 
 const HOUSE_ID = process.env.FF_HOUSE_MEMBER || 'HOUSE';
 const DEFAULT_HOUSE_RATE = Number(process.env.FF_H2H_HOUSE_RATE || 0.045);
+function sideToNum(s) {
+  const t = String(s ?? '').toLowerCase();
+  if (t === 'home' || t === 'left'  || t === 'a' || t === '1') return 1;
+  if (t === 'away' || t === 'right' || t === 'b' || t === '2') return 2;
+  const n = Number(t); return Number.isFinite(n) && (n === 1 || n === 2) ? n : null;
+}
 
 function idemKey(obj) {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
@@ -96,9 +102,9 @@ async function availablePoints(cli, memberId) {
 router.post('/claim', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
-    const { ch_id, side, roster_json } = req.body || {};
-    if (!ch_id || !['home','away'].includes(side)) return res.status(400).json({ ok:false, error:'missing_args' });
-
+const { ch_id, side, roster_json } = req.body || {};
+ const sideNum = sideToNum(side);
+ if (!ch_id || !sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
     const out = await withTx(async (cli) => {
       // Load challenge + sides
       const { rows: [ch] } = await cli.query(
@@ -112,8 +118,8 @@ router.post('/claim', async (req, res) => {
         `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
          FROM ff_challenge_side WHERE challenge_id=$1 FOR UPDATE`, [ch_id]);
 
-      const meSide = sides.find(s => s.side === side);
-      const other  = sides.find(s => s.side !== side);
+      const meSide = sides.find(s => Number(s.side) === sideNum);
+ const other  = sides.find(s => Number(s.side) !== sideNum);
       if (!meSide) throw new Error('side_not_found');
       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
@@ -124,8 +130,7 @@ router.post('/claim', async (req, res) => {
       const avail = await availablePoints(cli, memberId);
       if (avail < stake) throw new Error('insufficient_funds');
 
-      const memo = `h2h:${ch_id}:${side}`;
-      const holdId = crypto.randomUUID();
+const memo = `h2h:${ch_id}:${sideNum===1?'home':'away'}`;      const holdId = crypto.randomUUID();
       await cli.query(`
         INSERT INTO ff_holds (hold_id, member_id, amount_held, status, memo, created_at, updated_at)
         VALUES ($1,$2,$3,'held',$4,NOW(),NOW())
@@ -137,7 +142,7 @@ router.post('/claim', async (req, res) => {
         UPDATE ff_challenge_side
            SET claimed_by_member_id=$1, claimed_at=NOW(), hold_id=$2, roster_json=$3, updated_at=NOW()
          WHERE challenge_id=$4 AND side=$5
-      `, [memberId, holdId, rosterSeed, ch_id, side]);
+ `, [memberId, holdId, rosterSeed, ch_id, sideNum]);
 
       // If the other side is already claimed, lock the whole challenge
       const isSecond = !!other?.claimed_by_member_id;
@@ -165,6 +170,8 @@ router.post('/api/h2h/lineup/swap', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
     const { ch_id, side, promote_pid, demote_pid } = req.body || {};
+ const sideNum = sideToNum(side);
+ if (!sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
     if (!ch_id || !['home','away'].includes(side) || !promote_pid || !demote_pid)
       return res.status(400).json({ ok:false, error:'missing_args' });
 
@@ -177,8 +184,7 @@ router.post('/api/h2h/lineup/swap', async (req, res) => {
 
       const { rows: [s] } = await cli.query(
         `SELECT roster_json, claimed_by_member_id FROM ff_challenge_side
-          WHERE challenge_id=$1 AND side=$2 FOR UPDATE`, [ch_id, side]
-      );
+WHERE challenge_id=$1 AND side=$2 FOR UPDATE`, [ch_id, sideNum]      );
       if (!s) throw new Error('side_not_found');
       if (String(s.claimed_by_member_id) !== memberId) throw new Error('not_your_side');
 
