@@ -11,6 +11,17 @@ function safeWeek(req) {
   const w = Number(raw);
   return Number.isFinite(w) && w >= 1 ? Math.min(w, NFL_MAX_WEEK) : DEFAULT_WEEK;
 }
+function teamTotalsFor(players) {
+  let proj = 0, projRaw = 0, actual = 0, hasActuals = false, starters = 0;
+  for (const p of players) {
+    proj        += Number(p?.projApplied ?? (p?.isStarter ? (p?.proj ?? 0) : 0));
+    projRaw     += Number(p?.proj_raw   ?? 0);                 // totals the raw weekly proj (bye => 0 now)
+    actual      += Number(p?.appliedPoints ?? 0);              // zero-filled starter totals
+    hasActuals ||= !!p?.hasActual;
+    if (p?.isStarter) starters++;
+  }
+  return { proj, proj_raw: projRaw, actual, hasActuals, starters };
+}
 
 // ====== ESPN fetch =========================================================
 async function espnGET(url, cand) {
@@ -69,35 +80,47 @@ function mapEntriesToPlayers(entries, week) {
     const slot   = SLOT[slotId] || 'BN';
     const isStarter = ![20,21].includes(slotId) && slot !== 'BN' && slot !== 'IR';
 
-    const p   = e?.playerPoolEntry?.player || e.player || {};
-    const pos = POS[p?.defaultPositionId] || p?.defaultPosition || p?.primaryPosition || '';
-    const abbr = p?.proTeamAbbreviation || (p?.proTeamId ? TEAM_ABBR[p.proTeamId] : null);
+    const p     = e?.playerPoolEntry?.player || e.player || {};
+    const pos   = POS[p?.defaultPositionId] || p?.defaultPosition || p?.primaryPosition || '';
+    const abbr  = p?.proTeamAbbreviation || (p?.proTeamId ? TEAM_ABBR[p.proTeamId] : null);
     const stats = p?.stats || e?.playerStats || [];
 
-// inside mapEntriesToPlayers(...)
-const proj = pickProjected(stats, week);
-const pts  = pickActual(stats, week);
+    // Raw values from ESPN (may be null)
+    const projRaw = pickProjected(stats, week);   // can be null on bye/missing
+    const ptsRaw  = pickActual(stats, week);      // null until real stats exist (0 is valid)
 
-const points        = (pts == null ? null : Number(pts));                 // raw actuals (nullable)
-const appliedPoints = isStarter ? (points ?? 0) : 0;                      // counts to team, zero-filled
-const projApplied   = isStarter ? (proj == null ? 0 : Number(proj)) : 0;  // counts to team projection
+    // Our semantics
+    const hasActual  = (ptsRaw != null);                       // real box score present (0 is allowed)
+    const projZero   = projRaw == null ? 0 : Number(projRaw);  // zero-fill projections (bye => 0)
+    const points     = hasActual ? Number(ptsRaw) : null;      // keep nullable for UI to detect "no actuals yet"
+    const appliedPts = isStarter ? (points ?? 0) : 0;          // counts toward team; zero until stats; bench always 0
+    const projApplied= isStarter ? projZero : 0;               // starter-weighted projection
 
-return {
-  slot, isStarter,
+    // Heuristic bye flag: no projection AND no actual for this week
+    const bye = (projRaw == null && ptsRaw == null);
+
+    return {
+      // === existing fields (kept) ===
+      slot, isStarter,
       name: p?.fullName || [p?.firstName, p?.lastName].filter(Boolean).join(' ') || p?.name || '',
-  position: pos,
-  teamAbbr: abbr || '',
-  proj: proj == null ? null : Number(proj), // keep raw proj too if you want
-  projApplied,                               // starter-weighted proj
-  points,                                    // raw actuals (nullable)
-  appliedPoints,                             // starter-weighted *and* zero-filled
-  headshot: headshotFor(p, pos, abbr),
-  playerId: p?.id,
-  lineupSlotId: slotId
-};
+      position: pos,
+      teamAbbr: abbr || '',
+      proj: projZero,                     // 🔁 was nullable; now zero-filled (bye ⇒ 0)
+      points,                             // raw actuals; null until ESPN posts (0 is valid actual)
+      appliedPoints: appliedPts,          // starter-weighted actuals (zero-filled)
+      headshot: headshotFor(p, pos, abbr),
+      playerId: p?.id,
+      lineupSlotId: slotId,
 
+      // === new, non-breaking extras ===
+      proj_raw: projRaw == null ? null : Number(projRaw), // original ESPN projection
+      projApplied,                                        // starter-weighted projection
+      hasActual,                                          // boolean signal for UI
+      bye                                                 // boolean (best-effort)
+    };
   });
 }
+
 
 // ====== Route ==============================================================
 router.get('/roster', async (req, res) => {
@@ -178,27 +201,30 @@ router.get('/roster', async (req, res) => {
       const t = teams.find(x => Number(x?.id) === Number(teamId));
       if (!t) return res.status(404).json({ ok:false, error:'team_not_found' });
 
-      const entries = t?.roster?.entries || [];
-      const players = mapEntriesToPlayers(entries, week);
+const entries = t?.roster?.entries || [];
+const players = mapEntriesToPlayers(entries, week);
+const totals  = teamTotalsFor(players);
 
-      return res.json({
-        ok: true, platform:'espn', leagueId, season, week,
-        teamId, team_name: teamNameOf(t),
-        players
-      });
+return res.json({
+  ok: true, platform:'espn', leagueId, season, week,
+  teamId, team_name: teamNameOf(t),
+  totals,                 // <— NEW (non-breaking)
+  players
+});
+
     }
 
     // No teamId provided → return all teams with mapped players
-    const teamsOut = teams.map(t => ({
-      teamId: Number(t?.id),
-      team_name: teamNameOf(t),
-      players: mapEntriesToPlayers(t?.roster?.entries || [], week)
-    }));
+const teamsOut = teams.map(t => {
+  const players = mapEntriesToPlayers(t?.roster?.entries || [], week);
+  return {
+    teamId: Number(t?.id),
+    team_name: teamNameOf(t),
+    totals: teamTotalsFor(players),   // <— NEW (non-breaking)
+    players
+  };
+});
 
-    return res.json({
-      ok: true, platform:'espn', leagueId, season, week,
-      teams: teamsOut
-    });
 
   } catch (e) {
     return res.status(500).json({ ok:false, error: String(e?.message || e) });
