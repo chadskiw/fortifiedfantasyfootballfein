@@ -106,27 +106,51 @@ router.get('/open', async (req, res) => {
    POST /api/h2h/claim
    body: { ch_id, side: 1|2|'home'|'away', roster_json? }
    =========================== */
+// helpers you need in this file
+
+// POST /api/h2h/claim
 router.post('/claim', async (req, res) => {
   try {
     const memberId = await getMemberId(req);
-    const { ch_id, side, roster_json } = req.body || {};
+    const { ch_id, side, roster_json, stake_points } = req.body || {};
     const sideNum = sideToNum(side);
     if (!ch_id || !sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
 
     const out = await withTx(async (cli) => {
+      // 1) lock challenge (THIS defines "ch")
       const { rows: [ch] } = await cli.query(
-   `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
-      FROM ff_challenge_side
-     WHERE challenge_id=$1
-     FOR UPDATE`, [ch_id]);
- const meSide = ch.find(s => sideToNum(s.ch) === sideNum);
- const other  = ch.find(s => sideToNum(s.ch) !== sideNum);
+        `SELECT id, status, stake_points, season, week
+           FROM ff_challenge
+          WHERE id=$1
+          FOR UPDATE`,
+        [ch_id]
+      );
+      if (!ch) throw new Error('challenge_not_found');
+      if (!['open','pending'].includes(ch.status)) throw new Error('challenge_not_open');
+
+      // (optional) if stake_points is 0 in DB but client sent one, persist it now
+      let stake = Number(ch.stake_points || 0);
+      if (!stake && stake_points) {
+        stake = Math.max(0, Number(stake_points));
+        await cli.query(`UPDATE ff_challenge SET stake_points=$2, updated_at=NOW() WHERE id=$1`, [ch_id, stake]);
+      }
+      if (stake <= 0) throw new Error('invalid_stake');
+
+      // 2) lock sides
+      const { rows: sides } = await cli.query(
+        `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
+           FROM ff_challenge_side
+          WHERE challenge_id=$1
+          FOR UPDATE`,
+        [ch_id]
+      );
+
+      const meSide = sides.find(s => sideToNum(s.side) === sideNum);
+      const other  = sides.find(s => sideToNum(s.side) !== sideNum);
       if (!meSide) throw new Error('side_not_found');
       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
-      const stake = Number(ch.stake_points || 0);
-      if (stake <= 0) throw new Error('invalid_stake');
-
+      // 3) funds check + hold
       const avail = await availablePoints(cli, memberId);
       if (avail < stake) throw new Error('insufficient_funds');
 
@@ -138,14 +162,17 @@ router.post('/claim', async (req, res) => {
         [holdId, memberId, stake, memo]
       );
 
+      // 4) mark claim + roster seed
       const rosterSeed = (meSide.roster_json || roster_json) || { starters: [], bench: [] };
       await cli.query(
         `UPDATE ff_challenge_side
             SET claimed_by_member_id=$1, claimed_at=NOW(), hold_id=$2, roster_json=$3, updated_at=NOW()
-     WHERE challenge_id=$4
-       AND lower(side::text) = ANY($5::text[])
-`, [memberId, holdId, rosterSeed, ch_id, sideTokens(sideNum)]);
+          WHERE challenge_id=$4
+            AND lower(side::text) = ANY($5::text[])`,
+        [memberId, holdId, rosterSeed, ch_id, sideTokens(sideNum)]
+      );
 
+      // 5) advance status
       const isSecond = !!other?.claimed_by_member_id;
       if (isSecond) {
         await cli.query(`UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`, [ch_id]);
@@ -164,6 +191,7 @@ router.post('/claim', async (req, res) => {
     res.status(400).json({ ok:false, error: e.message });
   }
 });
+
 
 /* ===========================
    SWAP LINEUP (bench <-> starter)
