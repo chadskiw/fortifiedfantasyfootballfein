@@ -45,11 +45,31 @@ router.get('/api/h2h/open', async (req,res)=>{
   res.json({ ok:true, items: rows });
 });
 // --- Helpers ---
+// Replace your old getMemberId(req) with this:
+
 async function getMemberId(req) {
-  const me = req.cookies?.ff_member_id || null;
-  if (!me) throw new Error('not_authenticated');
-  return String(me);
+  // Build an origin that works behind proxies/CF/Render
+  const origin =
+    process.env.INTERNAL_ORIGIN ||
+    `${(req.headers['x-forwarded-proto'] || req.protocol || 'https')}://${(req.headers['x-forwarded-host'] || req.headers.host)}`;
+
+  const r = await fetch(`./identity/me`, {
+    headers: {
+      // forward auth cookies so /api/identity/me can resolve the session
+      cookie: req.headers.cookie || ''
+    }
+  });
+
+  if (!r.ok) throw new Error('not_authenticated');
+
+  const me = await r.json();
+  const id =
+    me.member_id || me.memberId || me.identity?.member_id || me.identity?.memberId;
+
+  if (!id) throw new Error('not_authenticated');
+  return String(id);
 }
+
 
 async function withTx(fn) {
   const cli = await pool.connect();
