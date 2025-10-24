@@ -114,13 +114,13 @@ router.post('/claim', async (req, res) => {
     if (!ch_id || !sideNum) return res.status(400).json({ ok:false, error:'missing_args' });
 
     const out = await withTx(async (cli) => {
-      const { rows: sides } = await cli.query(
+      const { rows: [ch] } = await cli.query(
    `SELECT side, league_id, team_id, team_name, claimed_by_member_id, hold_id, locked_at, roster_json
       FROM ff_challenge_side
      WHERE challenge_id=$1
      FOR UPDATE`, [ch_id]);
- const meSide = sides.find(s => sideToNum(s.side) === sideNum);
- const other  = sides.find(s => sideToNum(s.side) !== sideNum);
+ const meSide = ch.find(s => sideToNum(s.ch) === sideNum);
+ const other  = ch.find(s => sideToNum(s.ch) !== sideNum);
       if (!meSide) throw new Error('side_not_found');
       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
