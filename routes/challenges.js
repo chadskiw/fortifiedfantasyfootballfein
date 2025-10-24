@@ -138,7 +138,12 @@ async function readChallengeAggregate(id) {
                   'claimed_by_member_id', s.owner_member_id,
                   'owner_member_id', s.owner_member_id,
                   'locked_at', s.locked_at,
-                  'points_final', s.points_final
+                  'points_final', s.points_final,
+                  -- NEW: expose roster snapshots + counts
+                  'lineup', s.lineup_json,
+                  'bench',  s.bench_json,
+                  'lineup_count', COALESCE(jsonb_array_length(COALESCE(s.lineup_json->'starters','[]'::jsonb)),0),
+                  'bench_count',  COALESCE(jsonb_array_length(COALESCE(s.bench_json,'[]'::jsonb)),0)
                 )
                 ORDER BY s.side
               ) FILTER (WHERE s.challenge_id IS NOT NULL),
@@ -152,6 +157,7 @@ async function readChallengeAggregate(id) {
   );
   return rows[0] || null;
 }
+
 // #endregion helpers-aggregate
 
 // ============================= ROUTES =============================
