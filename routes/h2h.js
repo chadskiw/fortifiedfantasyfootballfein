@@ -105,6 +105,12 @@ router.get('/open', async (req, res) => {
     res.status(400).json({ ok:false, error: e.message });
   }
 });
+// put near the other helpers in routes/h2h.js
+function toInt(x){
+  const s = String(x ?? '').replace(/[^\d-]/g, ''); // strips commas, spaces, currency
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : 0;
+}
 
 /* ===========================
    CLAIM A SIDE
@@ -134,12 +140,16 @@ router.post('/claim', async (req, res) => {
       if (!['open','pending'].includes(ch.status)) throw new Error('challenge_not_open');
 
       // (optional) if stake_points is 0 in DB but client sent one, persist it now
-      let stake = Number(ch.stake_points || 0);
-      if (!stake && stake_points) {
-        stake = Math.max(0, Number(stake_points));
-        await cli.query(`UPDATE ff_challenge SET stake_points=$2, updated_at=NOW() WHERE id=$1`, [ch_id, stake]);
-      }
-      if (stake <= 0) throw new Error('invalid_stake');
+ let stake = toInt(ch.stake_points);
+ const bodyStake = toInt(stake_points);
+ if (stake <= 0 && bodyStake > 0) {
+   stake = bodyStake;
+   await cli.query(
+     `UPDATE ff_challenge SET stake_points=$2, updated_at=NOW() WHERE id=$1`,
+     [ch_id, stake]
+   );
+ }
+ if (stake <= 0) throw new Error('invalid_stake');
 
       // 2) lock sides
       const { rows: sides } = await cli.query(
