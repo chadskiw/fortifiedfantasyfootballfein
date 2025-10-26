@@ -26,14 +26,26 @@ async function getMemberId(req){
   if(!id) throw new Error('not_authenticated');
   return String(id);
 }
-async function availablePoints(cli, memberId){
+async function availablePoints(cli, memberId) {
   const { rows:[w] } = await cli.query(`
-    WITH ledger AS (SELECT COALESCE(SUM(delta_points),0) AS total FROM ff_points_credits WHERE member_id=$1),
-         holds  AS (SELECT COALESCE(SUM(amount_held),0)   AS held  FROM ff_holds WHERE member_id=$1 AND status='held' AND expires_at > NOW())
-    SELECT (ledger.total - holds.held) AS available FROM ledger, holds
+    WITH credits AS (
+      SELECT COALESCE(SUM(points),0) AS pts
+      FROM ff_points_credits
+      WHERE member_id = $1
+    ),
+    holds AS (
+      SELECT COALESCE(SUM(amount_held),0) AS held
+      FROM ff_holds
+      WHERE member_id = $1
+        AND status = 'held'
+    )
+    SELECT (credits.pts - holds.held) AS available
+    FROM credits, holds
   `, [memberId]);
+
   return Number(w?.available || 0);
 }
+
 const idemKey = (o)=> crypto.createHash('sha256').update(JSON.stringify(o)).digest('hex').slice(0,40);
 const newId   = (p)=> `${p}_${crypto.randomBytes(9).toString('hex')}`;
 
