@@ -28,7 +28,7 @@ async function getMemberId(req){
 }
 async function availablePoints(cli, memberId){
   const { rows:[w] } = await cli.query(`
-    WITH ledger AS (SELECT COALESCE(SUM(delta_points),0) AS total FROM ff_points_ledger WHERE member_id=$1),
+    WITH ledger AS (SELECT COALESCE(SUM(delta_points),0) AS total FROM ff_points_credits WHERE member_id=$1),
          holds  AS (SELECT COALESCE(SUM(amount_held),0)   AS held  FROM ff_holds WHERE member_id=$1 AND status='held' AND expires_at > NOW())
     SELECT (ledger.total - holds.held) AS available FROM ledger, holds
   `, [memberId]);
