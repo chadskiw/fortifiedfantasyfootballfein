@@ -14,6 +14,8 @@ const espnConnectRouter = require('./routes/espnconnect');
 const coinsignalRouter = require('./routes/coinsignal');
 const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
+const walletsRoutes = require('./routes/wallets');
+
 // server.js
 const playerh2h = require('./routes/playerh2h');
 const playerMeta = require('./routes/playerMeta'); // path to the file from the canvas
