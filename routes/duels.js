@@ -57,7 +57,7 @@ const newId   = (p)=> `${p}_${crypto.randomBytes(9).toString('hex')}`;
 router.post('/offer', async (req,res)=>{
   try{
     const memberId = await getMemberId(req);
-    const { season, week, scoring='PPR', playerA, playerB, amount } = req.body || {};
+    const { season, week, playerA, playerB, amount } = req.body || {};
     const stake = Math.max(0, Number(amount||0));
     if(!season || !week || !playerA || !playerB || !stake) return res.status(400).json({ ok:false, error:'missing_args' });
 
@@ -70,9 +70,9 @@ router.post('/offer', async (req,res)=>{
 
       // parent
       await cli.query(`
-        INSERT INTO ff_duel (id, season, week, scoring, status, stake_points, created_by_member_id, updated_at, created_at)
-        VALUES ($1,$2,$3,$4,'pending',$5,$6,NOW(),NOW())
-      `, [duelId, season, week, String(scoring).toUpperCase(), stake, memberId]);
+        INSERT INTO ff_duel (id, season, week, status, stake_points, created_by_member_id, updated_at, created_at)
+        VALUES ($1,$2,$3,'pending',$4,$5,NOW(),NOW())
+      `, [duelId, season, week, stake, memberId]);
 
       // sides (A is the offerer by default)
       await cli.query(`
@@ -154,7 +154,7 @@ router.post('/accept', async (req,res)=>{
 router.get('/:id', async (req,res)=>{
   try{
     const { id } = req.params;
-    const { rows:[duel] } = await pool.query(`SELECT id, season, week, scoring, status, stake_points, created_by_member_id, updated_at FROM ff_duel WHERE id=$1`, [id]);
+    const { rows:[duel] } = await pool.query(`SELECT id, season, week, status, stake_points, created_by_member_id, updated_at FROM ff_duel WHERE id=$1`, [id]);
     if(!duel) return res.status(404).json({ ok:false, error:'not_found' });
     const { rows:sides } = await pool.query(`SELECT side, player_id, player_name, claimed_by_member_id, hold_id, locked_at FROM ff_duel_side WHERE duel_id=$1 ORDER BY side`, [id]);
     res.json({ ok:true, duel: { ...duel, sides } });
@@ -169,7 +169,7 @@ router.get('/my/list', async (req,res)=>{
     const memberId = await getMemberId(req);
     const states = String(req.query.states||'pending,locked').split(',').map(s=>s.trim());
     const { rows } = await pool.query(`
-      SELECT d.id, d.season, d.week, d.scoring, d.status, d.stake_points, d.updated_at,
+      SELECT d.id, d.season, d.week, d.status, d.stake_points, d.updated_at,
              jsonb_agg(jsonb_build_object('side', s.side, 'player_id', s.player_id, 'player_name', s.player_name, 'claimed_by_member_id', s.claimed_by_member_id) ORDER BY s.side) AS sides
       FROM ff_duel d
       JOIN ff_duel_side s ON s.duel_id = d.id
