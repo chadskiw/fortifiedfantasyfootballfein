@@ -117,6 +117,7 @@ app.use('/api/points', require('./routes/points'));
 app.use('/api/duels',  require('./routes/duels'));
 app.use('/api/h2h',    require('./routes/h2h'));
 app.use('/api/withdraws', require('./routes/withdraws'));
+app.use('/api/wallets', walletsRoutes(pool));
 
 // ===== CORS (CF fronted) =====
 const allow = {
