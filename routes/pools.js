@@ -17,7 +17,7 @@ try {
   const mod = require('../src/db/pool');
   pgPool = mod.pool || mod; // prefer named export "pool"
 } catch (e) {
-  throw new Error('Failed to require ../pool (pg Pool). Make sure pool.js exports a Pool instance.');
+  throw new Error('Failed to require ../../src/db/pool (pg Pool). Make sure src/db/pool.js exports a Pool instance.');
 }
 
 async function hasColumn(client, table, col) {
@@ -106,7 +106,8 @@ module.exports = router;
 =====================================================
 Mount in server.js
 -----------------------------------------------------
-
+const poolsPreview = require('./routes/pools.preview');
+app.use('/api/pools', poolsPreview);
 
 =====================================================
 Manual tests (curl)
