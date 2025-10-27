@@ -15,6 +15,7 @@ const coinsignalRouter = require('./routes/coinsignal');
 const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
 const walletsRoutes = require('./routes/wallets');
+const poolsPreview = require('./routes/pools.preview');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -203,7 +204,7 @@ app.use('/api/espnconnect', espnConnectRouter);
     const r = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2`, [table, col]);
     return r.rows[0]?.data_type || null;
   }
-
+app.use('/api/pools', poolsPreview);
   // GET /api/ff/teams?season=2025
   app.get('/teams', async (req,res)=>{
     try{
