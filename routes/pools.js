@@ -1,39 +1,79 @@
 'use strict';
 
-// routes/pools.preview.js (hardened)
-// POST /api/pools/preview
-// Body: { season, weeks[], teamIds[], leagueIds[], scoring[] }
-// Notes:
-//  - Zips leagueIds[] and teamIds[] 1:1 (no cross product)
-//  - Detects ff_pools points column name dynamically
-//  - Casts league_id to text for safe joins
-//  - Extra-safe pool import with multi-path fallback
+// routes/pools.js (hardened)
+// Endpoints:
+//   POST /api/pools/preview
+//   POST /api/pools/update
+//   GET  /api/pools/preview/health
+//
+// Features:
+//  - Robust Pool resolution (multiple paths + fallback to env DATABASE_URL)
+//  - Zipped pairing of leagueIds[] and teamIds[]
+//  - ff_pools points column autodetect: points | score | total_points
+//  - league_id cast safety in joins/inserts
+//  - Explicit error JSON to avoid opaque 500s
 
 const express = require('express');
 const router = express.Router();
 
-// --- Robust pg Pool import (multi-path fallback) ---
+// -------- pg Pool resolution (robust) --------
 let pgPool;
-(function resolvePool(){
+function getPool() {
+  if (pgPool) return pgPool;
+
   const candidates = [
-    '../src/db/pool' // common in your repo
-
+    '../../src/db/pool',
+    '../src/db/pool',
+    './src/db/pool',
+    '../../db/pool',
+    '../db/pool',
+    './db/pool',
+    '../../pool',
+    '../pool',
+    './pool',
   ];
-  let lastErr;
-  for(const p of candidates){
-    try{
-      const mod = require(p);
-      pgPool = mod.pool || mod; // allow { pool } or default export
-      if(pgPool) return;
-    }catch(e){ lastErr = e; }
-  }
-  throw new Error('Unable to load a pg Pool from known paths. Last error: '+(lastErr?.message||'unknown'));
-})();
 
-// --- Helpers ---
+  for (const p of candidates) {
+    try {
+      const mod = require(p);
+      const maybe = mod.pool || mod;
+      if (maybe && typeof maybe.connect === 'function') {
+        pgPool = maybe;
+        return pgPool;
+      }
+    } catch (_) { /* try next */ }
+  }
+
+  // Fallback: build directly from env
+  const { Pool } = require('pg');
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  });
+  return pgPool;
+}
+
+async function withClient(fn, res) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    return await fn(client);
+  } catch (e) {
+    // Surface exact cause to the caller
+    return res.status(500).json({ ok: false, error: e.message, stack: e.stack });
+  } finally {
+    client.release();
+  }
+}
+
+// -------- schema helpers --------
 async function hasColumn(client, table, col) {
-  const q = `SELECT 1 FROM information_schema.columns
-             WHERE table_schema='public' AND table_name=$1 AND column_name=$2 LIMIT 1`;
+  const q = `SELECT 1
+               FROM information_schema.columns
+              WHERE table_schema='public'
+                AND table_name=$1
+                AND column_name=$2
+              LIMIT 1`;
   const r = await client.query(q, [table, col]);
   return r.rowCount > 0;
 }
@@ -45,10 +85,20 @@ async function detectPointsColumn(client) {
   throw new Error("ff_pools is missing a points column (expected 'points', 'score', or 'total_points').");
 }
 
+async function leagueIdDatatype(client) {
+  const q = `SELECT data_type
+               FROM information_schema.columns
+              WHERE table_schema='public'
+                AND table_name='ff_pools'
+                AND column_name='league_id'`;
+  const r = await client.query(q);
+  return r.rows[0]?.data_type || 'text';
+}
+
 function normalizePayload(body) {
   const season = Number(body?.season);
-  const weeks = (Array.isArray(body?.weeks) ? body.weeks : []).map(n => Number(n)).filter(Number.isFinite);
-  const teamIds = (Array.isArray(body?.teamIds) ? body.teamIds : []).map(n => Number(n)).filter(Number.isFinite);
+  const weeks = (Array.isArray(body?.weeks) ? body.weeks : []).map(Number).filter(Number.isFinite);
+  const teamIds = (Array.isArray(body?.teamIds) ? body.teamIds : []).map(Number).filter(Number.isFinite);
   const leagueIds = (Array.isArray(body?.leagueIds) ? body.leagueIds : []).map(String);
   const scoring = (Array.isArray(body?.scoring) ? body.scoring : []).map(s => String(s).toUpperCase());
   return { season, weeks, teamIds, leagueIds, scoring };
@@ -65,61 +115,127 @@ function validatePayload(p) {
   return null;
 }
 
-// --- Route ---
-router.post('/preview', express.json(), async (req, res) => {
-  const client = await pgPool.connect();
-  try {
+// -------- Health check: verify points column and db connection --------
+router.get('/preview/health', (req, res) =>
+  withClient(async (client) => {
+    const pointsCol = await detectPointsColumn(client);
+    // trivial select to ensure DB works
+    await client.query('SELECT 1');
+    return res.json({ ok: true, pointsColumn: pointsCol });
+  }, res)
+);
+
+// -------- Preview --------
+router.post('/preview', express.json(), (req, res) =>
+  withClient(async (client) => {
     const p = normalizePayload(req.body);
     const err = validatePayload(p);
-    if (err) return res.status(400).json({ error: err });
+    if (err) return res.status(400).json({ ok: false, error: err });
 
     const pointsCol = await detectPointsColumn(client);
 
     const sql = `
       WITH pairs AS (
         SELECT * FROM unnest($2::text[], $3::int[]) AS s(league_id, team_id)
-      ), t AS (
+      ),
+      t AS (
         SELECT season, league_id::text AS league_id, team_id, week, scoring, points AS team_points
-        FROM ff_team_weekly_points
-        WHERE season=$1 AND week = ANY($4) AND scoring = ANY($5)
+          FROM ff_team_weekly_points
+         WHERE season=$1
+           AND week = ANY($4)
+           AND scoring = ANY($5)
       )
-      SELECT t.season, t.league_id, t.team_id, f.team_name, t.week, t.scoring, t.team_points,
+      SELECT t.season,
+             t.league_id,
+             t.team_id,
+             f.team_name,
+             t.week,
+             t.scoring,
+             t.team_points,
              p."${pointsCol}" AS pool_points
-      FROM t
-      JOIN pairs s ON s.league_id=t.league_id AND s.team_id=t.team_id
-      LEFT JOIN ff_pools p
-        ON p.season=t.season AND p.week=t.week AND p.team_id=t.team_id
-       AND p.scoring=t.scoring AND p.league_id::text=t.league_id
-      LEFT JOIN ff_sport_ffl f
-        ON f.season=t.season AND f.team_id=t.team_id AND f.league_id::text=t.league_id
-      ORDER BY t.week, t.league_id, t.team_id, t.scoring`;
+        FROM t
+        JOIN pairs s
+          ON s.league_id = t.league_id
+         AND s.team_id   = t.team_id
+   LEFT JOIN ff_pools p
+          ON p.season   = t.season
+         AND p.week     = t.week
+         AND p.team_id  = t.team_id
+         AND p.scoring  = t.scoring
+         AND p.league_id::text = t.league_id
+   LEFT JOIN ff_sport_ffl f
+          ON f.season   = t.season
+         AND f.team_id  = t.team_id
+         AND f.league_id::text = t.league_id
+    ORDER BY t.week, t.league_id, t.team_id, t.scoring`;
 
     const params = [
       p.season,
       p.leagueIds.map(String),
       p.teamIds,
       p.weeks,
-      p.scoring
+      p.scoring,
     ];
 
     const r = await client.query(sql, params);
-    return res.json({ ok:true, rows: r.rows, count: r.rowCount, pointsColumn: pointsCol });
-  } catch (e) {
-    // Bubble the message so the UI can show why it failed
-    return res.status(500).json({ ok:false, error: e.message });
-  } finally {
-    client.release();
-  }
-});
+    return res.json({ ok: true, pointsColumn: pointsCol, count: r.rowCount, rows: r.rows });
+  }, res)
+);
 
-// Optional: a quick health check to debug 500s without payload
-router.get('/preview/health', async (req,res)=>{
-  const client = await pgPool.connect();
-  try{
+// -------- Update (Apply) --------
+router.post('/update', express.json(), (req, res) =>
+  withClient(async (client) => {
+    const p = normalizePayload(req.body);
+    const err = validatePayload(p);
+    if (err) return res.status(400).json({ ok: false, error: err });
+
     const pointsCol = await detectPointsColumn(client);
-    res.json({ ok:true, pointsColumn: pointsCol });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-  finally{ client.release(); }
-});
+    const dt = await leagueIdDatatype(client);
+    const castExpr = ['bigint','integer','numeric','smallint','decimal'].includes(dt) ? `::${dt}` : '::text';
+
+    await client.query('BEGIN');
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ff_pools_key
+                          ON ff_pools(season, league_id, team_id, week, scoring);`);
+
+    const sql = `
+      WITH pairs AS (
+        SELECT * FROM unnest($2::text[], $3::int[]) AS s(league_id, team_id)
+      ),
+      src AS (
+        SELECT season, league_id::text AS league_id, team_id, week, scoring, points
+          FROM ff_team_weekly_points
+         WHERE season=$1
+           AND week = ANY($4)
+           AND scoring = ANY($5)
+      )
+      INSERT INTO ff_pools (season, league_id, team_id, week, scoring, "${pointsCol}", created_at, updated_at)
+      SELECT s.season,
+             (s.league_id||'')${castExpr} AS league_id,
+             s.team_id,
+             s.week,
+             s.scoring,
+             s.points,
+             now(),
+             now()
+        FROM src s
+        JOIN pairs p
+          ON p.league_id = s.league_id
+         AND p.team_id   = s.team_id
+  ON CONFLICT (season, league_id, team_id, week, scoring)
+    DO UPDATE SET "${pointsCol}" = EXCLUDED."${pointsCol}",
+                  updated_at = now();`;
+
+    const r = await client.query(sql, [
+      p.season,
+      p.leagueIds.map(String),
+      p.teamIds,
+      p.weeks,
+      p.scoring,
+    ]);
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, changed: r.rowCount || 0 });
+  }, res)
+);
 
 module.exports = router;
