@@ -15,7 +15,7 @@ const coinsignalRouter = require('./routes/coinsignal');
 const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
 const walletsRoutes = require('./routes/wallets');
-const poolsPreview = require('./routes/pools.preview');
+const poolsPreview = require('./routes/pools');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
