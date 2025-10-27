@@ -205,7 +205,7 @@ app.use('/api/espnconnect', espnConnectRouter);
   }
 
   // GET /api/ff/teams?season=2025
-  router.get('/teams', async (req,res)=>{
+  app.get('/teams', async (req,res)=>{
     try{
       const { season } = req.query;
       if(!season) return res.status(400).json({error:'Season is required.'});
@@ -216,7 +216,7 @@ app.use('/api/espnconnect', espnConnectRouter);
   });
 
   // POST /api/pools/preview { season, weeks[], teamIds[], leagueIds[], scoring[] }
-  router.post('/preview', express.json(), async (req,res)=>{
+  app.post('/preview', express.json(), async (req,res)=>{
     try{
       const {season, weeks, teamIds, leagueIds, scoring} = req.body||{};
       if(!season || !Array.isArray(weeks) || !weeks.length || !Array.isArray(teamIds) || !teamIds.length || !Array.isArray(leagueIds) || leagueIds.length !== teamIds.length || !Array.isArray(scoring) || !scoring.length){
@@ -249,7 +249,7 @@ app.use('/api/espnconnect', espnConnectRouter);
   });
 
   // POST /api/pools/update { season, weeks[], teamIds[], leagueIds[], scoring[] }
-  router.post('/update', express.json(), async (req,res)=>{
+  app.post('/update', express.json(), async (req,res)=>{
     const client = await pool.connect();
     try{
       const {season, weeks, teamIds, leagueIds, scoring} = req.body||{};
