@@ -192,6 +192,104 @@ app.use('/api/espn', espnConnectRouter); // serves GET /api/espn/link page + POS
 app.use('/api/platforms/espn', espnAuthRouter({ pool, cookieDomain: 'fortifiedfantasy.com' }));
 app.use('/api/espnconnect', espnConnectRouter);
 
+
+
+  // helpers to introspect ff_pools schema
+  async function hasColumn(table, col){
+    const r = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2 LIMIT 1`, [table, col]);
+    return r.rowCount > 0;
+  }
+  async function getColumnType(table, col){
+    const r = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2`, [table, col]);
+    return r.rows[0]?.data_type || null;
+  }
+
+  // GET /api/ff/teams?season=2025
+  router.get('/teams', async (req,res)=>{
+    try{
+      const { season } = req.query;
+      if(!season) return res.status(400).json({error:'Season is required.'});
+      const q = `SELECT DISTINCT season, league_id::text AS league_id, team_id, team_name FROM ff_sport_ffl WHERE season=$1 ORDER BY league_id, team_id`;
+      const r = await pool.query(q, [season]);
+      res.json({ teams: r.rows.map(x=>({ league_id:x.league_id, team_id:x.team_id, team_name:x.team_name })) });
+    }catch(e){ res.status(500).json({error:e.message}); }
+  });
+
+  // POST /api/pools/preview { season, weeks[], teamIds[], leagueIds[], scoring[] }
+  router.post('/preview', express.json(), async (req,res)=>{
+    try{
+      const {season, weeks, teamIds, leagueIds, scoring} = req.body||{};
+      if(!season || !Array.isArray(weeks) || !weeks.length || !Array.isArray(teamIds) || !teamIds.length || !Array.isArray(leagueIds) || leagueIds.length !== teamIds.length || !Array.isArray(scoring) || !scoring.length){
+        return res.status(400).json({error:'Season, weeks[], scoring[], and matching leagueIds[] and teamIds[] arrays are required.'});
+      }
+      const pointsCol = (await hasColumn('ff_pools','points')) ? 'points' : (await hasColumn('ff_pools','score')) ? 'score' : (await hasColumn('ff_pools','total_points')) ? 'total_points' : null;
+      if(!pointsCol) return res.status(500).json({error:"ff_pools is missing a points column (expected 'points', 'score', or 'total_points')."});
+
+      const q = `
+        WITH pairs AS (
+          SELECT unnest($2::text[]) AS league_id, unnest($3::int[]) AS team_id
+        ), t AS (
+          SELECT season, league_id::text AS league_id, team_id, week, scoring, points AS team_points
+          FROM ff_team_weekly_points
+          WHERE season=$1 AND week = ANY($4) AND scoring = ANY($5)
+        )
+        SELECT t.season, t.league_id, t.team_id, f.team_name, t.week, t.scoring, t.team_points,
+               p."${pointsCol}" AS pool_points
+        FROM t
+        JOIN pairs s ON s.league_id=t.league_id AND s.team_id=t.team_id
+        LEFT JOIN ff_pools p
+          ON p.season=t.season AND p.week=t.week AND p.team_id=t.team_id
+         AND p.scoring=t.scoring AND p.league_id::text=t.league_id
+        LEFT JOIN ff_sport_ffl f
+          ON f.season=t.season AND f.team_id=t.team_id AND f.league_id::text=t.league_id
+        ORDER BY t.week, t.league_id, t.team_id, t.scoring`;
+      const r = await pool.query(q, [season, leagueIds.map(String), teamIds, weeks, scoring.map(s=>String(s).toUpperCase())]);
+      res.json({rows:r.rows});
+    }catch(e){ res.status(500).json({error:e.message}); }
+  });
+
+  // POST /api/pools/update { season, weeks[], teamIds[], leagueIds[], scoring[] }
+  router.post('/update', express.json(), async (req,res)=>{
+    const client = await pool.connect();
+    try{
+      const {season, weeks, teamIds, leagueIds, scoring} = req.body||{};
+      if(!season || !Array.isArray(weeks) || !weeks.length || !Array.isArray(teamIds) || !teamIds.length || !Array.isArray(leagueIds) || leagueIds.length !== teamIds.length || !Array.isArray(scoring) || !scoring.length){
+        return res.status(400).json({error:'Season, weeks[], scoring[], and matching leagueIds[] and teamIds[] arrays are required.'});
+      }
+      const pointsCol = (await hasColumn('ff_pools','points')) ? 'points' : (await hasColumn('ff_pools','score')) ? 'score' : (await hasColumn('ff_pools','total_points')) ? 'total_points' : null;
+      if(!pointsCol) return res.status(500).json({error:"ff_pools is missing a points column (expected 'points', 'score', or 'total_points')."});
+
+      // figure out how to cast league_id when inserting
+      const t = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='ff_pools' AND column_name='league_id'`);
+      const dt = t.rows[0]?.data_type || 'text';
+      const castExpr = ['bigint','integer','numeric','smallint','decimal'].includes(dt) ? `::${dt}` : '::text';
+
+      await client.query('BEGIN');
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ff_pools_key ON ff_pools(season, league_id, team_id, week, scoring);`);
+
+      const q = `
+        WITH pairs AS (
+          SELECT unnest($2::text[]) AS league_id, unnest($3::int[]) AS team_id
+        ), src AS (
+          SELECT season, league_id::text AS league_id, team_id, week, scoring, points
+          FROM ff_team_weekly_points
+          WHERE season=$1 AND week = ANY($4) AND scoring = ANY($5)
+        )
+        INSERT INTO ff_pools (season, league_id, team_id, week, scoring, "${pointsCol}", created_at, updated_at)
+        SELECT s.season, (s.league_id||'')${castExpr}, s.team_id, s.week, s.scoring, s.points, now(), now()
+        FROM src s
+        JOIN pairs p ON p.league_id=s.league_id AND p.team_id=s.team_id
+        ON CONFLICT (season, league_id, team_id, week, scoring)
+        DO UPDATE SET "${pointsCol}" = EXCLUDED."${pointsCol}", updated_at = now();`;
+      const r = await client.query(q, [season, leagueIds.map(String), teamIds, weeks, scoring.map(s=>String(s).toUpperCase())]);
+      await client.query('COMMIT');
+      res.json({ ok:true, updated:r.rowCount||0, inserted:0 });
+    }catch(e){ await client.query('ROLLBACK'); res.status(500).json({error:e.message, stack:e.stack}); }
+    finally{ client.release(); }
+  });
+
+
+
 // ===== Kona passthrough (ESPN reads) with masked-cred headers =====
 async function konaHandler(req, res) {
   try {
