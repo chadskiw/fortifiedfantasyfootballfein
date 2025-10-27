@@ -1,25 +1,36 @@
 'use strict';
 
-// routes/pools.preview.js
-// Implements POST /api/pools/preview
-// - Accepts { season, weeks[], teamIds[], leagueIds[], scoring[] }
-// - Returns comparison rows joining ff_team_weekly_points → ff_pools
-// - Robust to ff_pools points column name (points|score|total_points)
-// - Zips leagueIds[] and teamIds[] 1:1 to avoid cross-products
+// routes/pools.preview.js (hardened)
+// POST /api/pools/preview
+// Body: { season, weeks[], teamIds[], leagueIds[], scoring[] }
+// Notes:
+//  - Zips leagueIds[] and teamIds[] 1:1 (no cross product)
+//  - Detects ff_pools points column name dynamically
+//  - Casts league_id to text for safe joins
+//  - Extra-safe pool import with multi-path fallback
 
 const express = require('express');
 const router = express.Router();
 
-// Reuse your existing pg pool from pool.js
-// (supports both module.exports = pool and { pool })
+// --- Robust pg Pool import (multi-path fallback) ---
 let pgPool;
-try {
-  const mod = require('../src/db/pool');
-  pgPool = mod.pool || mod; // prefer named export "pool"
-} catch (e) {
-  throw new Error('Failed to require ../../src/db/pool (pg Pool). Make sure src/db/pool.js exports a Pool instance.');
-}
+(function resolvePool(){
+  const candidates = [
+    '../src/db/pool' // common in your repo
 
+  ];
+  let lastErr;
+  for(const p of candidates){
+    try{
+      const mod = require(p);
+      pgPool = mod.pool || mod; // allow { pool } or default export
+      if(pgPool) return;
+    }catch(e){ lastErr = e; }
+  }
+  throw new Error('Unable to load a pg Pool from known paths. Last error: '+(lastErr?.message||'unknown'));
+})();
+
+// --- Helpers ---
 async function hasColumn(client, table, col) {
   const q = `SELECT 1 FROM information_schema.columns
              WHERE table_schema='public' AND table_name=$1 AND column_name=$2 LIMIT 1`;
@@ -54,6 +65,7 @@ function validatePayload(p) {
   return null;
 }
 
+// --- Route ---
 router.post('/preview', express.json(), async (req, res) => {
   const client = await pgPool.connect();
   try {
@@ -63,7 +75,6 @@ router.post('/preview', express.json(), async (req, res) => {
 
     const pointsCol = await detectPointsColumn(client);
 
-    // Build and run preview query
     const sql = `
       WITH pairs AS (
         SELECT * FROM unnest($2::text[], $3::int[]) AS s(league_id, team_id)
@@ -92,56 +103,23 @@ router.post('/preview', express.json(), async (req, res) => {
     ];
 
     const r = await client.query(sql, params);
-    return res.json({ rows: r.rows, count: r.rowCount });
+    return res.json({ ok:true, rows: r.rows, count: r.rowCount, pointsColumn: pointsCol });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    // Bubble the message so the UI can show why it failed
+    return res.status(500).json({ ok:false, error: e.message });
   } finally {
     client.release();
   }
 });
 
+// Optional: a quick health check to debug 500s without payload
+router.get('/preview/health', async (req,res)=>{
+  const client = await pgPool.connect();
+  try{
+    const pointsCol = await detectPointsColumn(client);
+    res.json({ ok:true, pointsColumn: pointsCol });
+  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
+  finally{ client.release(); }
+});
+
 module.exports = router;
-
-/*
-=====================================================
-Mount in server.js
------------------------------------------------------
-const poolsPreview = require('./routes/pools.preview');
-app.use('/api/pools', poolsPreview);
-
-=====================================================
-Manual tests (curl)
------------------------------------------------------
-# 1) Basic preview for a single (leagueId, teamId) pair and weeks 1-3
-curl -sS -X POST http://localhost:3000/api/pools/preview \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "season": 2025,
-        "weeks": [1,2,3],
-        "scoring": ["STD","HALF","PPR"],
-        "leagueIds": ["1634950747"],
-        "teamIds": [7]
-      }' | jq '.'
-
-# 2) Multiple paired teams across leagues (index-aligned)
-curl -sS -X POST http://localhost:3000/api/pools/preview \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "season": 2025,
-        "weeks": [1,2,3,4],
-        "scoring": ["PPR"],
-        "leagueIds": ["1634950747","1888700373"],
-        "teamIds": [7,4]
-      }' | jq '.'
-
-# 3) Error case: mismatched array lengths
-curl -sS -X POST http://localhost:3000/api/pools/preview \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "season": 2025,
-        "weeks": [1],
-        "scoring": ["PPR"],
-        "leagueIds": ["1634950747"],
-        "teamIds": [7,4]
-      }' | jq '.'
-*/
