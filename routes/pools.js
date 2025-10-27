@@ -23,15 +23,7 @@ function getPool() {
   if (pgPool) return pgPool;
 
   const candidates = [
-    '../../src/db/pool',
     '../src/db/pool',
-    './src/db/pool',
-    '../../db/pool',
-    '../db/pool',
-    './db/pool',
-    '../../pool',
-    '../pool',
-    './pool',
   ];
 
   for (const p of candidates) {
