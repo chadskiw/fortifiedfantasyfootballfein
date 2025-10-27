@@ -162,6 +162,39 @@ router.post('/preview', express.json(), (req, res) =>
     return res.json({ ok: true, usedPools: hasPools, pointsColumn: pointsCol, poolsHasScoring, count: r.rowCount, rows: r.rows });
   }, res)
 );
+// --- add under other routes in routes/pools.js ---
+router.get('/points', async (req, res) => withClient(async (client) => {
+  const season   = Number(req.query.season);
+  if (!Number.isFinite(season)) return res.status(400).json({ ok:false, error:'season is required' });
+
+  // optional filters
+  const weeks    = (req.query.weeks?.split(',').map(n=>+n).filter(Number.isFinite)) || null;  // e.g. "1,2,3"
+  const scoring  = (req.query.scoring ? String(req.query.scoring).split(',').map(s=>s.toUpperCase()) : null); // "PPR,HALF"
+  // allow multiple leagueIds/teamIds via repeat or comma
+  const leagueIds= (Array.isArray(req.query.leagueIds) ? req.query.leagueIds : (req.query.leagueIds?.split(',')||[])).map(String);
+  const teamIds  = (Array.isArray(req.query.teamIds)   ? req.query.teamIds   : (req.query.teamIds?.split(',')||[])).map(n=>+n).filter(Number.isFinite);
+
+  const wh = [`p.season = $1`];
+  const args = [season];
+  let i = 2;
+
+  if (weeks?.length)   { wh.push(`p.week    = ANY($${i++}::int[])`);   args.push(weeks); }
+  if (scoring?.length) { wh.push(`p.scoring = ANY($${i++}::text[])`);  args.push(scoring); }
+  if (leagueIds.length){ wh.push(`p.league_id::text = ANY($${i++}::text[])`); args.push(leagueIds.map(String)); }
+  if (teamIds.length)  { wh.push(`p.team_id = ANY($${i++}::int[])`);   args.push(teamIds); }
+
+  const sql = `
+    SELECT p.season, p.league_id::text AS league_id, p.team_id, p.week, p.scoring, p.points,
+           f.team_name
+      FROM ff_pools p
+ LEFT JOIN ff_sport_ffl f
+        ON f.season=p.season AND f.team_id=p.team_id AND f.league_id::text=p.league_id::text
+     WHERE ${wh.join(' AND ')}
+  ORDER BY p.week, p.league_id, p.team_id, p.scoring`;
+
+  const r = await client.query(sql, args);
+  return res.json({ ok:true, count:r.rowCount, rows:r.rows });
+}, res));
 
 // -------- Update (Apply) --------
 router.post('/update', express.json(), (req, res) =>
