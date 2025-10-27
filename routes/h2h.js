@@ -226,13 +226,46 @@ router.post('/claim', async (req, res) => {
       );
 
       // 5) advance status
-      const isSecond = !!other?.claimed_by_member_id;
-      if (isSecond) {
-        await cli.query(`UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`, [ch_id]);
-        await cli.query(`UPDATE ff_challenge_side SET locked_at=NOW(), updated_at=NOW() WHERE challenge_id=$1`, [ch_id]);
-      } else if (ch.status === 'open') {
-        await cli.query(`UPDATE ff_challenge SET status='pending', updated_at=NOW() WHERE id=$1`, [ch_id]);
-      }
+// 5) advance status (and snapshot rosters when locking)
+const isSecond = !!other?.claimed_by_member_id;
+
+if (isSecond) {
+  // mark challenge locked
+  await cli.query(
+    `UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`,
+    [ch_id]
+  );
+
+  // freeze both sides' lineups at lock time
+  await cli.query(
+    `
+    UPDATE ff_challenge_side
+       SET locked_at = NOW(),
+           roster_locked_json = CASE
+             -- prefer working roster if present and shaped as {starters,bench}
+             WHEN roster_json IS NOT NULL
+                  AND roster_json::text <> '{}'
+                  AND roster_json ? 'starters'
+                  AND roster_json ? 'bench'
+               THEN roster_json
+             -- otherwise build from legacy lineup/bench arrays
+             ELSE jsonb_build_object(
+                    'starters', COALESCE(lineup_json, '[]'::jsonb),
+                    'bench',    COALESCE(bench_json,  '[]'::jsonb)
+                  )
+           END,
+           updated_at = NOW()
+     WHERE challenge_id = $1
+    `,
+    [ch_id]
+  );
+} else if (ch.status === 'open') {
+  await cli.query(
+    `UPDATE ff_challenge SET status='pending', updated_at=NOW() WHERE id=$1`,
+    [ch_id]
+  );
+}
+
 
       const newAvail = await availablePoints(cli, memberId);
       return { status: isSecond ? 'locked' : 'pending', hold_id: holdId, available_points: newAvail, side: sideNum };
