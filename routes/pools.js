@@ -36,6 +36,7 @@ router.get('/teams', async (req,res)=>{
 });
 
 // POST /api/pools/preview { season, weeks[], teamIds[], leagueIds[], scoring[] }
+// POST /api/pools/preview { season, weeks[], teamIds[], leagueIds[], scoring[] }
 router.post('/preview', express.json(), async (req,res)=>{
   try{
     const {season, weeks, teamIds, leagueIds, scoring} = req.body||{};
@@ -43,8 +44,9 @@ router.post('/preview', express.json(), async (req,res)=>{
        !Array.isArray(teamIds) || !teamIds.length ||
        !Array.isArray(leagueIds) || leagueIds.length !== teamIds.length ||
        !Array.isArray(scoring) || !scoring.length){
-      return res.status(400).json({error:'Season, weeks[], scoring[], and matching leagueIds[] and teamIds[] are required.'});
+      return res.status(400).json({error:'season, weeks[], scoring[], and matching leagueIds[] & teamIds[] are required.'});
     }
+
     const pointsCol = (await hasColumn('ff_pools','points')) ? 'points'
                     : (await hasColumn('ff_pools','score')) ? 'score'
                     : (await hasColumn('ff_pools','total_points')) ? 'total_points'
@@ -55,26 +57,66 @@ router.post('/preview', express.json(), async (req,res)=>{
       WITH pairs AS (
         SELECT unnest($2::text[]) AS league_id, unnest($3::text[]) AS team_id
       ),
-      t AS (
+      scor(scoring) AS (SELECT unnest($5::text[])),
+      -- Primary source: ff_team_weekly_points (already computed)
+      t_week AS (
         SELECT season,
                league_id::text AS league_id,
                team_id::text   AS team_id,
-               week, scoring, points AS team_points
+               week,
+               UPPER(scoring)  AS scoring,
+               points::numeric AS points,
+               1 AS pri
         FROM ff_team_weekly_points
-        WHERE season=$1 AND week = ANY($4) AND scoring = ANY($5)
+        WHERE season=$1 AND week = ANY($4) AND UPPER(scoring) = ANY($5)
+      ),
+      -- Fallback source: ff_team_points_cache (derive per requested scoring)
+      t_cache AS (
+        SELECT c.season,
+               (c.league_id)::text AS league_id,
+               (c.team_id)::text   AS team_id,
+               c.week,
+               UPPER(s.scoring)    AS scoring,
+               COALESCE(
+                 CASE WHEN UPPER(s.scoring)='PPR'  THEN ff_safe_to_numeric(to_jsonb(c)->>'ppr_points') END,
+                 CASE WHEN UPPER(s.scoring)='PPR'  THEN ff_safe_to_numeric(to_jsonb(c)->>'ppr') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half_points') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half_ppr') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'std_points') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'standard_points') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'std') END,
+                 ff_safe_to_numeric(to_jsonb(c)->>'points')
+               )::numeric AS points,
+               2 AS pri
+        FROM ff_team_points_cache c
+        JOIN scor s ON TRUE
+        WHERE c.season=$1 AND c.week = ANY($4)
+      ),
+      all_src AS (
+        SELECT * FROM t_week
+        UNION ALL
+        SELECT * FROM t_cache
+      ),
+      ranked AS (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY season, league_id, team_id, week, scoring ORDER BY pri) AS rn
+        FROM all_src
       )
-      SELECT t.season, t.league_id, t.team_id, f.team_name, t.week, t.scoring, t.team_points,
-             p."${pointsCol}" AS pool_points
-      FROM t
-      JOIN pairs s ON s.league_id=t.league_id AND s.team_id=t.team_id
+      SELECT a.season, a.league_id, a.team_id, f.team_name, a.week, a.scoring,
+             a.points AS team_points, p."${pointsCol}" AS pool_points
+      FROM ranked a
+      JOIN pairs s ON s.league_id=a.league_id AND s.team_id=a.team_id
       LEFT JOIN ff_pools p
-        ON p.season=t.season AND p.week=t.week
-       AND p.scoring=t.scoring
-       AND p.league_id::text=t.league_id
-       AND p.team_id::text  =t.team_id
+        ON p.season=a.season AND p.week=a.week
+       AND UPPER(p.scoring)=a.scoring
+       AND p.league_id::text=a.league_id
+       AND p.team_id::text  =a.team_id
       LEFT JOIN ff_sport_ffl f
-        ON f.season=t.season AND f.league_id::text=t.league_id AND f.team_id::text=t.team_id
-      ORDER BY t.week, t.league_id, t.team_id, t.scoring`;
+        ON f.season=a.season AND f.league_id::text=a.league_id AND f.team_id::text=a.team_id
+      WHERE a.rn=1
+      ORDER BY a.week, a.league_id, a.team_id, a.scoring`;
+
     const r = await pool.query(q, [
       season,
       leagueIds.map(String),
@@ -95,15 +137,15 @@ router.post('/update', express.json(), async (req,res)=>{
        !Array.isArray(teamIds) || !teamIds.length ||
        !Array.isArray(leagueIds) || leagueIds.length !== teamIds.length ||
        !Array.isArray(scoring) || !scoring.length){
-      return res.status(400).json({error:'Season, weeks[], scoring[], and matching leagueIds[] and teamIds[] are required.'});
+      return res.status(400).json({error:'season, weeks[], scoring[], and matching leagueIds[] & teamIds[] are required.'});
     }
+
     const pointsCol = (await hasColumn('ff_pools','points')) ? 'points'
                     : (await hasColumn('ff_pools','score')) ? 'score'
                     : (await hasColumn('ff_pools','total_points')) ? 'total_points'
                     : null;
     if(!pointsCol) return res.status(500).json({error:"ff_pools missing points column ('points' | 'score' | 'total_points')."});
 
-    // compute casts for league_id & team_id based on ff_pools schema
     const lidType = await getType('ff_pools','league_id');
     const tidType = await getType('ff_pools','team_id');
     const lidCast = ['bigint','integer','numeric','smallint','decimal'].includes(lidType) ? `::${lidType}` : '::text';
@@ -116,20 +158,48 @@ router.post('/update', express.json(), async (req,res)=>{
       WITH pairs AS (
         SELECT unnest($2::text[]) AS league_id, unnest($3::text[]) AS team_id
       ),
-      src AS (
-        SELECT season, league_id::text AS league_id, team_id::text AS team_id, week, scoring, points
+      scor(scoring) AS (SELECT unnest($5::text[])),
+      t_week AS (
+        SELECT season, league_id::text AS league_id, team_id::text AS team_id,
+               week, UPPER(scoring) AS scoring, points::numeric AS points, 1 AS pri
         FROM ff_team_weekly_points
-        WHERE season=$1 AND week = ANY($4) AND scoring = ANY($5)
+        WHERE season=$1 AND week = ANY($4) AND UPPER(scoring) = ANY($5)
+      ),
+      t_cache AS (
+        SELECT c.season, (c.league_id)::text AS league_id, (c.team_id)::text AS team_id,
+               c.week, UPPER(s.scoring) AS scoring,
+               COALESCE(
+                 CASE WHEN UPPER(s.scoring)='PPR'  THEN ff_safe_to_numeric(to_jsonb(c)->>'ppr_points') END,
+                 CASE WHEN UPPER(s.scoring)='PPR'  THEN ff_safe_to_numeric(to_jsonb(c)->>'ppr') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half_points') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half_ppr') END,
+                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'std_points') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'standard_points') END,
+                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'std') END,
+                 ff_safe_to_numeric(to_jsonb(c)->>'points')
+               )::numeric AS points,
+               2 AS pri
+        FROM ff_team_points_cache c
+        JOIN scor s ON TRUE
+        WHERE c.season=$1 AND c.week = ANY($4)
+      ),
+      all_src AS (SELECT * FROM t_week UNION ALL SELECT * FROM t_cache),
+      ranked AS (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY season, league_id, team_id, week, scoring ORDER BY pri) AS rn
+        FROM all_src
       )
       INSERT INTO ff_pools (season, league_id, team_id, week, scoring, "${pointsCol}", created_at, updated_at)
-      SELECT s.season,
-             (s.league_id||'')${lidCast},
-             (s.team_id||'')${tidCast},
-             s.week, s.scoring, s.points, now(), now()
-      FROM src s
-      JOIN pairs p ON p.league_id=s.league_id AND p.team_id=s.team_id
+      SELECT a.season,
+             (a.league_id||'')${lidCast},
+             (a.team_id||'')${tidCast},
+             a.week, a.scoring, a.points, now(), now()
+      FROM ranked a
+      JOIN pairs p ON p.league_id=a.league_id AND p.team_id=a.team_id
+      WHERE a.rn=1
       ON CONFLICT (season, league_id, team_id, week, scoring)
-      DO UPDATE SET "${pointsCol}" = EXCLUDED."${pointsCol}", updated_at = now();`;
+      DO UPDATE SET "${pointsCol}"=EXCLUDED."${pointsCol}", updated_at=now();`;
+
     const r = await client.query(q, [
       season,
       leagueIds.map(String),
@@ -137,7 +207,6 @@ router.post('/update', express.json(), async (req,res)=>{
       weeks,
       scoring.map(s=>String(s).toUpperCase())
     ]);
-
     await client.query('COMMIT');
     res.json({ ok:true, upserted: r.rowCount||0 });
   }catch(e){
