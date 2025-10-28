@@ -213,30 +213,37 @@ return res.json({
     }
 
     // No teamId provided → return all teams with mapped players
+// No teamId provided → return all teams with mapped players
 const teamsOut = teams.map(t => {
-  const players = mapEntriesToPlayers(t?.roster?.entries || [], week);
-// ...after you build `teamsOut`
-const ownership = {};
+  const teamId    = Number(t?.id);
+  const team_name = teamNameOf(t);
+  const entries   = t?.roster?.entries || [];
+  const players   = mapEntriesToPlayers(entries, week);
+  const totals    = teamTotalsFor(players);
+
+  return { teamId, team_name, totals, players };
+});
+
+// Build quick lookup maps (back-compat for older consumers)
+const ownership   = {};
 const acquisition = {};
 for (const t of teamsOut) {
   for (const pl of t.players || []) {
     if (pl.playerId != null) ownership[pl.playerId] = t.teamId;
-    if (pl.acquisitionType) acquisition[pl.playerId] = String(pl.acquisitionType).toUpperCase();
+    // if you later add pl.acquisitionType, this will populate:
+    if (pl.acquisitionType)  acquisition[pl.playerId] = String(pl.acquisitionType).toUpperCase();
   }
 }
 
+// Respond once, outside of any map() callback
 return res.json({
   ok: true,
   platform: 'espn',
   leagueId, season, week,
-  teams: teamsOut,        // <-- what the Draft page looks for
-  ownership,              // <-- keeps older consumers happy
+  teams: teamsOut,
+  ownership,
   acquisition
 });
-
-});
-
-
   } catch (e) {
     return res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
