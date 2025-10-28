@@ -215,12 +215,25 @@ return res.json({
     // No teamId provided → return all teams with mapped players
 const teamsOut = teams.map(t => {
   const players = mapEntriesToPlayers(t?.roster?.entries || [], week);
-  return {
-    teamId: Number(t?.id),
-    team_name: teamNameOf(t),
-    totals: teamTotalsFor(players),   // <— NEW (non-breaking)
-    players
-  };
+// ...after you build `teamsOut`
+const ownership = {};
+const acquisition = {};
+for (const t of teamsOut) {
+  for (const pl of t.players || []) {
+    if (pl.playerId != null) ownership[pl.playerId] = t.teamId;
+    if (pl.acquisitionType) acquisition[pl.playerId] = String(pl.acquisitionType).toUpperCase();
+  }
+}
+
+return res.json({
+  ok: true,
+  platform: 'espn',
+  leagueId, season, week,
+  teams: teamsOut,        // <-- what the Draft page looks for
+  ownership,              // <-- keeps older consumers happy
+  acquisition
+});
+
 });
 
 
