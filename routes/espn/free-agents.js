@@ -78,17 +78,11 @@ router.get('/free-agents', async (req, res) => {
     if (first.status >= 200 && first.status < 300) {
       let payload = (first.json && typeof first.json === 'object') ? first.json : {};
 
-       // Determine if "empty" — many workers return {players: []} or {data: []} etc.
-
+      // Determine if "empty" — many workers return {players: []} or {data: []} etc.
       const players = Array.isArray(payload?.players) ? payload.players
-                    : Array.isArray(payload?.data)    ? payload.data
-                    : Array.isArray(payload?.results) ? payload.results
-                    : [];
-      // Always expose a players array for downstream consumers
-      if (!Array.isArray(payload.players)) payload.players = players;
-
-       const empty = !players || players.length === 0;
-
+                      : Array.isArray(payload?.data) ? payload.data
+                      : [];
+      const empty = !players || players.length === 0;
 
       if (empty && autoFallback && onlyEligible === true) {
         // Try one relaxed pass: allow all eligibilities (some weeks ESPN hides FAs unless filters are relaxed)

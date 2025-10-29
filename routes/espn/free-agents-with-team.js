@@ -8,19 +8,17 @@ const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api
 const FUNCTION_ROSTER_PATH      = process.env.FUNCTION_ROSTER_PATH      || '/api/platforms/espn/roster';
 
 /* --------------------------- URL builders --------------------------- */
- function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page }) {
-   const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
-   u.searchParams.set('season', String(season));
-   u.searchParams.set('leagueId', String(leagueId));
-   u.searchParams.set('week', String(week));
-  // Worker quirk: some expect "DEF" (not "DST")
-  const workerPos = (String(pos || 'ALL').toUpperCase() === 'DST') ? 'DEF' : String(pos || 'ALL').toUpperCase();
-  u.searchParams.set('pos', workerPos); // ALL/QB/RB/WR/TE/DST/K (DEF upstream)
-   u.searchParams.set('minProj', String(minProj ?? 0));
-   u.searchParams.set('onlyEligible', String(onlyEligible ?? true));
-   if (page != null) u.searchParams.set('page', String(page));
-   return u;
- }
+function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page }) {
+  const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
+  u.searchParams.set('season', String(season));
+  u.searchParams.set('leagueId', String(leagueId));
+  u.searchParams.set('week', String(week));
+  u.searchParams.set('pos', String(pos || 'ALL')); // ALL/QB/RB/WR/TE/DST/K
+  u.searchParams.set('minProj', String(minProj ?? 0));
+  u.searchParams.set('onlyEligible', String(onlyEligible ?? true));
+  if (page != null) u.searchParams.set('page', String(page));
+  return u;
+}
 function buildRosterUrl({ season, leagueId, week }) {
   const u = new URL(FUNCTION_ROSTER_PATH, PAGES_ORIGIN);
   u.searchParams.set('season', String(season));
@@ -207,17 +205,9 @@ const rosterCanonById = new Map(); // id -> canonical row with proj/rank/etc.
     for (const pos of POS_LIST) {
       for (let page = 0; page < MAX_PAGES_PER_POS; page++) {
         const faUrl = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page });
-
         const { data: faData } = await fetchJsonWithCred(faUrl, req, { leagueId });
-        // Accept multiple upstream shapes
-        const batch = Array.isArray(faData?.players) ? faData.players
-                    : Array.isArray(faData?.data)    ? faData.data
-                    : Array.isArray(faData)          ? faData
-                    : [];
 
-         if (!batch.length) break;
-
-         for (const raw of batch) {
+        const batch = Array.isArray(faData?.players) ? faData.players : [];
         if (!batch.length) break;
 
         for (const raw of batch) {
@@ -233,6 +223,7 @@ const rosterCanonById = new Map(); // id -> canonical row with proj/rank/etc.
 
         if (batch.length < 50) break; // heuristic page size guard
       }
+    }
 
     /* 3) Add rostered players not present in FA, enriched to SAME SHAPE */
     const INCLUDE_ROSTERED = true;
@@ -279,7 +270,7 @@ const faCan = projById.get(pid) || rosterCanonById.get(pid);
       count: players.length,
       players
     });
-  }}} catch (e) {
+  } catch (e) {
     console.error('[free-agents-with-team] error', e);
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
