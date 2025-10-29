@@ -1,256 +1,284 @@
 // routes/espn/free-agents-with-team.js
+// Node 18+ for global fetch.
 const express = require('express');
 const router  = express.Router();
-const { fetchFromEspnWithCandidates } = require('./espnCred');
 
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
-const FUNCTION_FREE_AGENTS_PATH = process.env.FUNCTION_FREE_AGENTS_PATH || '/api/free-agents';
-const FUNCTION_ROSTER_PATH      = process.env.FUNCTION_ROSTER_PATH      || '/api/platforms/espn/roster';
 
-/* --------------------------- URL builders --------------------------- */
-function buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page }) {
-  const u = new URL(FUNCTION_FREE_AGENTS_PATH, PAGES_ORIGIN);
-  // Worker quirk: some use DEF instead of DST
-  const workerPos = String(pos || 'ALL').toUpperCase() === 'DST' ? 'DEF' : String(pos || 'ALL').toUpperCase();
-  u.searchParams.set('season', String(season));
-  u.searchParams.set('leagueId', String(leagueId));
-  u.searchParams.set('week', String(week));
-  u.searchParams.set('pos', workerPos); // ALL/QB/RB/WR/TE/DST/K (DEF upstream)
-  u.searchParams.set('minProj', String(minProj ?? 0));
-  u.searchParams.set('onlyEligible', String(onlyEligible ?? true));
-  if (page != null) u.searchParams.set('page', String(page));
-  return u;
-}
-function buildRosterUrl({ season, leagueId, week }) {
-  const u = new URL(FUNCTION_ROSTER_PATH, PAGES_ORIGIN);
-  u.searchParams.set('season', String(season));
-  u.searchParams.set('leagueId', String(leagueId));
-  if (week != null) u.searchParams.set('week', String(week));
-  return u;
-}
-async function fetchJsonWithCred(url, req, ctx) {
-  const { status, body, used } = await fetchFromEspnWithCandidates(url.toString(), req, ctx);
-  let data = null;
-  try { data = (status >= 200 && status < 300) && body ? JSON.parse(body) : null; } catch { data = null; }
-  return { data, status, used, rawBody: body };
-}
+// Candidate FA worker paths (first that returns rows wins)
+const FA_PATH_CANDIDATES = (
+  process.env.FUNCTION_FREE_AGENTS_PATHS ||
+  `${process.env.FUNCTION_FREE_AGENTS_PATH || ''},/api/platforms/espn/free-agents,/api/free-agents`
+).split(',').map(s => s.trim()).filter(Boolean);
 
-/* ---------------- Canonical helpers ------------------- */
-function toCanonical({
-  id, name, position, proTeamId, teamAbbr,
-  proj, rank, opponentAbbr, defensiveRank, byeWeek, fmv,
-  team
-}) {
-  return {
-    id: Number(id),
-    name: name ?? null,
-    position: position ?? null,
-    proTeamId: (proTeamId == null || isNaN(+proTeamId)) ? null : Number(proTeamId),
-    teamAbbr: teamAbbr ?? null,
-    proj: (proj == null || isNaN(+proj)) ? null : Number(proj),
-    rank: (rank == null || isNaN(+rank)) ? null : Number(rank),
-    opponentAbbr: opponentAbbr ?? null,
-    defensiveRank: (defensiveRank == null || isNaN(+defensiveRank)) ? null : Number(defensiveRank),
-    byeWeek: (byeWeek == null || isNaN(+byeWeek)) ? null : Number(byeWeek),
-    fmv: (fmv == null || isNaN(+fmv)) ? null : Number(fmv),
-    team: team && team.type ? team : { type: 'FREE_AGENT' }
-  };
+// Your internal JSON routes (same origin) — only used if includeRostered=true or paintOwnership
+const LOCAL_ROSTER_PATH     = '/api/platforms/espn/roster';
+const LOCAL_SCOREBOARD_PATH = '/api/platforms/espn/scoreboard';
+const LOCAL_MATCHUPS_PATH   = '/api/platforms/espn/matchups';
+
+// Tunables
+const PER_REQ_TIMEOUT_MS  = Number(process.env.FA_PER_REQ_TIMEOUT_MS || 1500);
+const MAX_PAGES_PER_CALL  = Number(process.env.FA_MAX_PAGES || 8);   // stop when a page is empty/short
+const PAGE_SIZE_HINT      = Number(process.env.FA_PAGE_SIZE_HINT || 50);
+
+// ---------- utils ----------
+const num  = (v,d=0)=>{ const n=Number(v); return Number.isFinite(n)?n:d; };
+const bool = (v,d=false)=>{ if(v==null||v==='')return !!d; const s=String(v).toLowerCase(); return s==='1'||s==='true'||s==='y'||s==='yes'; };
+const safeParse = t => { try{ return JSON.parse(t||'{}'); } catch { return {}; } };
+
+function normalizePlayers(payload){
+  if (Array.isArray(payload?.players)) return payload.players;
+  if (Array.isArray(payload?.data))    return payload.data;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload))          return payload;
+  return [];
 }
-function pidOf(p) {
+function pidOf(p){
   for (const k of ['playerId','id','pid','espnId']) {
     const n = Number(p?.[k]); if (Number.isFinite(n) && n !== 0) return n;
   }
   return null;
 }
-function normalizeFA(row, teamMeta) {
-  const id = Number(row.playerId ?? row.id ?? pidOf(row));
-  const position = String(row.position || row.defaultPosition || row.pos || '').toUpperCase();
-  return toCanonical({
+function normalizeFA(p){
+  const id = pidOf(p);
+  const teamAbbr = p.teamAbbr || p.team || '';
+  const pos = String(p.position || p.defaultPosition || p.pos || '').toUpperCase();
+  const proj = [p.proj, p.projectedPoints, p.projApplied, p.fpProj].map(Number).find(Number.isFinite);
+  const applied = Number(p.appliedPoints);
+  const pts = Number(p.points);
+  const headshot = p.headshot || (id && id > 0
+    ? `https://a.espncdn.com/i/headshots/nfl/players/full/${id}.png`
+    : (teamAbbr ? `https://a.espncdn.com/combiner/i?img=/i/teamlogos/nfl/500/${String(teamAbbr).toLowerCase()}.png&h=80&w=80&scale=crop` : '')
+  );
+  return {
     id,
-    name: row.name,
-    position,
-    proTeamId: row.proTeamId ?? null,
-    teamAbbr: row.teamAbbr ?? row.proTeamAbbr ?? row.team ?? null,
-    proj: row.proj ?? row.projectedPoints ?? row.projApplied ?? null,
-    rank: row.rank ?? row.projRank ?? null,
-    opponentAbbr: row.opponentAbbr ?? row.oppAbbr ?? null,
-    defensiveRank: row.defensiveRank ?? null,
-    byeWeek: row.byeWeek ?? row.bye ?? null,
-    fmv: row.fmv ?? null,
-    team: teamMeta || { type: 'FREE_AGENT' }
-  });
+    name: p.name ?? null,
+    pos,
+    team: teamAbbr || null,
+    headshot,
+    proj: Number.isFinite(proj) ? proj : null,
+    appliedPoints: Number.isFinite(applied) ? applied : null,
+    points: Number.isFinite(pts) ? pts : null
+  };
 }
-function normalizeRoster(row, teamMeta) {
-  const id = Number(row.playerId ?? row.id ?? pidOf(row));
-  const position = String(row.position || row.defaultPosition || row.pos || '').toUpperCase();
-  return toCanonical({
-    id,
-    name: row.name,
-    position,
-    proTeamId: row.proTeamId ?? null,
-    teamAbbr: row.teamAbbr ?? row.proTeamAbbr ?? row.team ?? null,
-    proj: row.proj ?? null,
-    rank: row.rank ?? null,
-    opponentAbbr: row.opponentAbbr ?? null,
-    defensiveRank: row.defensiveRank ?? null,
-    byeWeek: row.byeWeek ?? row.bye ?? null,
-    fmv: row.fmv ?? null,
-    team: teamMeta || { type: 'TEAM', teamId: null, team_name: null }
-  });
-}
-function enrichRosterWithFA(rosterCan, faCan) {
-  if (!faCan) return rosterCan;
-  return toCanonical({
-    id: rosterCan.id,
-    name: rosterCan.name ?? faCan.name,
-    position: rosterCan.position ?? faCan.position,
-    proTeamId: rosterCan.proTeamId ?? faCan.proTeamId,
-    teamAbbr: rosterCan.teamAbbr ?? faCan.teamAbbr,
-    proj: faCan.proj,
-    rank: faCan.rank,
-    opponentAbbr: faCan.opponentAbbr,
-    defensiveRank: faCan.defensiveRank,
-    byeWeek: rosterCan.byeWeek ?? faCan.byeWeek,
-    fmv: faCan.fmv,
-    team: rosterCan.team
-  });
+function vWeek(p){
+  const ap = Number(p.appliedPoints); if (Number.isFinite(ap)) return ap;
+  const pt = Number(p.points);        if (Number.isFinite(pt)) return pt;
+  const pr = Number(p.proj);          return Number.isFinite(pr) ? pr : 0;
 }
 
-/* ---------------- small utils ---------------- */
-const boolParam = (v,d=false)=>{ if(v==null||v==='')return !!d; const s=String(v).toLowerCase(); return s==='1'||s==='true'||s==='y'||s==='yes'; };
-const numParam  = (v,d=0)=>{ const n=Number(v); return Number.isFinite(n)?n:d; };
+// ---------- URL builders ----------
+function buildFAUrl(basePath, { season, leagueId, week, pos, minProj, onlyEligible, page, dropPos }) {
+  const u = new URL(basePath, PAGES_ORIGIN);
+  // Some workers expect DEF instead of DST
+  const workerPos = String(pos || 'ALL').toUpperCase() === 'DST' ? 'DEF' : String(pos || 'ALL').toUpperCase();
+  u.searchParams.set('season', String(season));
+  u.searchParams.set('leagueId', String(leagueId));
+  u.searchParams.set('week', String(week));
+  if (!(dropPos && workerPos === 'ALL')) u.searchParams.set('pos', workerPos);
+  u.searchParams.set('minProj', String(minProj));
+  u.searchParams.set('onlyEligible', String(onlyEligible));
+  if (page != null) u.searchParams.set('page', String(page));
+  return u.toString();
+}
+function buildLocalUrl(path, params) {
+  const u = new URL(path, PAGES_ORIGIN);
+  for (const [k,v] of Object.entries(params)) if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
+  return u.toString();
+}
 
-/* ----------------------------- Route ----------------------------- */
-// GET /api/platforms/espn/free-agents-with-team?season=YYYY&leagueId=...&week=#&pos=ALL&includeRostered=false
+// ---------- fetchers ----------
+async function fetchJSONWithTimeoutAndCookies(url, req, ms){
+  const ac = new AbortController();
+  const t  = setTimeout(() => ac.abort(), ms);
+  try{
+    const r   = await fetch(url, {
+      headers: {
+        accept: 'application/json',
+        cookie: req.headers.cookie || '',                // << forward session so worker can resolve member -> SWID/S2
+        'user-agent': req.headers['user-agent'] || 'ff-proxy',
+        'x-forwarded-for': req.headers['x-forwarded-for'] || '',
+        origin: req.headers.origin || PAGES_ORIGIN       // some CF setups read Origin for session scoping
+      },
+      signal: ac.signal
+    });
+    const txt  = await r.text();
+    const json = safeParse(txt);
+    const arr  = normalizePlayers(json);
+    return { ok: r.ok, status:r.status, url, json, players:arr };
+  } catch (e){
+    return { ok:false, status:0, url, json:{}, players:[], error:String(e?.name||e||'error') };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchLocalJSON(url, req){
+  const r = await fetch(url, {
+    headers: {
+      accept: 'application/json',
+      cookie: req.headers.cookie || '',
+      'user-agent': req.headers['user-agent'] || 'ff-proxy',
+      'x-forwarded-for': req.headers['x-forwarded-for'] || ''
+    }
+  });
+  const txt  = await r.text();
+  return safeParse(txt);
+}
+
+// Pull FAs from worker (cookies forwarded). Try: strict (pos), strict-no-pos (ALL), relaxed, relaxed-no-pos.
+async function pullFreeAgentsViaWorker({ season, leagueId, week, pos, minProj, onlyEligible }, req){
+  const tried = [];
+  for (const path of FA_PATH_CANDIDATES) {
+    if (!path) continue;
+
+    // sweep pages for each variant, stop when a page is empty/short
+    const variants = [
+      { dropPos:false, minProj, onlyEligible },
+      ...(String(pos).toUpperCase()==='ALL' ? [{ dropPos:true, minProj, onlyEligible }] : []),
+      { dropPos:false, minProj:0, onlyEligible:false },
+      ...(String(pos).toUpperCase()==='ALL' ? [{ dropPos:true, minProj:0, onlyEligible:false }] : [])
+    ];
+
+    for (const v of variants){
+      let combined = [];
+      for (let page=0; page<MAX_PAGES_PER_CALL; page++){
+        const url = buildFAUrl(path, { season, leagueId, week, pos, page, ...v });
+        tried.push(url);
+        const res = await fetchJSONWithTimeoutAndCookies(url, req, PER_REQ_TIMEOUT_MS);
+        const batch = Array.isArray(res.players) ? res.players : [];
+
+        if (page === 0 && batch.length === 0) { combined=[]; break; } // try next variant/path
+        combined.push(...batch);
+        if (batch.length === 0 || (PAGE_SIZE_HINT && batch.length < PAGE_SIZE_HINT)) break;
+      }
+      if (combined.length) {
+        return { players: combined.map(normalizeFA), tried, upstream: path };
+      }
+    }
+  }
+  return { players: [], tried, upstream: null };
+}
+
+// Ownership helpers (optional)
+function idsFromRosterJSON(json){
+  const ids = new Set();
+  if (Array.isArray(json?.teams)) {
+    for (const t of json.teams) for (const p of (t.players||[])) {
+      const id = pidOf(p); if (Number.isFinite(id)) ids.add(id);
+    }
+  } else if (Array.isArray(json?.players)) {
+    for (const p of json.players) { const id = pidOf(p); if (Number.isFinite(id)) ids.add(id); }
+  }
+  return ids;
+}
+async function myAndOppIds({ season, leagueId, week, teamId }, req){
+  const myUrl  = buildLocalUrl(LOCAL_ROSTER_PATH, { season, leagueId, week, teamId });
+  const myJson = await fetchLocalJSON(myUrl, req);
+  const myIds  = idsFromRosterJSON(myJson);
+  // Try to infer opponent
+  const schedUrl = buildLocalUrl(LOCAL_SCOREBOARD_PATH, { season, leagueId, week });
+  const mUrl     = buildLocalUrl(LOCAL_MATCHUPS_PATH,   { season, leagueId, week });
+  const sb = await fetchLocalJSON(schedUrl, req);
+  const mu = await fetchLocalJSON(mUrl, req);
+  const games = sb.matchups || sb.schedule || sb.games || mu.matchups || mu.schedule || [];
+  let oppTeamId = null;
+  for (const g of games) {
+    const teams = g.teams || [g.home, g.away].filter(Boolean) || (g.matchup?.teams) || [];
+    const ids = teams.map(t => Number(t?.teamId ?? t?.team?.id ?? t?.id)).filter(Number.isFinite);
+    if (ids.includes(teamId)) { oppTeamId = ids.find(x => x !== teamId) ?? null; break; }
+  }
+  let oppIds = new Set();
+  if (Number.isFinite(oppTeamId)) {
+    const oppUrl  = buildLocalUrl(LOCAL_ROSTER_PATH, { season, leagueId, week, teamId: oppTeamId });
+    const oppJson = await fetchLocalJSON(oppUrl, req);
+    oppIds = idsFromRosterJSON(oppJson);
+  }
+  return { myIds, oppIds };
+}
+
+// ---------- route ----------
 router.get('/free-agents-with-team', async (req, res) => {
-  try {
-    const season        = numParam(req.query.season);
-    const leagueId      = String(req.query.leagueId || '');
-    const week          = numParam(req.query.week, 1);
-    const posInput      = String(req.query.pos || 'ALL').toUpperCase();
-    const minProj       = numParam(req.query.minProj, 0);
-    const onlyEligible  = boolParam(req.query.onlyEligible, true);
-    const includeRostered = boolParam(req.query.includeRostered, false); // <- default FA-only
+  try{
+    const season          = num(req.query.season);
+    const leagueId        = String(req.query.leagueId || '');
+    const week            = num(req.query.week, 1);
+    const pos             = String(req.query.pos || 'ALL').toUpperCase();
+    const minProj         = num(req.query.minProj, 0);
+    const onlyEligible    = bool(req.query.onlyEligible, true);
+    const includeRostered = bool(req.query.includeRostered, false); // default: pure FAs
+    const teamId          = num(req.query.teamId, NaN);             // for ownership paint (optional)
 
-    if (!season || !leagueId) {
-      return res.status(400).json({ ok:false, error:'missing_params' });
-    }
+    if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
-    /* 1) Pull FAs FIRST (page by pos), tolerant to shape differences */
-    const POS_LIST = (posInput === 'ALL') ? ['QB','RB','WR','TE','DST','K'] : [posInput];
-    const players = [];
-    const projById = new Map();  // id -> canonical FA row (with projections)
-    const MAX_PAGES_PER_POS = 20;
+    // 1) Pull FAs directly from worker with cookies
+    const { players: faRaw, tried, upstream } =
+      await pullFreeAgentsViaWorker({ season, leagueId, week, pos, minProj, onlyEligible }, req);
 
-    for (const pos of POS_LIST) {
-      for (let page = 0; page < MAX_PAGES_PER_POS; page++) {
-        const faUrl = buildFreeAgentsUrl({ season, leagueId, week, pos, minProj, onlyEligible, page });
-        const { data: faData } = await fetchJsonWithCred(faUrl, req, { leagueId });
+    let players = faRaw.map(p => (p._val = vWeek(p), p)).sort((a,b)=> (b._val||0) - (a._val||0));
 
-        const batch = Array.isArray(faData?.players) ? faData.players
-                    : Array.isArray(faData?.data)    ? faData.data
-                    : Array.isArray(faData?.results) ? faData.results
-                    : Array.isArray(faData)          ? faData
-                    : [];
+    // 2) (Optional) paint ownership + append rostered if asked
+    if (Number.isFinite(teamId) || includeRostered) {
+      const { myIds, oppIds } = Number.isFinite(teamId)
+        ? await myAndOppIds({ season, leagueId, week, teamId }, req)
+        : { myIds: new Set(), oppIds: new Set() };
 
-        if (!batch.length) break;
+      // mark ownership for FAs we already have
+      if (Number.isFinite(teamId)) {
+        players.forEach(p => {
+          const id = Number(p.id);
+          if (myIds.has(id))      p._ownedBy = 'me';
+          else if (oppIds.has(id)) p._ownedBy = 'opp';
+          else                     p._ownedBy = 'fa';
+        });
+      }
 
-        for (const raw of batch) {
-          const pid = Number(raw.playerId ?? raw.id ?? pidOf(raw));
-          if (!Number.isFinite(pid)) continue;
-          const canFA = normalizeFA(raw, { type:'FREE_AGENT' });
-          projById.set(pid, canFA);
-          players.push(canFA);
+      if (includeRostered) {
+        // append rostered not already in list
+        const rosterUrl = buildLocalUrl(LOCAL_ROSTER_PATH, { season, leagueId, week });
+        const rosterJson = await fetchLocalJSON(rosterUrl, req);
+        const rosterSeen = new Set(players.map(p => Number(p.id)));
+        const allTeams = rosterJson?.teams || (rosterJson?.players ? [{
+          teamId: rosterJson.teamId, team_name: rosterJson.team_name, players: rosterJson.players
+        }] : []);
+        for (const t of allTeams) {
+          for (const rp of (t.players || [])) {
+            const id = pidOf(rp);
+            if (!Number.isFinite(id) || rosterSeen.has(id)) continue;
+            if (pos !== 'ALL') {
+              const rpPos = String(rp.position || rp.defaultPosition || rp.pos || '').toUpperCase();
+              if (rpPos && rpPos !== pos) continue;
+            }
+            const can = normalizeFA(rp);
+            can._val = vWeek(can);
+            if (Number.isFinite(teamId)) {
+              if (myIds.has(id))      can._ownedBy = 'me';
+              else if (oppIds.has(id)) can._ownedBy = 'opp';
+              else                      can._ownedBy = 'fa';
+            }
+            players.push(can);
+            rosterSeen.add(id);
+          }
         }
-
-        // if worker pages are < 50 this is probably the last page
-        if (batch.length < 50) break;
+        players.sort((a,b)=> (b._val||0) - (a._val||0));
       }
     }
 
-    /* If we want pure FAs (default), we're done. */
-    if (!includeRostered) {
-      res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
-      res.set('Access-Control-Allow-Credentials', 'true');
-      res.set('Cache-Control', 'no-store, private');
-      return res.json({
-        ok: true,
-        season,
-        leagueId,
-        week,
-        pos: posInput,
-        count: players.length,
-        players
-      });
-    }
-
-    /* 2) (Optional) Append rostered players not present in FA list */
-    const rosterUrl = buildRosterUrl({ season, leagueId, week });
-    const { data: rosterData } = await fetchJsonWithCred(rosterUrl, req, { leagueId });
-
-    const rosterCanonById = new Map();
-    const playerToTeam = new Map();
-
-    if (rosterData?.teams?.length) {
-      for (const t of rosterData.teams) {
-        const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
-        for (const p of (t.players || [])) {
-          const pid = Number(p.playerId ?? p.id ?? pidOf(p));
-          if (!Number.isFinite(pid)) continue;
-          playerToTeam.set(pid, teamMeta);
-          rosterCanonById.set(pid, normalizeRoster(p, teamMeta));
-        }
-      }
-    } else if (Number.isFinite(rosterData?.teamId)) {
-      const teamMeta = { type:'TEAM', teamId: rosterData.teamId, team_name: rosterData.team_name };
-      for (const p of (rosterData.players || [])) {
-        const pid = Number(p.playerId ?? p.id ?? pidOf(p));
-        if (!Number.isFinite(pid)) continue;
-        playerToTeam.set(pid, teamMeta);
-        rosterCanonById.set(pid, normalizeRoster(p, teamMeta));
-      }
-    }
-
-    const seen = new Set(players.map(p => p.id));
-    const rosterTeams = rosterData?.teams || (rosterData?.players ? [{
-      players: rosterData.players, teamId: rosterData.teamId, team_name: rosterData.team_name
-    }] : []);
-
-    for (const t of rosterTeams) {
-      for (const rp of (t.players || [])) {
-        const pid = Number(rp.playerId ?? rp.id ?? pidOf(rp));
-        if (!Number.isFinite(pid) || seen.has(pid)) continue;
-
-        // Optional position narrowing
-        if (posInput !== 'ALL') {
-          const rpPos = String(rp.position || rp.defaultPosition || rp.pos || '').toUpperCase();
-          if (rpPos && rpPos !== posInput) continue;
-        }
-
-        const teamMeta = { type:'TEAM', teamId: t.teamId, team_name: t.team_name };
-        const rosterCan = normalizeRoster(rp, teamMeta);
-        const faCan = projById.get(pid) || rosterCanonById.get(pid);
-        players.push(enrichRosterWithFA(rosterCan, faCan));
-        seen.add(pid);
-      }
-    }
-
-    /* 3) Respond (FA + rostered, only if requested) */
+    // headers + cors
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Cache-Control', 'no-store, private');
+    res.set('X-FF-FA-Tried', tried.join(' | '));
+    res.set('X-FF-FA-Upstream', upstream || 'none');
+
     return res.json({
       ok: true,
-      season,
-      leagueId,
-      week,
-      pos: posInput,
+      season, leagueId, week, pos,
       count: players.length,
       players
     });
-
-  } catch (e) {
-    console.error('[free-agents-with-team] error', e);
+  } catch (e){
+    console.error('[free-agents-with-team] fatal', e);
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
     return res.status(200).json({ ok:false, error:'server_error' });
