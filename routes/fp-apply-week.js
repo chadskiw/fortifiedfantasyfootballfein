@@ -90,20 +90,37 @@ async function detectScoringLabel(req, season, leagueId){
   try{
     const base = apiBaseFromReq(req);
     const r = await fetch(`${base}/api/platforms/espn/league?season=${season}&leagueId=${leagueId}`, { method:'GET' });
-    if (!r.ok) return 'LEAGUE';
+    if (!r.ok) return 'PPR'; // safe default
+
     const j = await r.json();
-    // Try common shapes: look for points per reception
-    const rec = j?.settings?.scoringSettings?.reception ??
-                j?.settings?.scoring?.reception ??
-                j?.scoringSettings?.reception ??
-                j?.scoring?.reception ??
-                null;
-    if (rec === 1) return 'PPR';
-    if (rec === 0.5) return 'HALF';
-    if (rec === 0) return 'STD';
-    return 'LEAGUE';
-  }catch(_){
-    return 'LEAGUE';
+
+    // Look for "points per reception" across common shapes/keys
+    const candidates = [
+      j?.settings?.scoringSettings?.reception,
+      j?.settings?.scoring?.reception,
+      j?.scoringSettings?.reception,
+      j?.scoring?.reception,
+      j?.settings?.scoringSettings?.rec,
+      j?.settings?.scoring?.rec,
+    ].filter(v => typeof v === 'number');
+
+    const rec = candidates.length ? candidates[0] : null;
+
+    // Map to your allowed labels
+    if (rec === 1)    return 'PPR';
+    if (rec === 0.5)  return 'HALF';
+    if (rec === 0)    return 'STD';
+
+    // If custom (e.g., 0.25 or 0.75), pick the closest standard
+    if (typeof rec === 'number'){
+      if (rec >= 0.75) return 'PPR';
+      if (rec >= 0.25) return 'HALF';
+      return 'STD';
+    }
+
+    return 'PPR';
+  }catch{
+    return 'PPR';
   }
 }
 
@@ -140,7 +157,7 @@ async function upsertTeamWeek(db, row){
   `, [
     row.season, String(row.league_id), Number(row.team_id), Number(row.week),
     row.team_name || '', Number(row.points || 0),
-    JSON.stringify(row.starters || []), String(row.scoring || 'LEAGUE')
+    JSON.stringify(row.starters || []), String(row.scoring || 'PPR')
   ]);
 }
 
