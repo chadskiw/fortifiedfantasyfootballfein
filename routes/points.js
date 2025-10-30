@@ -56,49 +56,62 @@ function idemKey(obj) {
 }
 
 async function getMemberTotals(memberId) {
-  // Same-origin friendly: compute CTE from zeffy_payments + adjust with ledger and open holds
   const sql = `
-WITH zeffy AS (
-  SELECT
-    $1 AS member_id,
-    -- cents * (PPD/100) in integer space
-    (COALESCE(SUM(zp.amount_cents),0)::bigint * $2 / 100)::bigint AS cte
-  FROM zeffy_payments zp
-  LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
-  WHERE COALESCE(zp.member_hint, m.member_id) = $1
-),
-ledger AS (
-  SELECT COALESCE(SUM(
-           CASE WHEN kind='debit' THEN -delta_points ELSE delta_points END
-         ),0)::bigint AS delta_points
-  FROM ff_points_ledger
-  WHERE member_id = $1
-    AND COALESCE(source,'') NOT IN ('deposit_zeffy','deposit_manual')
-),
-holds AS (
-  SELECT COALESCE(SUM(amount),0)::bigint AS exposure
-  FROM ff_hold
-  WHERE member_id=$1 AND status='held' AND expires_at > now()
-)
-SELECT
-  COALESCE((SELECT cte          FROM zeffy),0) AS cte,
-  COALESCE((SELECT delta_points FROM ledger),0) AS delta,
-  COALESCE((SELECT exposure     FROM holds),0) AS exposure;
-
+    WITH zeffy AS (
+      SELECT
+        $1 AS member_id,
+        /* cents * (PPD/100) → integer-safe */
+        (COALESCE(SUM(zp.amount_cents),0)::bigint * $2 / 100)::bigint AS cte
+      FROM zeffy_payments zp
+      LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
+      WHERE COALESCE(zp.member_hint, m.member_id) = $1
+    ),
+    ledger AS (
+      /* signed sum; exclude mirrored deposits to avoid double-count */
+      SELECT COALESCE(SUM(
+               CASE WHEN kind='debit' THEN -delta_points ELSE delta_points END
+             ),0)::bigint AS delta_points
+      FROM ff_points_ledger
+      WHERE member_id = $1
+        AND COALESCE(source,'') NOT IN ('deposit_zeffy','deposit_manual')
+    ),
+    exp_new AS (  -- ff_holds (plural): TTL holds carry member_id
+      SELECT COALESCE(SUM(amount_held),0)::bigint AS x
+      FROM ff_holds
+      WHERE member_id=$1
+        AND status='held'
+        AND expires_at > NOW()
+    ),
+    exp_legacy AS (  -- ff_hold (singular): join via wallet → member
+      SELECT COALESCE(SUM(h.amount),0)::bigint AS x
+      FROM ff_hold h
+      JOIN ff_wallet w ON w.wallet_id = h.wallet_id
+      WHERE w.member_id = $1
+        AND h.currency = 'POINT'
+        AND (h.resolved_at IS NULL OR h.status='active')
+    ),
+    exposure AS (
+      SELECT (SELECT x FROM exp_new) + (SELECT x FROM exp_legacy) AS exposure
+    )
+    SELECT
+      COALESCE((SELECT cte          FROM zeffy),0)  AS cte,
+      COALESCE((SELECT delta_points FROM ledger),0) AS delta,
+      COALESCE((SELECT exposure     FROM exposure),0) AS exposure
   `;
   const { rows } = await pool.query(sql, [memberId, PPD]);
   const { cte = 0, delta = 0, exposure = 0 } = rows[0] || {};
-  const balance = Number(cte) + Number(delta);
+  const balance   = Number(cte) + Number(delta);
   const available = Math.max(0, balance - Number(exposure));
   return {
-    cte: Number(cte),
-    ledger: Number(delta),
-    balance,
-    exposure: Number(exposure),
-    available,
-    usd: (Number(cte) + Number(delta)) / PPD,
+    cte: Number(cte),          // points from Zeffy
+    ledger: Number(delta),     // signed ledger delta (excl. mirrored deposits)
+    balance,                   // cte + ledger
+    exposure: Number(exposure),// active holds (ff_holds + ff_hold via wallet)
+    available,                 // balance - exposure
+    usd: balance / PPD,        // dollars (PPD = points per $1)
   };
 }
+
 
 // ------------------------------
 // Debug helper (verify cookies → member_id)
