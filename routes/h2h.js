@@ -209,6 +209,125 @@ router.get(['/detail', '/detail/:id'], async (req, res) => {
   }
 });
 
+// --- ENSURE (create or reuse a challenge) ---
+// POST /api/h2h/ensure
+// Body: {
+//   season, week,
+//   left:  { leagueId, teamId, teamName? },
+//   right: { leagueId, teamId, teamName? } | null
+// }
+router.post('/ensure', async (req, res) => {
+  try {
+    const { season, week, left, right } = req.body || {};
+    const S = Number(season)||new Date().getFullYear();
+    const W = Number(week)||1;
+
+    const norm = (x) => !x ? null : ({
+      leagueId: Number(x.leagueId||x.lid||x.league_id)||null,
+      teamId:   Number(x.teamId||x.tid||x.team_id)||null,
+      teamName: x.teamName || x.tname || null
+    });
+
+    const L = norm(left);
+    const R = norm(right);
+    if (!L || !L.leagueId || !L.teamId) {
+      return res.status(400).json({ ok:false, error:'missing_left' });
+    }
+
+    // helper: same-origin absolute URL for server-side fetch (preserves cookies)
+    const origin = `${req.headers['x-forwarded-proto']||req.protocol}`; //${req.headers['x-forwarded-host']||req.headers.host}`;
+    const espnRoster = async (lid, tid) => {
+      const u = new URL(`/api/platforms/espn/roster?season=${S}&week=${W}&leagueId=${lid}&teamId=${tid}`, origin);
+      const r = await fetch(u, { headers: { cookie: req.headers.cookie||'' } });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const items = (j.players || j.roster || []);
+      // normalize to { starters[], bench[] } by lineupSlotId (<20 == starter)
+      const starters = items.filter(p => p.isStarter ?? (p.lineupSlotId !== undefined ? p.lineupSlotId < 20 : true));
+      const bench    = items.filter(p => p.isStarter === false || (p.lineupSlotId !== undefined && p.lineupSlotId >= 20));
+      return { starters, bench };
+    };
+
+    // 1) Reuse existing challenge if both sides provided
+    if (R && R.leagueId && R.teamId) {
+      const sql = `
+        SELECT c.id
+          FROM ff_challenge c
+          JOIN ff_challenge_side s1 ON s1.challenge_id=c.id
+          JOIN ff_challenge_side s2 ON s2.challenge_id=c.id
+         WHERE c.season=$1 AND c.week=$2
+           AND (s1.side IN ('home','left','1') AND s1.league_id=$3 AND s1.team_id=$4)
+           AND (s2.side IN ('away','right','2') AND s2.league_id=$5 AND s2.team_id=$6)
+         LIMIT 1`;
+      const { rows:[hit] } = await pool.query(sql, [S,W, L.leagueId,L.teamId, R.leagueId,R.teamId]);
+      if (hit) return res.json({ ok:true, id: hit.id });
+    } else {
+      // open challenge with only left side
+      const sql = `
+        SELECT c.id
+          FROM ff_challenge c
+          JOIN ff_challenge_side s1 ON s1.challenge_id=c.id
+         WHERE c.season=$1 AND c.week=$2
+           AND s1.side IN ('home','left','1')
+           AND s1.league_id=$3 AND s1.team_id=$4
+           AND NOT EXISTS (
+             SELECT 1 FROM ff_challenge_side s2
+              WHERE s2.challenge_id=c.id AND s2.side IN ('away','right','2')
+           )
+         LIMIT 1`;
+      const { rows:[hit] } = await pool.query(sql, [S,W, L.leagueId,L.teamId]);
+      if (hit) return res.json({ ok:true, id: hit.id });
+    }
+
+    // 2) Create new challenge + sides (with roster snapshots for UX)
+    const newId = `ch_${crypto.randomBytes(8).toString('hex')}`;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      await client.query(
+        `INSERT INTO ff_challenge (id, season, week, status, stake_points, created_at, updated_at)
+         VALUES ($1,$2,$3,'open',0,NOW(),NOW())`,
+        [newId, S, W]
+      );
+
+      // home / left
+      const Lroster = await espnRoster(L.leagueId, L.teamId).catch(()=>null);
+      await client.query(
+        `INSERT INTO ff_challenge_side
+           (challenge_id, side, league_id, team_id, team_name, roster_json, updated_at)
+         VALUES ($1,'home',$2,$3,$4,$5,NOW())`,
+        [newId, L.leagueId, L.teamId, L.teamName, Lroster]
+      );
+
+      // away / right (optional)
+      if (R && R.leagueId && R.teamId) {
+        const Rroster = await espnRoster(R.leagueId, R.teamId).catch(()=>null);
+        await client.query(
+          `INSERT INTO ff_challenge_side
+             (challenge_id, side, league_id, team_id, team_name, roster_json, updated_at)
+           VALUES ($1,'away',$2,$3,$4,$5,NOW())`,
+          [newId, R.leagueId, R.teamId, R.teamName, Rroster]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    return res.json({ ok:true, id:newId });
+  } catch (e) {
+    console.error('h2h.ensure.error', e);
+    res.status(400).json({ ok:false, error:e.message });
+  }
+});
+
+
 /* ===========================
    LIST OPEN/PENDING (Mini Hub)
    GET /api/h2h/open?teams=lid:tid,lid:tid or ?me=1
