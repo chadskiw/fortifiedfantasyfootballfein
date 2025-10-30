@@ -1,12 +1,48 @@
 // routes/fp-apply-week.js  (CommonJS)
 const express = require('express');
 const router  = express.Router();
+router.use(express.json()); // ensure JSON body parsing on this router
+
+/* ---------------- DB bootstrap (local fallback) ---------------- */
 const { Pool } = require('pg');
+const localPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined
+});
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-router.set('db', pool); // we'll normalize this to pg-promise-like below
+/** Wrap a db so it exposes pg-promise-like methods: any / oneOrNone / none */
+function wrapDb(raw){
+  if (!raw) return null;
+  // Already pg-promise
+  if (typeof raw.any === 'function' && typeof raw.oneOrNone === 'function' && typeof raw.none === 'function'){
+    return raw;
+  }
+  // node-postgres Pool / Client
+  if (typeof raw.query === 'function'){
+    return {
+      any      : (q, p = []) => raw.query(q, p).then(r => r.rows),
+      oneOrNone: (q, p = []) => raw.query(q, p).then(r => r.rows[0] || null),
+      none     : (q, p = []) => raw.query(q, p).then(() => undefined),
+    };
+  }
+  return null;
+}
 
-// Use built-in fetch on Node 18+, else fall back to undici
+/** Try to get a db from the app; otherwise use our local pool. */
+function getDb(req){
+  const candidate =
+    (req.app && typeof req.app.get === 'function' && req.app.get('db')) ||
+    (req.app && req.app.locals && req.app.locals.db) ||
+    null;
+
+  // Last-ditch: try a shared module if you have one
+  let shared = null;
+  try { shared = require('../db/pool'); } catch (_) {}
+
+  return wrapDb(candidate) || wrapDb(shared) || wrapDb(localPool);
+}
+
+/* ---------------- fetch (Node 18+ or undici) ---------------- */
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
   try { ({ fetch: fetchFn } = require('undici')); }
@@ -14,12 +50,13 @@ if (!fetchFn) {
 }
 const fetch = (...args) => fetchFn(...args);
 
+/* ---------------- constants ---------------- */
 const SCORINGS = ['PPR','HALF','STD'];
 
 /* ---------------- helpers ---------------- */
 
 function apiBaseFromReq(req){
-  // Prefer explicit internal origin; otherwise the current host
+  // Prefer explicit internal origin; otherwise current host
   return process.env.INTERNAL_API_ORIGIN
       || process.env.HOST
       || `${req.protocol}://${req.get('host')}`;
@@ -74,13 +111,13 @@ async function weeklyPts(db, { season, week, scoring, fpId }){
 
 function toStarterRow(p){
   return {
-    id: Number(p.playerId ?? p.id),
-    name: p.name || p.fullName || p.playerName || '',
-    slot: p.slot || p.lineupSlot || p.lineupSlotId || '',
-    team: p.teamAbbr || p.proTeam || p.team || '',
+    id      : Number(p.playerId ?? p.id),
+    name    : p.name || p.fullName || p.playerName || '',
+    slot    : p.slot || p.lineupSlot || p.lineupSlotId || '',
+    team    : p.teamAbbr || p.proTeam || p.team || '',
     position: p.position || p.defaultPosition || '',
-    fpId: null,
-    pts: 0
+    fpId    : null,
+    pts     : 0
   };
 }
 
@@ -113,14 +150,21 @@ async function upsertTeamWeek(db, row){
 /* ---------------- route ---------------- */
 
 router.post('/apply-week', async (req, res) => {
-  const db = req.app.get('db'); // pg-promise/pg pool set elsewhere
+  const db = getDb(req);
+  if (!db){
+    return res.status(500).json({
+      ok:false,
+      error:'DB not attached. In app.js call app.set("db", db) or rely on route’s local Pool.'
+    });
+  }
+
   try{
-    const season  = Number(req.body?.season) || new Date().getFullYear();
-    const week    = Number(req.body?.week);
+    const season  = Number(req.body && req.body.season) || new Date().getFullYear();
+    const week    = Number(req.body && req.body.week);
     if (!Number.isFinite(week) || week < 1 || week > 18) {
       return res.status(400).json({ ok:false, error:'Invalid `week` (1–18).' });
     }
-    const scorings = Array.isArray(req.body?.scorings) && req.body.scorings.length
+    const scorings = Array.isArray(req.body && req.body.scorings) && req.body.scorings.length
       ? req.body.scorings.map(s => String(s).toUpperCase())
       : SCORINGS;
 
@@ -141,7 +185,7 @@ router.post('/apply-week', async (req, res) => {
         }
 
         // starters list (prefer server’s isStarter; fallback by slot whitelist)
-        const players = roster.players || roster?.team?.players || roster || [];
+        const players = roster.players || (roster.team && roster.team.players) || roster || [];
         const startersRaw = players.filter(p =>
           p.isStarter ||
           ['QB','RB','WR','TE','FLEX','K','DST'].includes(String(p.slot || '').toUpperCase())
