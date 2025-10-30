@@ -342,6 +342,7 @@ app.get('/api/platforms/espn/apis/v3/games/:game/seasons/:season/segments/0/leag
 app.use('/api/platforms/espn', require('./routes/espn/free-agents'));
 app.use('/api/platforms/espn', require('./routes/espn/free-agents-with-team'));
 app.use('/api/ingest/espn/fan', require('./routes/ingest/espn-fan'));
+app.use('/api/fp', require('./routes/fp-apply-week'));
 
 // Helper to accept Router or handler exports
 function asMiddleware(mod) {
