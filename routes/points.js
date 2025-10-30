@@ -58,29 +58,33 @@ function idemKey(obj) {
 async function getMemberTotals(memberId) {
   // Same-origin friendly: compute CTE from zeffy_payments + adjust with ledger and open holds
   const sql = `
-    WITH zeffy AS (
-      SELECT
-        COALESCE(zp.member_hint, m.member_id) AS member_id,
-        COALESCE(SUM( (zp.amount_cents/100.0) * $2 ),0)::bigint AS cte
-      FROM zeffy_payments zp
-      LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
-      WHERE COALESCE(zp.member_hint, m.member_id) = $1
-      GROUP BY 1
-    ),
-    ledger AS (
-      SELECT COALESCE(SUM(delta_points),0)::bigint AS delta_points
-      FROM ff_points_ledger
-      WHERE member_id = $1
-    ),
-    holds AS (
-      SELECT COALESCE(SUM(amount_held),0)::bigint AS exposure
-      FROM ff_holds
-      WHERE member_id=$1 AND status='held' AND expires_at > now()
-    )
-    SELECT
-      COALESCE((SELECT cte          FROM zeffy),0) AS cte,
-      COALESCE((SELECT delta_points FROM ledger),0) AS delta,
-      COALESCE((SELECT exposure     FROM holds),0) AS exposure
+WITH zeffy AS (
+  SELECT
+    $1 AS member_id,
+    -- cents * (PPD/100) in integer space
+    (COALESCE(SUM(zp.amount_cents),0)::bigint * $2 / 100)::bigint AS cte
+  FROM zeffy_payments zp
+  LEFT JOIN ff_member m ON LOWER(m.email)=LOWER(zp.donor_email)
+  WHERE COALESCE(zp.member_hint, m.member_id) = $1
+),
+ledger AS (
+  SELECT COALESCE(SUM(
+           CASE WHEN kind='debit' THEN -delta_points ELSE delta_points END
+         ),0)::bigint AS delta_points
+  FROM ff_points_ledger
+  WHERE member_id = $1
+    AND COALESCE(source,'') NOT IN ('deposit_zeffy','deposit_manual')
+),
+holds AS (
+  SELECT COALESCE(SUM(amount_held),0)::bigint AS exposure
+  FROM ff_holds
+  WHERE member_id=$1 AND status='held' AND expires_at > now()
+)
+SELECT
+  COALESCE((SELECT cte          FROM zeffy),0) AS cte,
+  COALESCE((SELECT delta_points FROM ledger),0) AS delta,
+  COALESCE((SELECT exposure     FROM holds),0) AS exposure;
+
   `;
   const { rows } = await pool.query(sql, [memberId, PPD]);
   const { cte = 0, delta = 0, exposure = 0 } = rows[0] || {};
@@ -229,7 +233,8 @@ router.post('/sync-zeffy', async (req, res) => {
 
     let imported = 0;
     for (const r of rows) {
-      const points = Math.round((r.amount_cents / 1000) * PPD);
+// AFTER (correct: 10 pts / ¢ when PPD=1000)
+const points = Math.round((r.amount_cents * PPD) / 100);
       const idem = idemKey({ k: 'deposit_zeffy', payment_id: r.payment_id, member_id: r.member_id, points });
       const q = await pool.query(`
         INSERT INTO ff_points_ledger
