@@ -76,7 +76,7 @@ ledger AS (
     AND COALESCE(source,'') NOT IN ('deposit_zeffy','deposit_manual')
 ),
 holds AS (
-  SELECT COALESCE(SUM(amount_held),0)::bigint AS exposure
+  SELECT COALESCE(SUM(amount),0)::bigint AS exposure
   FROM ff_hold
   WHERE member_id=$1 AND status='held' AND expires_at > now()
 )
@@ -145,7 +145,7 @@ router.post('/hold', softAuth, async (req, res) => {
     const { rows } = await pool.query(`
       WITH ins AS (
         INSERT INTO ff_hold
-          (hold_id, member_id, currency, amount_held, amount_captured, amount_released, status,
+          (hold_id, member_id, currency, amount, amount_captured, amount_released, status,
            expires_at, scope_type, scope_id, memo, meta, idempotency_key, created_at, updated_at)
         VALUES (
           concat('hold_', replace(gen_random_uuid()::text,'-','')),
@@ -183,7 +183,7 @@ router.post('/release-expired', async (_req, res) => {
     const { rowCount } = await pool.query(`
       UPDATE ff_hold
       SET status='released',
-          amount_released=amount_held,
+          amount_released=amount,
           released_at=NOW(),
           updated_at=NOW()
       WHERE status='held' AND expires_at < NOW()
