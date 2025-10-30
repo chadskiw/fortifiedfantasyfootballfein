@@ -1,6 +1,8 @@
 // routes/fp-apply-week.js  (CommonJS)
 const express = require('express');
 const router  = express.Router();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+app.set('db', pool); // we'll normalize this to pg-promise-like below
 
 // Use built-in fetch on Node 18+, else fall back to undici
 let fetchFn = globalThis.fetch;
