@@ -105,64 +105,23 @@ function fireIngest(req, { swidBrace, s2, memberId }) {
   } catch {}
 }
 
-// /api/identity/me  (inside whatever router mounts at /api/identity)
 router.get('/me', async (req, res) => {
   try {
-    // no-cache, same as your current route
-    res.set('Cache-Control', 'no-store');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.removeHeader('ETag');
+    res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); res.set('Expires', '0'); res.removeHeader('ETag');
 
     const midCookie = (req.cookies?.ff_member_id || req.cookies?.ff_member || '').trim();
     const sidCookie = (req.cookies?.ff_session_id || req.cookies?.ff_session || '').trim();
-
     if (midCookie && sidCookie) {
       await ensureDbSession(sidCookie, midCookie); // idempotent
-
-      // 1) pull core identity from ff_member
-      const { rows } = await pool.query(
-        `SELECT member_id, handle, email, email_is_verified, phone, phone_is_verified
-           FROM ff_member
-          WHERE member_id = $1
-          LIMIT 1`,
-        [midCookie]
-      );
-      const m = rows[0] || null;
-
-      // 2) optional: latest Zeffy email as "auto-credit" hint
-      const { rows: z } = await pool.query(
-        `SELECT donor_email
-           FROM zeffy_payments
-          WHERE ff_member_id = $1
-          ORDER BY occurred_at DESC
-          LIMIT 1`,
-        [midCookie]
-      );
-      const autoCreditEmail = z[0]?.donor_email || null;
-
-      const me = {
-        member_id: midCookie,
-        handle: m?.handle || (m?.email ? m.email.split('@')[0] : null),
-        email: m?.email || null,
-        email_is_verified: !!m?.email_is_verified,
-        phone: m?.phone || null,
-        phone_is_verified: !!m?.phone_is_verified,
-        autocredit_email: autoCreditEmail
-      };
-
-      // keep top-level member_id for backward compat
-      return res.status(200).json({ ok: true, me, member_id: midCookie });
+      return res.status(200).json({ ok:true, member_id: midCookie });
     }
 
-    // ESPN self-heal branch can stay as-is if you have it; default to null
-    return res.status(200).json({ ok: true, me: null, member_id: null });
+    // ... ESPN self-heal branch ...
+    return res.status(200).json({ ok:true, member_id: null });
   } catch (e) {
-    // optionally log e
-    return res.status(200).json({ ok: true, me: null, member_id: null });
+    return res.status(200).json({ ok:true, member_id: null });
   }
 });
-
 
 function requireMember(req, res, next) {
   // accept cookie first, then header/body/query fallbacks
