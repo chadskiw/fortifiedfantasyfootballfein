@@ -1,6 +1,8 @@
 // routes/fp-apply-week.js  (CommonJS)
 const express = require('express');
 const router  = express.Router();
+const { Pool } = require('pg');
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 app.set('db', pool); // we'll normalize this to pg-promise-like below
 
