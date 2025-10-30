@@ -1,7 +1,7 @@
 // routes/fp-apply-week.js  (CommonJS)
 const express = require('express');
 const router  = express.Router();
-router.use(express.json()); // ensure JSON body parsing on this router
+router.use(express.json()); // ensure JSON body parsing
 
 /* ---------------- DB bootstrap (local fallback) ---------------- */
 const { Pool } = require('pg');
@@ -13,12 +13,10 @@ const localPool = new Pool({
 /** Wrap a db so it exposes pg-promise-like methods: any / oneOrNone / none */
 function wrapDb(raw){
   if (!raw) return null;
-  // Already pg-promise
   if (typeof raw.any === 'function' && typeof raw.oneOrNone === 'function' && typeof raw.none === 'function'){
-    return raw;
+    return raw; // pg-promise
   }
-  // node-postgres Pool / Client
-  if (typeof raw.query === 'function'){
+  if (typeof raw.query === 'function'){ // node-postgres Pool/Client
     return {
       any      : (q, p = []) => raw.query(q, p).then(r => r.rows),
       oneOrNone: (q, p = []) => raw.query(q, p).then(r => r.rows[0] || null),
@@ -27,18 +25,13 @@ function wrapDb(raw){
   }
   return null;
 }
-
-/** Try to get a db from the app; otherwise use our local pool. */
 function getDb(req){
   const candidate =
     (req.app && typeof req.app.get === 'function' && req.app.get('db')) ||
     (req.app && req.app.locals && req.app.locals.db) ||
     null;
-
-  // Last-ditch: try a shared module if you have one
   let shared = null;
   try { shared = require('../db/pool'); } catch (_) {}
-
   return wrapDb(candidate) || wrapDb(shared) || wrapDb(localPool);
 }
 
@@ -50,20 +43,14 @@ if (!fetchFn) {
 }
 const fetch = (...args) => fetchFn(...args);
 
-/* ---------------- constants ---------------- */
-const SCORINGS = ['PPR','HALF','STD'];
-
 /* ---------------- helpers ---------------- */
-
 function apiBaseFromReq(req){
-  // Prefer explicit internal origin; otherwise current host
   return process.env.INTERNAL_API_ORIGIN
       || process.env.HOST
       || `${req.protocol}://${req.get('host')}`;
 }
 
 async function getAllLeagues(db, season){
-  // Prefer registry table
   const rows = await db.any(`
     SELECT DISTINCT league_id
     FROM ff_sport_ffl
@@ -72,13 +59,12 @@ async function getAllLeagues(db, season){
   `, [season]);
   if (rows.length) return rows.map(r => String(r.league_id));
 
-  // Fallback to env list (comma-separated)
   const envList = (process.env.FF_LEAGUES || '')
     .split(',').map(s => s.trim()).filter(Boolean);
   return envList;
 }
 
-async function getTeamsForLeague(db, season, leagueId){
+async function getTeamsForLeague(db, season, leagueId, rosterFetch){
   const rows = await db.any(`
     SELECT DISTINCT team_id, MAX(team_name) AS team_name
     FROM ff_sport_ffl
@@ -86,27 +72,39 @@ async function getTeamsForLeague(db, season, leagueId){
     GROUP BY team_id
     ORDER BY team_id
   `, [season, leagueId]);
-  return rows.map(r => ({ team_id: Number(r.team_id), team_name: r.team_name || '' }));
+  if (rows.length) return rows.map(r => ({ team_id: Number(r.team_id), team_name: r.team_name || '' }));
+
+  // Fallback discover by probing roster endpoint
+  const MAX_TEAMS = 20;
+  const out = [];
+  for (let tid=1; tid<=MAX_TEAMS; tid++){
+    try{
+      const ro = await rosterFetch({ teamId: tid });
+      if (ro?.team_name) out.push({ team_id: tid, team_name: ro.team_name });
+    }catch(_){}
+  }
+  return out;
 }
 
-async function fpIdFor(db, espnId){
-  const row = await db.oneOrNone(`
-    SELECT fp_id
-    FROM ff_fp_player_map
-    WHERE espn_id = $1 OR espn_player_id = $1
-    LIMIT 1
-  `, [Number(espnId)]);
-  return row?.fp_id || null;
-}
-
-async function weeklyPts(db, { season, week, scoring, fpId }){
-  if (!fpId) return 0;
-  const row = await db.oneOrNone(`
-    SELECT points FROM ff_fp_points_week
-    WHERE season=$1 AND week=$2 AND scoring=$3 AND fp_id=$4
-    LIMIT 1
-  `, [season, week, scoring, fpId]);
-  return Number(row?.points || 0);
+async function detectScoringLabel(req, season, leagueId){
+  try{
+    const base = apiBaseFromReq(req);
+    const r = await fetch(`${base}/api/platforms/espn/league?season=${season}&leagueId=${leagueId}`, { method:'GET' });
+    if (!r.ok) return 'LEAGUE';
+    const j = await r.json();
+    // Try common shapes: look for points per reception
+    const rec = j?.settings?.scoringSettings?.reception ??
+                j?.settings?.scoring?.reception ??
+                j?.scoringSettings?.reception ??
+                j?.scoring?.reception ??
+                null;
+    if (rec === 1) return 'PPR';
+    if (rec === 0.5) return 'HALF';
+    if (rec === 0) return 'STD';
+    return 'LEAGUE';
+  }catch(_){
+    return 'LEAGUE';
+  }
 }
 
 function toStarterRow(p){
@@ -116,7 +114,6 @@ function toStarterRow(p){
     slot    : p.slot || p.lineupSlot || p.lineupSlotId || '',
     team    : p.teamAbbr || p.proTeam || p.team || '',
     position: p.position || p.defaultPosition || '',
-    fpId    : null,
     pts     : 0
   };
 }
@@ -143,7 +140,7 @@ async function upsertTeamWeek(db, row){
   `, [
     row.season, String(row.league_id), Number(row.team_id), Number(row.week),
     row.team_name || '', Number(row.points || 0),
-    JSON.stringify(row.starters || []), String(row.scoring || 'PPR')
+    JSON.stringify(row.starters || []), String(row.scoring || 'LEAGUE')
   ]);
 }
 
@@ -164,58 +161,58 @@ router.post('/apply-week', async (req, res) => {
     if (!Number.isFinite(week) || week < 1 || week > 18) {
       return res.status(400).json({ ok:false, error:'Invalid `week` (1–18).' });
     }
-    const scorings = Array.isArray(req.body && req.body.scorings) && req.body.scorings.length
-      ? req.body.scorings.map(s => String(s).toUpperCase())
-      : SCORINGS;
 
     const leagues = await getAllLeagues(db, season);
     if (!leagues.length) return res.status(404).json({ ok:false, error:'No leagues for season.' });
 
     const summary = [];
+
     for (const leagueId of leagues){
-      const teams = await getTeamsForLeague(db, season, leagueId);
+      // scoring label per league (PPR/HALF/STD/LEAGUE)
+      const scoring = await detectScoringLabel(req, season, leagueId);
+
+      // Prepare a fetcher for team discovery fallback
+      const rosterFetch = (args) => fetchRoster(req, { season, week, leagueId, ...args });
+
+      const teams = await getTeamsForLeague(db, season, leagueId, rosterFetch);
 
       for (const t of teams){
         let roster;
         try {
-          roster = await fetchRoster(req, { season, week, leagueId, teamId: t.team_id });
+          roster = await rosterFetch({ teamId: t.team_id });
         } catch (e) {
           summary.push({ leagueId, teamId: t.team_id, error: `roster: ${e.message}` });
           continue;
         }
 
-        // starters list (prefer server’s isStarter; fallback by slot whitelist)
         const players = roster.players || (roster.team && roster.team.players) || roster || [];
         const startersRaw = players.filter(p =>
           p.isStarter ||
           ['QB','RB','WR','TE','FLEX','K','DST'].includes(String(p.slot || '').toUpperCase())
         );
 
-        // normalize + map fpId
-        const starters = startersRaw.map(toStarterRow);
-        for (const s of starters){ s.fpId = await fpIdFor(db, s.id); }
+        const starters = startersRaw.map(toStarterRow).map(s => {
+          // Find original source player to read points
+          const src = players.find(pp => Number(pp.playerId ?? pp.id) === s.id) || {};
+          const pts = Number(
+            (src.appliedPoints ?? src.applied_points ?? src.points ?? src.applied ?? 0)
+          );
+          return { ...s, pts: Number((pts || 0).toFixed(2)) };
+        });
 
-        // per scoring: compute pts and upsert
-        for (const scoring of scorings){
-          const rows = [];
-          for (const s of starters){
-            const pts = await weeklyPts(db, { season, week, scoring, fpId: s.fpId });
-            rows.push({ ...s, pts: Number(pts.toFixed(2)) });
-          }
-          const points = Number(rows.reduce((a,b)=> a + (b.pts || 0), 0).toFixed(2));
+        const points = Number(starters.reduce((a,b)=> a + (b.pts || 0), 0).toFixed(2));
 
-          await upsertTeamWeek(db, {
-            season, league_id: leagueId, team_id: t.team_id,
-            week, scoring, team_name: roster.team_name || t.team_name || '',
-            starters: rows, points
-          });
+        await upsertTeamWeek(db, {
+          season, league_id: leagueId, team_id: t.team_id,
+          week, scoring, team_name: roster.team_name || t.team_name || '',
+          starters, points
+        });
 
-          summary.push({ leagueId, teamId: t.team_id, scoring, count: rows.length, points });
-        }
+        summary.push({ leagueId, teamId: t.team_id, scoring, count: starters.length, points });
       }
     }
 
-    res.json({ ok:true, season, week, scorings, updated: summary.length, summary });
+    res.json({ ok:true, season, week, updated: summary.length, summary });
   } catch (err){
     console.error('apply-week error', err);
     res.status(500).json({ ok:false, error: String(err.message || err) });
