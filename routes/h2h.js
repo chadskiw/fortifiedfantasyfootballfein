@@ -125,6 +125,89 @@ async function walletIdForHold(cli, holdId) {
   if (!h) throw new Error('hold_not_found');
   return { walletId: Number(h.wallet_id), amount: Number(h.amount) };
 }
+// --- DETAIL (single challenge) ---
+// GET /api/h2h/detail?chId=...   or   /api/h2h/detail/:id
+router.get(['/detail', '/detail/:id'], async (req, res) => {
+  try {
+    const chId = req.params.id || req.query.chId || req.query.id;
+    if (!chId) return res.status(400).json({ ok:false, error:'missing_ch_id' });
+
+    const { rows:[c] } = await pool.query(
+      `SELECT id, season, week, status, stake_points, created_at, updated_at
+         FROM ff_challenge WHERE id=$1`,
+      [chId]
+    );
+    if (!c) return res.status(404).json({ ok:false, error:'challenge_not_found' });
+
+    const { rows: sides } = await pool.query(
+      `SELECT side, league_id, team_id, team_name,
+              claimed_by_member_id, owner_member_id, hold_id,
+              locked_at, points_final, roster_json, roster_locked_json
+         FROM ff_challenge_side
+        WHERE challenge_id=$1
+        ORDER BY side`,
+      [chId]
+    );
+
+    const sideToNum = (s) => {
+      const t = String(s ?? '').trim().toLowerCase();
+      if (t === '1' || t === 'home' || t === 'left' || t === 'a') return 1;
+      if (t === '2' || t === 'away' || t === 'right' || t === 'b') return 2;
+      return null;
+    };
+    const numToSide = (n) => (n === 1 ? 'home' : n === 2 ? 'away' : null);
+    const toInt = (x) => {
+      const s = String(x ?? '').replace(/[^\d-]/g, '');
+      const n = parseInt(s, 10);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const shaped = {
+      id: c.id,
+      season: c.season,
+      week: c.week,
+      status: c.status,
+      stake_points: toInt(c.stake_points),
+      created_at: c.created_at,
+      updated_at: c.updated_at
+    };
+
+    for (const s of sides) {
+      const label = numToSide(sideToNum(s.side)) || String(s.side || '').toLowerCase();
+      const team = {
+        side: label,
+        leagueId: toInt(s.league_id),
+        teamId: toInt(s.team_id),
+
+        // legacy aliases used by some FE code
+        lid: toInt(s.league_id),
+        tid: toInt(s.team_id),
+
+        tname: s.team_name || `Team ${s.team_id}`,
+        lname: s.league_name || null,  // optional cols in DB; null is fine
+        logo:  s.team_logo || null,
+
+        owner_member_id: s.owner_member_id || null,
+        claimed_by_member_id: s.claimed_by_member_id || null,
+        hold_id: s.hold_id || null,
+        locked_at: s.locked_at || null,
+        points_final: s.points_final || null,
+
+        // rosters if present; FE can still fetch live from ESPN when null
+        roster: s.roster_json || null,
+        roster_locked: s.roster_locked_json || null
+      };
+      if (label === 'home') shaped.home = team;
+      else if (label === 'away') shaped.away = team;
+      else shaped[label || 'side'] = team;
+    }
+
+    res.json({ ok: true, challenge: shaped });
+  } catch (e) {
+    console.error('h2h.detail.error', e);
+    res.status(400).json({ ok:false, error: e.message });
+  }
+});
 
 /* ===========================
    LIST OPEN/PENDING (Mini Hub)
