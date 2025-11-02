@@ -131,6 +131,33 @@ function normalizeSwid(raw) {
     return null;
   }
 }
+async function verificationHintsFromMember({ email, phone }) {
+  let emailVerified = false, phoneVerified = false;
+
+  if (email) {
+    const { rows } = await pool.query(
+      `SELECT (email_verified_at IS NOT NULL) AS v
+         FROM ff_member
+        WHERE LOWER(email)=LOWER($1)
+        LIMIT 1`,
+      [email]
+    );
+    emailVerified = !!rows[0]?.v;
+  }
+
+  if (phone) {
+    const { rows } = await pool.query(
+      `SELECT (phone_verified_at IS NOT NULL) AS v
+         FROM ff_member
+        WHERE phone_e164=$1
+        LIMIT 1`,
+      [phone]
+    );
+    phoneVerified = !!rows[0]?.v;
+  }
+
+  return { emailVerified, phoneVerified };
+}
 
 function rowToMember(row) {
   if (!row) return null;
@@ -567,6 +594,13 @@ router.post('/upsert', async (req, res) => {
     const phone   = toE164(b.phone);
     const emailV  = !!b.email_is_verified;
     const phoneV  = !!b.phone_is_verified;
+// NEW: strengthen with server-side hints
+const { emailVerified: emailVHint, phoneVerified: phoneVHint } =
+  await verificationHintsFromMember({ email, phone });
+
+const emailVFinal = emailV || emailVHint;
+const phoneVFinal = phoneV || phoneVHint;
+
     const image_key = b.image_key || (b.image_url ? stripCdn(b.image_url) : null);
     const fb_groups = Array.isArray(b.fb_groups) ? b.fb_groups.map(String) : null;
 
@@ -602,7 +636,9 @@ router.post('/upsert', async (req, res) => {
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
-      `, [member_id, handle, color_hex_db, image_key, email, phone, emailV, phoneV, fb_groups]);
+      `,
+[member_id, handle, color_hex_db, image_key, email, phone, emailVFinal, phoneVFinal, fb_groups]
+);
       row = q.rows[0];
     } else {
       // stage without member_id (key off handle); member_id will be minted on a later write
@@ -621,7 +657,9 @@ router.post('/upsert', async (req, res) => {
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
-      `, [handle, color_hex_db, image_key, email, phone, emailV, phoneV, fb_groups]);
+      `, 
+[handle, color_hex_db, image_key, email, phone, emailVFinal, phoneVFinal, fb_groups]
+);
       row = q.rows[0];
     }
 
