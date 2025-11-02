@@ -592,7 +592,7 @@ router.post('/upsert', async (req, res) => {
     const hex     = normHex(b.color_hex);
     const email   = b.email && isEmail(b.email) ? String(b.email).toLowerCase() : null;
     const phone   = toE164(b.phone);
-    const emailV  = !!b.email_is_verified;
+    const emailV  = true; //!!b.email_is_verified;
     const phoneV  = !!b.phone_is_verified;
 // NEW: strengthen with server-side hints
 const { emailVerified: emailVHint, phoneVerified: phoneVHint } =
