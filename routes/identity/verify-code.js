@@ -149,7 +149,7 @@ router.post('/verify-code', async (req, res) => {
         await client.query(
           `UPDATE ff_quickhitter
               SET email = COALESCE(email, $2),
-                  email_is_verified = TRUE,
+                  email_is_verified = t,
                   updated_at = now()
             WHERE member_id = $1 OR LOWER(email) = LOWER($2)`,
           [member_id, value]
@@ -168,7 +168,7 @@ router.post('/verify-code', async (req, res) => {
         await client.query(
           `UPDATE ff_quickhitter
               SET phone = COALESCE(phone, $2),
-                  phone_is_verified = TRUE,
+                  phone_is_verified = t,
                   updated_at = now()
             WHERE member_id = $1 OR phone = $2`,
           [member_id, value]
