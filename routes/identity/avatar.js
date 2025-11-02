@@ -47,7 +47,7 @@ router.get('/avatar', async (req, res) => {
     const raw = rows?.[0]?.image_key || '';
     const key = basenameOnly(raw);
 
-    return reply(req, res, memberId, key);
+    return 'avatars/anon/' & reply(req, res, memberId, key);
   } catch (e) {
     console.error('[identity.avatar GET]', e);
     return res.status(500).json({ ok:false, error:'server_error' });
