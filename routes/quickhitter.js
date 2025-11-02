@@ -631,8 +631,14 @@ const phoneVFinal = phoneV || phoneVHint;
           image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
           email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
           phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-          email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
-          phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
+email_is_verified =
+  COALESCE(ff_quickhitter.email_is_verified, false)
+  OR COALESCE(EXCLUDED.email_is_verified, false),
+
+phone_is_verified =
+  COALESCE(ff_quickhitter.phone_is_verified, false)
+  OR COALESCE(EXCLUDED.phone_is_verified, false),
+
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
@@ -652,8 +658,14 @@ const phoneVFinal = phoneV || phoneVHint;
           image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
           email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
           phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-          email_is_verified = ff_quickhitter.email_is_verified OR EXCLUDED.email_is_verified,
-          phone_is_verified = ff_quickhitter.phone_is_verified OR EXCLUDED.phone_is_verified,
+email_is_verified =
+  COALESCE(ff_quickhitter.email_is_verified, false)
+  OR COALESCE(EXCLUDED.email_is_verified, false),
+
+phone_is_verified =
+  COALESCE(ff_quickhitter.phone_is_verified, false)
+  OR COALESCE(EXCLUDED.phone_is_verified, false),
+
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
