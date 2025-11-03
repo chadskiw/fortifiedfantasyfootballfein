@@ -15,7 +15,7 @@ function cookieBaseOpts(req) {
 
   // prefer clearing across *.fortifiedfantasy.com
   if (hostname.endsWith('fortifiedfantasy.com')) {
-    domain = '.fortifiedfantasy.com';
+    domain = 'fortifiedfantasy.com';
   } else if (hostname.includes('.') && hostname !== 'localhost') {
     // fallback: attempt broad domain for other envs (dev/stage)
     domain = '.' + hostname.split('.').slice(-2).join('.');
