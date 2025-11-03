@@ -621,10 +621,10 @@ const phoneVFinal = phoneV || phoneVHint;
     let row;
     if (member_id) {
       const q = await pool.query(`
-        INSERT INTO ff_quickhitter
-          (member_id, handle, color_hex, image_key, email, phone,
-           email_is_verified, phone_is_verified, fb_groups, updated_at, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
+  INSERT INTO ff_quickhitter (member_id, handle, image_key, color_hex, created_at, updated_at, ...)
+  VALUES ($1, $2,
+          NULLIF(regexp_replace(regexp_replace($3, '[?#].*$', ''), '^.*[\\/]', ''), ''),
+          $4, now(), now())
         ON CONFLICT (member_id) DO UPDATE SET
           handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
           color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
