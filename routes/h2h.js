@@ -31,6 +31,21 @@ function toInt(x){
 function idemKey(obj) {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 40);
 }
+async function fetchEspnRoster(req, season, week, leagueId, teamId) {
+  const proto  = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host   = req.headers['x-forwarded-host']  || req.headers.host;
+  const origin = `${proto}://${host}`;
+  const url    = `${origin}/api/platforms/espn/roster?season=${season}&week=${week}&leagueId=${leagueId}&teamId=${teamId}`;
+
+  const r = await fetch(url, { headers: { cookie: req.headers.cookie || '' } });
+  if (!r.ok) return null;
+
+  const j = await r.json();
+  const items = (j.players || j.roster || []);
+  const starters = items.filter(p => p.isStarter ?? (p.lineupSlotId !== undefined ? p.lineupSlotId < 20 : true));
+  const bench    = items.filter(p => p.isStarter === false || (p.lineupSlotId !== undefined && p.lineupSlotId >= 20));
+  return { starters, bench };
+}
 
 // identity helper (server-side)
 async function getMemberId(req) {
@@ -410,47 +425,74 @@ router.post('/claim', async (req, res) => {
       if (!meSide) throw new Error('side_not_found');
       if (meSide.claimed_by_member_id) throw new Error('side_already_claimed');
 
-      // 3) funds check + create hold on new tables
-      const avail = await availablePoints(cli, memberId);
-      if (avail < stake) throw new Error('insufficient_funds');
+      // 3) funds check + create hold (unchanged)
+const avail = await availablePoints(cli, memberId);
+if (avail < stake) throw new Error('insufficient_funds');
 
-      const refId  = `${ch_id}:${sideNum === 1 ? 'home' : 'away'}`;
-      const holdId = await createOrGetHold(cli, memberId, stake, refId);
+const refId  = `${ch_id}:${sideNum === 1 ? 'home' : 'away'}`;
+const holdId = await createOrGetHold(cli, memberId, stake, refId);
 
-      // 4) mark claim + roster seed
-      const rosterSeed = (meSide.roster_json || roster_json) || { starters: [], bench: [] };
-      await cli.query(
-        `UPDATE ff_challenge_side
-            SET claimed_by_member_id=$1, claimed_at=NOW(), hold_id=$2, roster_json=$3, updated_at=NOW()
-          WHERE challenge_id=$4
-            AND lower(side::text) = ANY($5::text[])`,
-        [memberId, holdId, rosterSeed, ch_id, sideTokens(sideNum)]
-      );
+// 4) mark claim + SNAPSHOT now
+// Load sides (we already have `sides` from earlier SELECT ... FOR UPDATE)
+const me = meSide;    // side user is claiming
+const ot = other;     // opponent side (may be undefined if not created yet)
 
-      // 5) advance status
-// 5) advance status (and snapshot rosters when locking)
+// Prefer DB → body → fresh pull
+const bodyRoster = (roster_json && (roster_json.starters || roster_json.bench)) ? roster_json : null;
+let myFresh = me.roster_json || bodyRoster;
+if (!myFresh) {
+  myFresh = await fetchEspnRoster(req, ch.season, ch.week, me.league_id, me.team_id).catch(() => null);
+}
+if (!myFresh) myFresh = { starters: [], bench: [] };
+
+// Snapshot claimant immediately: set both working + locked copies.
+// We do NOT touch locked_at here (leave it for full lock).
+await cli.query(
+  `UPDATE ff_challenge_side
+      SET claimed_by_member_id=$1,
+          claimed_at=NOW(),
+          hold_id=$2,
+          roster_json = COALESCE(roster_json, $3),
+          roster_locked_json = COALESCE(roster_locked_json, $3),
+          updated_at=NOW()
+    WHERE challenge_id=$4
+      AND lower(side::text) = ANY($5::text[])`,
+  [memberId, holdId, myFresh, ch_id, sideTokens(sideNum)]
+);
+
+// Opportunistically cache opponent's live roster if empty (do not lock them)
+if (ot && !ot.roster_json) {
+  const otherFresh = await fetchEspnRoster(req, ch.season, ch.week, ot.league_id, ot.team_id).catch(() => null);
+  if (otherFresh) {
+    await cli.query(
+      `UPDATE ff_challenge_side
+          SET roster_json=$1,
+              updated_at=NOW()
+        WHERE challenge_id=$2
+          AND lower(side::text) = ANY($3::text[])`,
+      [otherFresh, ch_id, sideTokens(sideToNum(ot.side))]
+    );
+  }
+}
+
+// 5) advance status (existing logic)
+// If second side is already claimed → lock (your current freeze-both block runs)
+// Else → pending
 const isSecond = !!other?.claimed_by_member_id;
 
 if (isSecond) {
-  // mark challenge locked
-  await cli.query(
-    `UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`,
-    [ch_id]
-  );
+  await cli.query(`UPDATE ff_challenge SET status='locked', updated_at=NOW() WHERE id=$1`, [ch_id]);
 
-  // freeze both sides' lineups at lock time
-  await cli.query(
-    `
+  // your existing “freeze both” UPDATE stays as-is
+  await cli.query(`
     UPDATE ff_challenge_side
        SET locked_at = NOW(),
            roster_locked_json = CASE
-             -- prefer working roster if present and shaped as {starters,bench}
              WHEN roster_json IS NOT NULL
-                  AND roster_json::text <> '{}'
-                  AND roster_json ? 'starters'
-                  AND roster_json ? 'bench'
+              AND roster_json::text <> '{}'
+              AND roster_json ? 'starters'
+              AND roster_json ? 'bench'
                THEN roster_json
-             -- otherwise build from legacy lineup/bench arrays
              ELSE jsonb_build_object(
                     'starters', COALESCE(lineup_json, '[]'::jsonb),
                     'bench',    COALESCE(bench_json,  '[]'::jsonb)
@@ -458,19 +500,14 @@ if (isSecond) {
            END,
            updated_at = NOW()
      WHERE challenge_id = $1
-    `,
-    [ch_id]
-  );
+  `, [ch_id]);
 } else if (ch.status === 'open') {
-  await cli.query(
-    `UPDATE ff_challenge SET status='pending', updated_at=NOW() WHERE id=$1`,
-    [ch_id]
-  );
+  await cli.query(`UPDATE ff_challenge SET status='pending', updated_at=NOW() WHERE id=$1`, [ch_id]);
 }
 
+const newAvail = await availablePoints(cli, memberId);
+return { status: isSecond ? 'locked' : 'pending', hold_id: holdId, available_points: newAvail, side: sideNum };
 
-      const newAvail = await availablePoints(cli, memberId);
-      return { status: isSecond ? 'locked' : 'pending', hold_id: holdId, available_points: newAvail, side: sideNum };
     });
 
     res.json({ ok:true, ...out });
