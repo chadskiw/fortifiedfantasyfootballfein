@@ -1,75 +1,90 @@
 // routes/espn/_cred.js
 const { Pool } = require('pg');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-const s = v => (v == null ? undefined : String(v).trim() || undefined);
-const n = v => { const x = Number(v); return Number.isFinite(x) ? x : undefined; };
+const s = (v) => (v == null ? undefined : String(v).trim() || undefined);
 
-// ESPN is picky: keep braces + UPPERCASE hex
+function parseSeason(value) {
+  const str = s(value);
+  if (!str) return undefined;
+  const num = Number.parseInt(str, 10);
+  return Number.isFinite(num) ? String(num) : undefined;
+}
+
+function parseTeamId(value) {
+  const str = s(value);
+  if (!str) return undefined;
+  if (!/^\d+$/.test(str)) return undefined;
+  const num = Number.parseInt(str, 10);
+  return Number.isFinite(num) ? num : undefined;
+}
+
 // ESPN is picky: keep braces + UPPERCASE hex
 function normSwid(swid) {
   const raw = (swid ?? '').toString().trim();
   if (!raw) return undefined;
 
-  // strip any braces first
   const noBraces = raw.replace(/[{}]/g, '');
-
-  // strict GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), case-insensitive
   const m = noBraces.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   if (!m) return undefined;
 
   return `{${m[0].toUpperCase()}}`;
 }
 
+async function memberIdsForContext({ season, leagueId, teamId, memberId }) {
+  const seen = new Set();
+  const add = (value) => {
+    const cleaned = s(value);
+    if (cleaned) seen.add(cleaned);
+  };
 
-// keep helpers s(), n(), normSwid() as you already have
+  add(memberId);
 
-// 1) Owner lookup with guards + league-level fallback when teamId is blank or no match
-async function memberIdsForContext({ season, leagueId, teamId }) {
-  const params = [String(season||''), String(leagueId||'')];
+  const seasonStr = parseSeason(season);
+  const leagueStr = s(leagueId);
+  const tid = parseTeamId(teamId);
 
-  // First try: with team filter (only if numeric)
-  let withTeamSQL = `
-    SELECT DISTINCT member_id
-    FROM ff_sport_ffl
-    WHERE (platform = '018' OR lower(platform) = 'espn')
-      AND season = $1
-      AND league_id = $2
-      AND member_id IS NOT NULL
-  `;
-
-  const tid = Number(teamId);
-  let withTeamRows = [];
-  if (Number.isFinite(tid)) {
-    const sql = withTeamSQL + ` AND team_id = $3::int`;
-    const { rows } = await pool.query(sql, [...params, tid]);
-    withTeamRows = rows;
+  if (!leagueStr) {
+    return Array.from(seen);
   }
 
-  if (withTeamRows.length) {
-    return withTeamRows.map(r => r.member_id).filter(Boolean);
+  if (seasonStr && tid != null) {
+    const { rows } = await pool.query(
+      `
+        SELECT DISTINCT member_id
+        FROM ff_sport_ffl
+        WHERE (platform = '018' OR lower(platform) = 'espn')
+          AND season = $1
+          AND league_id = $2
+          AND team_id = $3::int
+          AND member_id IS NOT NULL
+      `,
+      [seasonStr, leagueStr, tid]
+    );
+    rows.forEach((r) => add(r.member_id));
+    if (seen.size) return Array.from(seen);
   }
 
-  // Second try: league-level (any member from this league/season)
-  const { rows: leagueRows } = await pool.query(
-    `
-      SELECT DISTINCT member_id
-      FROM ff_sport_ffl
-      WHERE (platform = '018' OR lower(platform) = 'espn')
-        AND season = $1
-        AND league_id = $2
-        AND member_id IS NOT NULL
-    `,
-    params
-  );
-  if (leagueRows.length) {
-    return leagueRows.map(r => r.member_id).filter(Boolean);
+  if (seasonStr) {
+    const { rows } = await pool.query(
+      `
+        SELECT DISTINCT member_id
+        FROM ff_sport_ffl
+        WHERE (platform = '018' OR lower(platform) = 'espn')
+          AND season = $1
+          AND league_id = $2
+          AND member_id IS NOT NULL
+      `,
+      [seasonStr, leagueStr]
+    );
+    rows.forEach((r) => add(r.member_id));
+    if (seen.size) return Array.from(seen);
   }
 
-  // Third (optional): try any season (handles stale season mapping)
   const { rows: anyRows } = await pool.query(
     `
       SELECT DISTINCT member_id
@@ -79,30 +94,13 @@ async function memberIdsForContext({ season, leagueId, teamId }) {
         AND member_id IS NOT NULL
       ORDER BY updated_at DESC NULLS LAST
     `,
-    [String(leagueId)]
+    [leagueStr]
   );
-  return anyRows.map(r => r.member_id).filter(Boolean);
+  anyRows.forEach((r) => add(r.member_id));
+
+  return Array.from(seen);
 }
 
-// 2) Top-level resolver now calls memberIdsForContext() and continues as before
-async function resolveEspnCredCandidates({ req, season, leagueId, teamId }) {
-  const out = [];
-  try {
-    const members = await memberIdsForContext({ season, leagueId, teamId });
-
-    // Prefer quick_snap-matched SWID first (most accurate account)
-    out.push(...await credsViaQuickSnap(members));
-
-    // Fallback: any cred rows tied to those members
-    if (!out.length) out.push(...await credsForMembers(members));
-  } catch (e) {
-    console.warn('[espn/_cred] member lookup failed:', e.message);
-  }
-  return out.map(c => ({ ...c, stale: isStale(c.last_seen, 3) }));
-}
-
-
-// First: use the member's *current* quick_snap SWID, then pull cred by SWID
 async function credsViaQuickSnap(memberIds) {
   if (!memberIds?.length) return [];
   const sql = `
@@ -114,16 +112,15 @@ async function credsViaQuickSnap(memberIds) {
     ORDER BY c.last_seen DESC NULLS LAST
   `;
   const { rows } = await pool.query(sql, [memberIds]);
-  return rows.map(r => ({
+  return rows.map((r) => ({
     source: 'quick_snap',
     memberId: r.member_id,
     swid: normSwid(r.swid || r.quick_snap),
     s2: String(r.espn_s2).trim(),
-    last_seen: r.last_seen
+    last_seen: r.last_seen,
   }));
 }
 
-// Second: any cred rows for that member (legacy, fallback)
 async function credsForMembers(memberIds) {
   if (!memberIds?.length) return [];
   const sql = `
@@ -135,35 +132,31 @@ async function credsForMembers(memberIds) {
     ORDER BY member_id, last_seen DESC NULLS LAST
   `;
   const { rows } = await pool.query(sql, [memberIds]);
-  return rows.map(r => ({
+  return rows.map((r) => ({
     source: 'member_link',
     memberId: r.member_id,
     swid: normSwid(r.swid),
     s2: String(r.espn_s2).trim(),
-    last_seen: r.last_seen
+    last_seen: r.last_seen,
   }));
 }
 
-function isStale(ts, days=3) {
+function isStale(ts, days = 3) {
   if (!ts) return true;
   const ageMs = Date.now() - new Date(ts).getTime();
-  return ageMs > days*24*3600*1000;
+  return ageMs > days * 24 * 3600 * 1000;
 }
 
-// Exported resolver
-async function resolveEspnCredCandidates({ req, season, leagueId, teamId }) {
+async function resolveEspnCredCandidates({ req, season, leagueId, teamId, memberId }) {
   const out = [];
   try {
-    const members = await memberIdsForContext({ season, leagueId, teamId });
-    // 1) Prefer quick_snap-specific cred (correct SWID for today)
+    const members = await memberIdsForContext({ season, leagueId, teamId, memberId });
     out.push(...await credsViaQuickSnap(members));
-    // 2) Fallback: any cred by member_id
     if (!out.length) out.push(...await credsForMembers(members));
   } catch (e) {
     console.warn('[espn/_cred] member lookup failed:', e.message);
   }
-  // annotate staleness (used by routes to message the FE)
-  return out.map(c => ({ ...c, stale: isStale(c.last_seen, 3) }));
+  return out.map((c) => ({ ...c, stale: isStale(c.last_seen, 3) }));
 }
 
 module.exports = { resolveEspnCredCandidates };
