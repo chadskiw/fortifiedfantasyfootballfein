@@ -4,7 +4,7 @@ const pool = require('../../src/db/pool');
 const router = express.Router();
 
 const CDN_BASE = 'https://img.fortifiedfantasy.com';
-const CDN_PATH = '/avatar/anon';
+const CDN_PATH = '/avatars/anon';
 const DEFAULT_KEY = 'default.png'; // adjust if your default differs
 const SAFE_KEY = /^([A-Za-z0-9._-]{2,128})$/;
 
