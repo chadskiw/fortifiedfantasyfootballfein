@@ -84,11 +84,14 @@ async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit 
 
   const url = `${ESPN_PLAYERS_BASE(season, leagueId)}?scoringPeriodId=${week}&view=kona_player_info`;
 
-  const { status, body, used } = await fetchFromEspnWithCandidates(url, req, { leagueId }, {
-    // Extra headers ESPN looks for:
-    'x-fantasy-filter': JSON.stringify(filter),
-    'x-fantasy-platform': 'kona-p',
-    'accept': 'application/json'
+  const { status, body, used } = await fetchFromEspnWithCandidates(url, req, {
+    leagueId,
+    extraHeaders: {
+      // Extra headers ESPN looks for:
+      'x-fantasy-filter': JSON.stringify(filter),
+      'x-fantasy-platform': 'kona-p',
+      accept: 'application/json'
+    }
   });
 
   const arr = safeParseArr(body);

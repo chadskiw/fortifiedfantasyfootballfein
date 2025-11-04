@@ -704,7 +704,7 @@ router.get('/cred', ensureCred, async (req, res) => {
 // ========== NEW: kona passthrough with per-team cred selection ==========
 const { resolveEspnCredCandidates } = require('./espnCred'); // ensure this file is present
 
-async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId, memberId }) {
+async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId, memberId, extraHeaders } = {}) {
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
   // allow final unauth attempt
   cands.push({ swid: '', s2: '', source: 'unauth' });
@@ -717,14 +717,24 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, { leagueId, teamId,
     ].filter(Boolean).join('; ');
 
     try {
+      const headers = {
+        'accept'    : 'application/json, text/plain, */*',
+        'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
+        'referer'   : 'https://fantasy.espn.com/',
+        ...(cookie ? { cookie } : {})
+      };
+
+      if (extraHeaders && typeof extraHeaders === 'object') {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+          if (value !== undefined && value !== null && value !== '') {
+            headers[key] = value;
+          }
+        }
+      }
+
       const r = await fetch(upstreamUrl, {
         method: 'GET',
-        headers: {
-          'accept'    : 'application/json, text/plain, */*',
-          'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
-          'referer'   : 'https://fantasy.espn.com/',
-          ...(cookie ? { cookie } : {})
-        }
+        headers
       });
 
       const text = await r.text();

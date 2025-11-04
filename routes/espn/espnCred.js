@@ -12,9 +12,12 @@ const maskHeaderSafe = (s, keep = 6) => {
 };
 
 async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
-  const { leagueId = req.params?.leagueId || req.query?.leagueId || null,
-          teamId   = req.query?.teamId   || null,
-          memberId = req.query?.memberId || null } = ctx || {};
+  const {
+    leagueId = req.params?.leagueId || req.query?.leagueId || null,
+    teamId   = req.query?.teamId   || null,
+    memberId = req.query?.memberId || null,
+    extraHeaders = null
+  } = ctx || {};
 
   const cands = await resolveEspnCredCandidates({ req, leagueId, teamId, memberId });
   cands.push({ swid: '', s2: '', source: 'unauth' });
@@ -26,13 +29,24 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
         cand?.s2   ? `espn_s2=${cand.s2}` : ''
       ].filter(Boolean).join('; ');
 
+      const headers = {
+        accept: 'application/json, text/plain, */*',
+        referer: 'https://fantasy.espn.com/',
+        ...(req.headers['user-agent'] ? { 'user-agent': req.headers['user-agent'] } : {}),
+        ...(cookie ? { cookie } : {})
+      };
+
+      if (extraHeaders && typeof extraHeaders === 'object') {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+          if (value !== undefined && value !== null && value !== '') {
+            headers[key] = value;
+          }
+        }
+      }
+
       const r = await fetch(upstreamUrl, {
         method: 'GET',
-        headers: {
-          accept: 'application/json, text/plain, */*',
-          referer: 'https://fantasy.espn.com/',
-          ...(cookie ? { cookie } : {})
-        }
+        headers
       });
 
       const text = await r.text();
