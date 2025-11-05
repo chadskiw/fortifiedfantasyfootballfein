@@ -62,7 +62,7 @@ async function fetchEspnTeams({ season, sport = 'ffl' }) {
       q.color_hex                   AS "ownerColorHex",
       CASE
         WHEN q.image_key IS NOT NULL AND q.image_key <> ''
-          THEN ('https://img.fortifiedfantasy.com/' || q.image_key)
+          THEN ('https://img.fortifiedfantasy.com/avatars/anon/' || q.image_key)
         ELSE NULL
       END                           AS "ownerBadgeUrl"
     FROM ff_sport_ffl f
