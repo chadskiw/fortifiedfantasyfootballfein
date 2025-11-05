@@ -24,12 +24,12 @@ router.post('/convert', multer.single('file'), async (req, res) => {
       .webp({ quality: 85 })
       .toBuffer();
 
-    const key = `avatars/${Date.now()}-${crypto.randomUUID()}.webp`;
+    const key = `${Date.now()}-${crypto.randomUUID()}.webp`;
     await s3.send(new PutObjectCommand({
       Bucket: BUCKET, Key: key, Body: out, ContentType: 'image/webp'
     }));
 
-    res.json({ ok:true, key, public_url: `https://img.fortifiedfantasy.com/${key}` });
+    res.json({ ok:true, key, public_url: `https://img.fortifiedfantasy.com/avatars/anon/${key}` });
   } catch (e) {
     console.error('[images.convert]', e);
     res.status(500).json({ ok:false, error:'convert_failed' });

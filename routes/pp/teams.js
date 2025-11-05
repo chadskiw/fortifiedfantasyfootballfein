@@ -93,7 +93,7 @@ router.get('/teams', async (req, res) => {
         q.color_hex                             AS "ownerColorHex",
         CASE
           WHEN q.image_key IS NOT NULL AND q.image_key <> ''
-            THEN ('https://img.fortifiedfantasy.com/' || q.image_key)
+            THEN ('https://img.fortifiedfantasy.com/avatars/anon/' || q.image_key)
           ELSE NULL
         END                                     AS "ownerBadgeUrl"
         ${selectRoster}
@@ -113,7 +113,7 @@ router.get('/teams', async (req, res) => {
       // normalize badge URL (avoid accidental //)
       let ownerBadgeUrl = r.ownerBadgeUrl || '';
       if (ownerBadgeUrl.startsWith('https://img.fortifiedfantasy.com//')) {
-        ownerBadgeUrl = ownerBadgeUrl.replace('https://img.fortifiedfantasy.com//','https://img.fortifiedfantasy.com/');
+        ownerBadgeUrl = ownerBadgeUrl.replace('https://img.fortifiedfantasy.com//','https://img.fortifiedfantasy.com/avatars/anon/');
       }
 
       const base = {
