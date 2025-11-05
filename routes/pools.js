@@ -53,6 +53,33 @@ async function getType(table, col){
   return r.rows[0]?.data_type || 'text';
 }
 
+function parseWeekParam(value){
+  if (value == null) return null;
+  if (Array.isArray(value)) {
+    const arr = value.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    return arr.length ? Array.from(new Set(arr)) : null;
+  }
+  const str = String(value).trim();
+  if (!str) return null;
+  const out = new Set();
+  for (const token of str.split(/[,\s]+/)) {
+    if (!token) continue;
+    const range = token.match(/^(\d+)-(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end   = Number(range[2]);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        const lo = Math.min(start, end);
+        const hi = Math.max(start, end);
+        for (let i = lo; i <= hi; i++) out.add(i);
+      }
+      continue;
+    }
+    const n = Number(token);
+    if (Number.isFinite(n) && n > 0) out.add(n);
+  }
+  return out.size ? Array.from(out) : null;
+}
 // GET /api/pools/teams?season=2025
 router.get('/teams', async (req,res)=>{
   try{
@@ -67,6 +94,7 @@ router.get('/teams', async (req,res)=>{
     res.json({ teams: r.rows.map(x=>({ league_id:x.league_id, team_id:x.team_id, team_name:x.team_name })) });
   }catch(e){ res.status(500).json({error:e.message}); }
 });
+
 
 router.post('/preview', express.json(), async (req,res)=>{
   try{
@@ -296,3 +324,11 @@ router.post('/update', express.json(), async (req,res)=>{
 
 
 module.exports = router;
+
+
+
+
+
+
+
+

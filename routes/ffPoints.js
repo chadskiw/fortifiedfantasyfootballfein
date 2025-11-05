@@ -133,5 +133,60 @@ module.exports = function ffPointsRouter(deps = {}) {
     }
   });
 
+  /**
+   * GET /api/ff/team-season-points?season=2025[&leagueId=...&teamId=...&scoring=PPR,HALF]
+   * Aggregates ff_team_weekly_points across all weeks per season/league/team/scoring.
+   */
+  router.get('/team-season-points', async (req, res) => {
+    try {
+      if (!ensureDb(res)) return;
+
+      const season   = toInt(req.query.season);
+      const leagueId = req.query.leagueId ? String(req.query.leagueId) : undefined;
+      const teamId   = req.query.teamId != null ? toInt(req.query.teamId) : undefined;
+
+      if (!season) return bad(res, 'season is required');
+
+      let scoringList = null;
+      if (req.query.scoring) {
+        scoringList = String(req.query.scoring)
+          .split(/[ ,]+/)
+          .map(s => s.trim().toUpperCase())
+          .filter(Boolean);
+        if (!scoringList.length) scoringList = null;
+      }
+
+      const where = ['season = $1'];
+      const params = [season];
+      if (leagueId) { params.push(leagueId); where.push(`league_id = $${params.length}`); }
+      if (Number.isFinite(teamId)) { params.push(teamId); where.push(`team_id = $${params.length}`); }
+      if (scoringList) { params.push(scoringList); where.push(`UPPER(scoring) = ANY($${params.length})`); }
+
+      const sql = `
+        SELECT
+          season,
+          league_id::text AS league_id,
+          team_id,
+          UPPER(scoring) AS scoring,
+          COUNT(*)       AS weeks,
+          SUM(points)::numeric AS points,
+          ARRAY_AGG(DISTINCT week ORDER BY week) AS weeks_covered,
+          MIN(created_at) AS first_recorded,
+          MAX(updated_at) AS last_updated
+        FROM ff_team_weekly_points
+        WHERE ${where.join(' AND ')}
+        GROUP BY season, league_id::text, team_id, UPPER(scoring)
+        ORDER BY league_id::text, team_id, UPPER(scoring);
+      `;
+
+      const q = await db.query(sql, params);
+      res.set('Cache-Control', 'no-store');
+      return res.json({ rows: q.rows, count: q.rowCount });
+    } catch (err) {
+      console.error('team-season-points error', err);
+      return res.status(500).json({ error: 'server_error' });
+    }
+  });
+
   return router;
 };
