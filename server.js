@@ -242,9 +242,27 @@ app.use('/api/pools', poolsPreview);
     try{
       const { season } = req.query;
       if(!season) return res.status(400).json({error:'Season is required.'});
-      const q = `SELECT DISTINCT season, league_id::text AS league_id, team_id, team_name FROM ff_sport_ffl WHERE season=$1 ORDER BY league_id, team_id`;
-      const r = await pool.query(q, [season]);
-      res.json({ teams: r.rows.map(x=>({ league_id:x.league_id, team_id:x.team_id, team_name:x.team_name })) });
+    const q = `
+      SELECT DISTINCT
+        season,
+        league_id::text AS league_id,
+        team_id::text   AS team_id,
+        team_name,
+        COALESCE(league_name,'') AS league_name,
+        COALESCE(league_size,0)  AS league_size
+      FROM ff_sport_ffl
+      WHERE season=$1
+      ORDER BY league_id, team_id`;
+    const r = await pool.query(q, [season]);
+    res.json({
+      teams: r.rows.map(x=>({
+        league_id: x.league_id,
+        team_id:   x.team_id,
+        team_name: x.team_name,
+        league_name: x.league_name,
+        league_size: Number(x.league_size) || 0
+      }))
+    });
     }catch(e){ res.status(500).json({error:e.message}); }
   });
 
