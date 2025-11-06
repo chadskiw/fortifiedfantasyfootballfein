@@ -291,9 +291,36 @@ router.post('/update', express.json(), async (req,res)=>{
       [season, leagueIds.map(String), teamIds.map(String), weeks]
     );
 
+    const skipped = [];
     for (const row of missing.rows) {
-      const pts = await deriveFromEspnRoster({ season, week: row.week, leagueId: row.league_id, teamId: row.team_id });
-      if (pts == null) continue;
+      let pts = null;
+      try {
+        pts = await deriveFromEspnRoster({ season, week: row.week, leagueId: row.league_id, teamId: row.team_id });
+      } catch (err) {
+        console.warn('ff:pools:update deriveFromEspnRoster failed', {
+          season,
+          league_id: row.league_id,
+          team_id: row.team_id,
+          week: row.week,
+          error: err?.message || err
+        });
+        skipped.push({
+          league_id: String(row.league_id),
+          team_id: String(row.team_id),
+          week: row.week,
+          error: err?.message || 'deriveFromEspnRoster failed'
+        });
+        continue;
+      }
+      if (pts == null) {
+        skipped.push({
+          league_id: String(row.league_id),
+          team_id: String(row.team_id),
+          week: row.week,
+          error: 'No points returned from deriveFromEspnRoster'
+        });
+        continue;
+      }
 
       // Upsert weekly as PPR (settler doesn't care about scoring)
       await client.query(
@@ -315,7 +342,7 @@ router.post('/update', express.json(), async (req,res)=>{
     }
 
     await client.query('COMMIT');
-    res.json({ ok:true, upserted: true });
+    res.json({ ok:true, upserted: true, skipped });
   }catch(e){
     await client.query('ROLLBACK');
     res.status(500).json({ok:false, error:e.message, stack:e.stack});
