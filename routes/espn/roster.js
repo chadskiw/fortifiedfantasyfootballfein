@@ -99,29 +99,47 @@ const points     = hasActual ? Number(ptsRaw) : null;        // raw actuals (nul
 const appliedPts = isStarter ? (points ?? 0) : 0;            // starter total (zero until live)
 const projApplied= isStarter ? projZero : 0;
 
-    // Season-to-date actual totals: prefer ESPN aggregate (scoringPeriodId=0), else sum individual weeks
+    // Season-to-date actual totals: prefer ESPN aggregate (scoringPeriodId=0),
+    // otherwise inspect the per-week rows. Some leagues store the running season
+    // total in week=1 (or cumulative per week), so detect monotonic growth and
+    // fall back to the summed weekly totals only when the numbers actually
+    // fluctuate.
     let seasonTotal = null;
+    let derivedSource = null;
     if (Array.isArray(stats) && stats.length) {
-      const aggregate = stats.find(s =>
-        Number(s?.statSourceId) === 0 &&
-        Number(s?.scoringPeriodId) === 0 &&
-        Number.isFinite(+s?.appliedTotal)
-      );
-      if (aggregate) {
-        seasonTotal = Number(aggregate.appliedTotal);
-      } else {
-        let sum = 0;
-        let seen = false;
-        for (const s of stats) {
-          if (Number(s?.statSourceId) !== 0) continue;
-          const sp = Number(s?.scoringPeriodId);
-          if (!Number.isFinite(sp) || sp < 1) continue;
-          if (Number.isFinite(+s?.appliedTotal)) {
-            sum += Number(s.appliedTotal);
-            seen = true;
+      const actualRows = stats.filter(s => Number(s?.statSourceId) === 0 && Number.isFinite(+s?.appliedTotal));
+      if (actualRows.length) {
+        const aggregate = actualRows.find(s => Number(s?.scoringPeriodId) === 0);
+        if (aggregate) {
+          seasonTotal = Number(aggregate.appliedTotal);
+          derivedSource = 'aggregate';
+        } else {
+          const weeklyRows = actualRows
+            .filter(s => Number(s?.scoringPeriodId) > 0)
+            .sort((a,b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
+          if (weeklyRows.length) {
+            let monotonic = true;
+            let prev = null;
+            for (const row of weeklyRows) {
+              const val = Number(row.appliedTotal);
+              if (!Number.isFinite(val)) continue;
+              if (prev != null && val < prev - 0.001) { monotonic = false; break; }
+              prev = val;
+            }
+            if (monotonic) {
+              seasonTotal = Number((weeklyRows.at(-1)?.appliedTotal ?? 0));
+              derivedSource = 'cumulative';
+            } else {
+              let sum = 0;
+              for (const row of weeklyRows) {
+                const val = Number(row.appliedTotal);
+                if (Number.isFinite(val)) sum += val;
+              }
+              seasonTotal = sum;
+              derivedSource = 'summed';
+            }
           }
         }
-        if (seen) seasonTotal = sum;
       }
     }
 const seasonPts = seasonTotal != null ? Number(seasonTotal.toFixed(2)) : null;
@@ -142,7 +160,8 @@ return {
   proj_raw: projRaw == null ? null : Number(projRaw),
   projApplied, hasActual, bye: (projRaw == null && ptsRaw == null),
   seasonPts,
-  seasonActual: seasonPts != null
+  seasonActual: seasonPts != null && derivedSource !== null,
+  seasonSource: derivedSource || null
 };
 
   });
