@@ -6,7 +6,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process
 // node >=18 has global fetch; otherwise: const { fetch } = require('undici');
 const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortifiedfantasy.com';
 
-// Sum starters from ESPN roster
+// Sum starters from ESPN roster and surface starter detail
 async function deriveFromEspnRoster({ season, week, leagueId, teamId }) {
   const u = new URL('/api/platforms/espn/roster', PUBLIC_BASE);
   u.searchParams.set('season', String(season));
@@ -22,6 +22,7 @@ async function deriveFromEspnRoster({ season, week, leagueId, teamId }) {
   if (!Array.isArray(players)) return null;
 
   let total = 0;
+  const starters = [];
   for (const p of players) {
     // starter detection (robust to several shapes)
     const slot = (p.slot || p.lineupSlot || p.lineup || '').toString().toUpperCase();
@@ -32,9 +33,61 @@ async function deriveFromEspnRoster({ season, week, leagueId, teamId }) {
       (Number.isFinite(slotId) && ![20,21,22,23,24,25,26].includes(slotId)); // common bench/IR ids
 
     const ap = Number(p.appliedPoints ?? p.applied_points ?? p.points ?? p.fp ?? p.actual ?? 0);
-    if (isStarter && Number.isFinite(ap)) total += ap;
+    if (!isStarter || !Number.isFinite(ap)) continue;
+
+    total += ap;
+
+    const rawId = p.id ?? p.playerId ?? p.player_id ?? p.player?.id ?? p.player?.playerId ?? p.athleteId ?? p.player?.athleteId;
+    const numericId = Number(rawId);
+    const starterId = Number.isFinite(numericId) ? numericId : rawId != null ? String(rawId) : null;
+    const starterName = [
+      p.name,
+      p.player?.fullName,
+      p.player?.name,
+      p.player?.displayName,
+      p.fullName,
+      p.nickname
+    ].find(v => typeof v === 'string' && v.trim().length) || null;
+    const teamCode = [
+      p.teamAbbrev,
+      p.team,
+      p.proTeam,
+      p.proTeamAbbrev,
+      p.player?.proTeamAbbreviation,
+      p.player?.proTeam
+    ].find(v => typeof v === 'string' && v.trim().length);
+    const positionCode = [
+      p.position,
+      p.pos,
+      p.player?.defaultPosition,
+      p.player?.position,
+      p.player?.defaultPositionAbbreviation
+    ].find(v => typeof v === 'string' && v.trim().length);
+
+    starters.push({
+      id: starterId,
+      pts: Number(ap.toFixed(2)),
+      name: starterName,
+      slot,
+      team: teamCode ? String(teamCode).toUpperCase() : null,
+      position: positionCode ? String(positionCode).toUpperCase() : null
+    });
   }
-  return Number(total.toFixed(2));
+  const teamName =
+    [
+      j?.team?.name,
+      j?.team?.teamName,
+      j?.teamName,
+      j?.team_name,
+      j?.team?.nickname,
+      j?.fantasyTeam?.teamName
+    ].find(v => typeof v === 'string' && v.trim().length) || null;
+
+  return {
+    points: Number(total.toFixed(2)),
+    starters,
+    teamName
+  };
 }
 
 // --- helpers ---
@@ -177,6 +230,20 @@ router.post('/preview', express.json(), async (req,res)=>{
       scoring.map(s=>String(s).toUpperCase())
     ])).rows;
 
+    const teamNameMap = new Map();
+    const nameRows = await pool.query(
+      `SELECT league_id::text AS league_id, team_id::text AS team_id, team_name
+       FROM ff_sport_ffl
+       WHERE season=$1`,
+      [season]
+    );
+    for (const row of nameRows.rows) {
+      if (row.team_name) teamNameMap.set(`${row.league_id}:${row.team_id}`, row.team_name);
+    }
+    for (const row of baseRows) {
+      if (row.team_name) teamNameMap.set(`${row.league_id}:${row.team_id}`, row.team_name);
+    }
+
     // Which (lid,tid,week,scoring) are missing team_points?
     const want = new Set();
     for (let i=0;i<leagueIds.length;i++){
@@ -198,13 +265,19 @@ router.post('/preview', express.json(), async (req,res)=>{
       const memoKey = `${lid}:${tid}:${wk}`;
       if (!extras.some(e=>`${e.league_id}:${e.team_id}:${e.week}`===memoKey)) {
         try{
-          const pts = await deriveFromEspnRoster({ season, week:+wk, leagueId:lid, teamId:tid });
-          if (pts != null) {
+          const espn = await deriveFromEspnRoster({ season, week:+wk, leagueId:lid, teamId:tid });
+          if (espn?.points != null) {
+            const lookupKey = `${String(lid)}:${String(tid)}`;
+            const derivedName = typeof espn.teamName === 'string' && espn.teamName.trim().length
+              ? espn.teamName.trim()
+              : teamNameMap.get(lookupKey) || null;
+            if (derivedName) teamNameMap.set(lookupKey, derivedName);
             // default to PPR (works for our challenge settler which ignores scoring)
             extras.push({
               season, league_id: String(lid), team_id: String(tid),
-              team_name: null, week:+wk, scoring: 'PPR',
-              team_points: Number(pts), pool_points: null
+              team_name: derivedName, week:+wk, scoring: 'PPR',
+              team_points: Number(espn.points), pool_points: null,
+              starters: espn.starters && espn.starters.length ? espn.starters : null
             });
           }
         }catch(e){ /* ignore individual fetch errors */ }
@@ -243,6 +316,17 @@ router.post('/update', express.json(), async (req,res)=>{
     const weeklyTidType = await getType('ff_team_weekly_points','team_id');
     const weeklyLidCast = ['bigint','integer','numeric','smallint','decimal'].includes(weeklyLidType) ? `::${weeklyLidType}` : '::text';
     const weeklyTidCast = ['bigint','integer','numeric','smallint','decimal'].includes(weeklyTidType) ? `::${weeklyTidType}` : '::text';
+
+    const teamNameMap = new Map();
+    const teamRows = await client.query(
+      `SELECT league_id::text AS league_id, team_id::text AS team_id, team_name
+       FROM ff_sport_ffl
+       WHERE season=$1`,
+      [season]
+    );
+    for (const row of teamRows.rows) {
+      if (row.team_name) teamNameMap.set(`${row.league_id}:${row.team_id}`, row.team_name);
+    }
 
     await client.query('BEGIN');
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ff_pools_key ON ff_pools(season, league_id, team_id, week, scoring);`);
@@ -312,9 +396,9 @@ router.post('/update', express.json(), async (req,res)=>{
 
     const skipped = [];
     for (const row of missing.rows) {
-      let pts = null;
+      let espn = null;
       try {
-        pts = await deriveFromEspnRoster({ season, week: row.week, leagueId: row.league_id, teamId: row.team_id });
+        espn = await deriveFromEspnRoster({ season, week: row.week, leagueId: row.league_id, teamId: row.team_id });
       } catch (err) {
         console.warn('ff:pools:update deriveFromEspnRoster failed', {
           season,
@@ -331,7 +415,7 @@ router.post('/update', express.json(), async (req,res)=>{
         });
         continue;
       }
-      if (pts == null) {
+      if (!espn || espn.points == null) {
         skipped.push({
           league_id: String(row.league_id),
           team_id: String(row.team_id),
@@ -341,13 +425,24 @@ router.post('/update', express.json(), async (req,res)=>{
         continue;
       }
 
+      const key = `${String(row.league_id)}:${String(row.team_id)}`;
+      const derivedName = typeof espn.teamName === 'string' && espn.teamName.trim().length
+        ? espn.teamName.trim()
+        : teamNameMap.get(key) || null;
+      if (derivedName) teamNameMap.set(key, derivedName);
+      const startersPayload = espn.starters && espn.starters.length ? JSON.stringify(espn.starters) : null;
+      const pointsValue = Number(espn.points);
+
       // Upsert weekly as PPR (settler doesn't care about scoring)
       await client.query(
-        `INSERT INTO ff_team_weekly_points (season, week, league_id, team_id, scoring, points, created_at, updated_at)
-         VALUES ($1,$2,($3||'')${weeklyLidCast},($4||'')${weeklyTidCast},'PPR',$5,now(),now())
+        `INSERT INTO ff_team_weekly_points (season, week, league_id, team_id, scoring, points, team_name, starters, created_at, updated_at)
+         VALUES ($1,$2,($3||'')${weeklyLidCast},($4||'')${weeklyTidCast},'PPR',$5,$6,$7,now(),now())
          ON CONFLICT (season, week, league_id, team_id, scoring)
-         DO UPDATE SET points=EXCLUDED.points, updated_at=now()`,
-        [season, row.week, String(row.league_id), String(row.team_id), pts]
+         DO UPDATE SET points=EXCLUDED.points,
+                       team_name=COALESCE(EXCLUDED.team_name, ff_team_weekly_points.team_name),
+                       starters=COALESCE(EXCLUDED.starters, ff_team_weekly_points.starters),
+                       updated_at=now()`,
+        [season, row.week, String(row.league_id), String(row.team_id), pointsValue, derivedName, startersPayload]
       );
 
       // And mirror into ff_pools
@@ -356,7 +451,7 @@ router.post('/update', express.json(), async (req,res)=>{
          VALUES ($1, ($2||'')${lidCast}, ($3||'')${tidCast}, $4, 'PPR', $5, now(), now())
          ON CONFLICT (season, league_id, team_id, week, scoring)
          DO UPDATE SET "${pointsCol}"=EXCLUDED."${pointsCol}", updated_at=now()`,
-        [season, String(row.league_id), String(row.team_id), row.week, pts]
+        [season, String(row.league_id), String(row.team_id), row.week, pointsValue]
       );
     }
 
