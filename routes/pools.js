@@ -142,11 +142,11 @@ router.post('/preview', express.json(), async (req,res)=>{
         SELECT c.season, (c.league_id)::text AS league_id, (c.team_id)::text AS team_id,
                c.week, UPPER(s.scoring) AS scoring,
                COALESCE(
-                 CASE WHEN UPPER(s.scoring)='PPR'  THEN ff_safe_to_numeric(to_jsonb(c)->>'ppr_points') END,
-                 CASE WHEN UPPER(s.scoring)='HALF' THEN ff_safe_to_numeric(to_jsonb(c)->>'half_points') END,
-                 CASE WHEN UPPER(s.scoring)='STD'  THEN ff_safe_to_numeric(to_jsonb(c)->>'std_points') END,
-                 ff_safe_to_numeric(to_jsonb(c)->>'points')
-               )::numeric AS points, 2 AS pri
+                 CASE WHEN UPPER(s.scoring)='PPR'  AND (to_jsonb(c)->>'ppr_points')  ~ '^-?\\d+(\\.\\d+)?$' THEN (to_jsonb(c)->>'ppr_points')::numeric END,
+                 CASE WHEN UPPER(s.scoring)='HALF' AND (to_jsonb(c)->>'half_points') ~ '^-?\\d+(\\.\\d+)?$' THEN (to_jsonb(c)->>'half_points')::numeric END,
+                 CASE WHEN UPPER(s.scoring)='STD'  AND (to_jsonb(c)->>'std_points')  ~ '^-?\\d+(\\.\\d+)?$' THEN (to_jsonb(c)->>'std_points')::numeric END,
+                 CASE WHEN (to_jsonb(c)->>'points') ~ '^-?\\d+(\\.\\d+)?$' THEN (to_jsonb(c)->>'points')::numeric END
+               ) AS points, 2 AS pri
         FROM ff_team_points_cache c
         JOIN scor s ON TRUE
         WHERE c.season=$1 AND c.week = ANY($4)
@@ -238,6 +238,11 @@ router.post('/update', express.json(), async (req,res)=>{
     const tidType = await getType('ff_pools','team_id');
     const lidCast = ['bigint','integer','numeric','smallint','decimal'].includes(lidType) ? `::${lidType}` : '::text';
     const tidCast = ['bigint','integer','numeric','smallint','decimal'].includes(tidType) ? `::${tidType}` : '::text';
+
+    const weeklyLidType = await getType('ff_team_weekly_points','league_id');
+    const weeklyTidType = await getType('ff_team_weekly_points','team_id');
+    const weeklyLidCast = ['bigint','integer','numeric','smallint','decimal'].includes(weeklyLidType) ? `::${weeklyLidType}` : '::text';
+    const weeklyTidCast = ['bigint','integer','numeric','smallint','decimal'].includes(weeklyTidType) ? `::${weeklyTidType}` : '::text';
 
     await client.query('BEGIN');
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ff_pools_key ON ff_pools(season, league_id, team_id, week, scoring);`);
@@ -339,7 +344,7 @@ router.post('/update', express.json(), async (req,res)=>{
       // Upsert weekly as PPR (settler doesn't care about scoring)
       await client.query(
         `INSERT INTO ff_team_weekly_points (season, week, league_id, team_id, scoring, points, created_at, updated_at)
-         VALUES ($1,$2,$3::text,$4::text,'PPR',$5,now(),now())
+         VALUES ($1,$2,($3||'')${weeklyLidCast},($4||'')${weeklyTidCast},'PPR',$5,now(),now())
          ON CONFLICT (season, week, league_id, team_id, scoring)
          DO UPDATE SET points=EXCLUDED.points, updated_at=now()`,
         [season, row.week, String(row.league_id), String(row.team_id), pts]
