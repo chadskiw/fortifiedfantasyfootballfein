@@ -99,6 +99,33 @@ const points     = hasActual ? Number(ptsRaw) : null;        // raw actuals (nul
 const appliedPts = isStarter ? (points ?? 0) : 0;            // starter total (zero until live)
 const projApplied= isStarter ? projZero : 0;
 
+    // Season-to-date actual totals: prefer ESPN aggregate (scoringPeriodId=0), else sum individual weeks
+    let seasonTotal = null;
+    if (Array.isArray(stats) && stats.length) {
+      const aggregate = stats.find(s =>
+        Number(s?.statSourceId) === 0 &&
+        Number(s?.scoringPeriodId) === 0 &&
+        Number.isFinite(+s?.appliedTotal)
+      );
+      if (aggregate) {
+        seasonTotal = Number(aggregate.appliedTotal);
+      } else {
+        let sum = 0;
+        let seen = false;
+        for (const s of stats) {
+          if (Number(s?.statSourceId) !== 0) continue;
+          const sp = Number(s?.scoringPeriodId);
+          if (!Number.isFinite(sp) || sp < 1) continue;
+          if (Number.isFinite(+s?.appliedTotal)) {
+            sum += Number(s.appliedTotal);
+            seen = true;
+          }
+        }
+        if (seen) seasonTotal = sum;
+      }
+    }
+const seasonPts = seasonTotal != null ? Number(seasonTotal.toFixed(2)) : null;
+
 return {
   slot, isStarter,
       name: p?.fullName || [p?.firstName, p?.lastName].filter(Boolean).join(' ') || p?.name || '',
@@ -113,7 +140,9 @@ return {
 
   // optional helpers you already added
   proj_raw: projRaw == null ? null : Number(projRaw),
-  projApplied, hasActual, bye: (projRaw == null && ptsRaw == null)
+  projApplied, hasActual, bye: (projRaw == null && ptsRaw == null),
+  seasonPts,
+  seasonActual: seasonPts != null
 };
 
   });
