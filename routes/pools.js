@@ -156,7 +156,8 @@ router.get('/teams', async (req,res)=>{
         team_id:   x.team_id,
         team_name: x.team_name,
         league_name: x.league_name,
-        league_size: Number(x.league_size) || 0
+        league_size: Number(x.league_size ?? x.size) || 0,
+        size: Number(x.size ?? x.league_size) || 0
       }))
     });
   }catch(e){ res.status(500).json({error:e.message}); }
