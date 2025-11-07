@@ -99,7 +99,7 @@ async function fetchEspnTeams({ season, sport = 'ffl' }) {
  * Build a flat "pool" list from leagues payload:
  *   [{ leagueId, leagueName, teamId, teamName, logo, record, ownerHandle, ownerColorHex, ownerBadgeUrl }]
  */
-function buildPoolFromTeams(teamsPayload, { size = 10 } = {}) {
+function buildPoolFromTeams(teamsPayload, { size = 25 } = {}) {
   const leagues = Array.isArray(teamsPayload?.leagues)
     ? teamsPayload.leagues
     : Array.isArray(teamsPayload)
@@ -137,7 +137,7 @@ function buildPoolFromTeams(teamsPayload, { size = 10 } = {}) {
 async function pollHandler(req, res) {
   try {
     const season = Number(req.query.season) || new Date().getUTCFullYear();
-    const size   = Number(req.query.size) || 10;
+    const size   = Number(req.query.size) || 25;
     const sport  = (req.query.sport || 'ffl').toLowerCase();
 
     const leagues = await fetchEspnTeams({ season, sport });
