@@ -122,7 +122,7 @@ router.post('/request-code', async (req, res) => {
             subject: 'Your Fortified Fantasy code',
             text: `Your Fortified Fantasy verification code is: ${code}`
           },
-          templateId: opt.kind === 'phone' ? 'ff_sms_code' : 'ff_email_code'
+          templateId: opt.kind === 'phone' ? 'ff_sms_code' : 'account_authorization'
         });
       } catch (_) { /* don’t block on provider errors */ }
 
@@ -187,7 +187,7 @@ router.post('/request-code', async (req, res) => {
           subject: 'Your Fortified Fantasy code',
           text: `Your Fortified Fantasy verification code is: ${theCode}`
         },
-        templateId: channel === 'sms' ? 'ff_sms_code' : 'ff_email_code'
+        templateId: channel === 'sms' ? 'ff_sms_code' : 'account_authorization'
       });
     } catch (_) {}
 
