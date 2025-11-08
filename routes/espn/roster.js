@@ -45,7 +45,8 @@ const TEAM_ABBR = {
   1:'ATL', 2:'BUF', 3:'CHI', 4:'CIN', 5:'CLE', 6:'DAL', 7:'DEN', 8:'DET',
   9:'GB', 10:'TEN', 11:'IND', 12:'KC', 13:'LV', 14:'LAR', 15:'MIA', 16:'MIN',
   17:'NE', 18:'NO', 19:'NYG', 20:'NYJ', 21:'PHI', 22:'ARI', 23:'PIT', 24:'LAC',
-  25:'SF', 26:'SEA', 27:'TB', 28:'WSH', 29:'CAR', 30:'JAX', 31:'BAL', 32:'HOU'
+  25:'SF', 26:'SEA', 27:'TB', 28:'WSH', 29:'CAR', 30:'JAX',
+  31:'BAL', 32:'HOU', 33:'BAL', 34:'HOU'
 };
 const TEAM_FULL_NAMES = {
   ATL:'Atlanta Falcons',
@@ -84,6 +85,44 @@ const TEAM_FULL_NAMES = {
 const TEAM_ABBR_BY_NAME = Object.fromEntries(
   Object.entries(TEAM_FULL_NAMES).map(([abbr, name]) => [String(name || '').toUpperCase(), abbr])
 );
+const TEAM_NAME_ALIASES = {
+  'ARIZONA':'ARI',
+  'ATLANTA':'ATL',
+  'BALTIMORE':'BAL',
+  'BUFFALO':'BUF',
+  'CAROLINA':'CAR',
+  'CHICAGO':'CHI',
+  'CINCINNATI':'CIN',
+  'CLEVELAND':'CLE',
+  'DALLAS':'DAL',
+  'DENVER':'DEN',
+  'DETROIT':'DET',
+  'GREEN BAY':'GB',
+  'HOUSTON':'HOU',
+  'INDIANAPOLIS':'IND',
+  'JACKSONVILLE':'JAX',
+  'KANSAS CITY':'KC',
+  'LAS VEGAS':'LV',
+  'LA CHARGERS':'LAC',
+  'LA RAMS':'LAR',
+  'LOS ANGELES CHARGERS':'LAC',
+  'LOS ANGELES RAMS':'LAR',
+  'MIAMI':'MIA',
+  'MINNESOTA':'MIN',
+  'NEW ENGLAND':'NE',
+  'NEW ORLEANS':'NO',
+  'NEW YORK GIANTS':'NYG',
+  'NEW YORK JETS':'NYJ',
+  'NEW YORK':'NYG',
+  'PHILADELPHIA':'PHI',
+  'PITTSBURGH':'PIT',
+  'SAN FRANCISCO':'SF',
+  'SEATTLE':'SEA',
+  'TAMPA BAY':'TB',
+  'TENNESSEE':'TEN',
+  'WASHINGTON':'WSH',
+  'WASHINGTON COMMANDERS':'WSH'
+};
 const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, abbr]) => [Number(id), TEAM_FULL_NAMES[abbr] || abbr]));
 const POS       = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'};
 const SLOT      = {0:'QB',2:'RB',4:'WR',6:'TE',7:'OP',16:'DST',17:'K',20:'BN',21:'IR',23:'FLEX',24:'FLEX',25:'FLEX',26:'FLEX',27:'FLEX'};
@@ -584,9 +623,12 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
       if (!str) return null;
       const compact = str.replace(/\s+/g, ' ').trim();
       const upper = compact.toUpperCase();
-      if (TEAM_FULL_NAMES[upper]) return upper;
-      if (compact.length <= 3) return upper;
-      if (TEAM_ABBR_BY_NAME[upper]) return TEAM_ABBR_BY_NAME[upper];
+      if (compact.length <= 3) {
+        if (TEAM_FULL_NAMES[upper]) return upper;
+        return null;
+      }
+      const alias = TEAM_ABBR_BY_NAME[upper] || TEAM_NAME_ALIASES[upper];
+      if (alias) return alias;
       return null;
     };
 
