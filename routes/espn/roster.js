@@ -80,6 +80,300 @@ const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, a
 const POS       = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'};
 const SLOT      = {0:'QB',2:'RB',4:'WR',6:'TE',7:'OP',16:'DST',17:'K',20:'BN',21:'IR',23:'FLEX',24:'FLEX',25:'FLEX',26:'FLEX',27:'FLEX'};
 
+const FP_RANK_CSV_BASE = '/fp';
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const HISTORY_LIMIT_DEFAULT = 4;
+const DVP_CACHE = new Map();
+const ECR_CACHE = new Map();
+let fetchModulePromise = null;
+
+async function getFetch() {
+  if (typeof global.fetch === 'function') return global.fetch.bind(global);
+  if (!fetchModulePromise) {
+    fetchModulePromise = import('node-fetch').then(mod => mod.default);
+  }
+  return fetchModulePromise;
+}
+
+function roundTo(value, digits = 2) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  const factor = 10 ** digits;
+  return Math.round(num * factor) / factor;
+}
+
+function rankPos(pos = '') {
+  const p = String(pos || '').toUpperCase();
+  if (p === 'D/ST' || p === 'DST' || p === 'DST/DEF' || p === 'DEF' || p === 'D') return 'DST';
+  if (p === 'PK') return 'K';
+  return p;
+}
+
+function stripDstSuffix(name = '') {
+  return String(name || '')
+    .replace(/\bD\/ST\b|\bDST\b|\bDefense\b|\bSpecial\s*Teams\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function normPosForDvp(pos) {
+  return rankPos(pos);
+}
+
+function splitCsvLine(line = '') {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur);
+      cur = '';
+    } else if (ch === '\r') {
+      continue;
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+async function fetchRankCsvMap(origin, season, week, pos) {
+  if (!origin || !season) return { map: {}, usedWeek: null };
+  const posCanon = rankPos(pos);
+  const buildUrl = (w) => `${origin}${FP_RANK_CSV_BASE}/FantasyPros_${season}_Week_${w}_${posCanon}_Rankings.csv`;
+  const W = Number(week);
+  const tryWeeks = Number.isInteger(W) && W >= 1 && W <= NFL_MAX_WEEK
+    ? Array.from({ length: W }, (_, i) => W - i)
+    : [week];
+  const fetchImpl = await getFetch();
+  let text = '';
+  let usedWeek = null;
+  for (const w of tryWeeks) {
+    try {
+      const res = await fetchImpl(buildUrl(w), { headers: { accept: 'text/csv,text/plain,*/*' }, redirect: 'follow' });
+      if (!res.ok) continue;
+      const body = await res.text();
+      const ct = (res.headers?.get ? res.headers.get('content-type') : '') || '';
+      const looksHtml = body.trim().startsWith('<') || ct.toLowerCase().includes('text/html');
+      if (looksHtml || !body.trim()) continue;
+      text = body;
+      usedWeek = w;
+      break;
+    } catch {}
+  }
+  if (!text) return { map: {}, usedWeek: null };
+
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length);
+  if (!lines.length) return { map: {}, usedWeek: null };
+  const header = splitCsvLine(lines[0]).map(h => String(h).trim());
+  const findIdx = (name) => header.findIndex(h => h.toLowerCase() === String(name).toLowerCase());
+  const rkIdx = findIdx('RK');
+  const playerIdx = (() => {
+    const idx1 = findIdx('PLAYER NAME');
+    if (idx1 >= 0) return idx1;
+    const idx2 = findIdx('Player');
+    return idx2 >= 0 ? idx2 : 0;
+  })();
+
+  const out = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitCsvLine(lines[i]).map(c => String(c).trim());
+    if (!cells.length) continue;
+    const name = cells[playerIdx];
+    if (!name) continue;
+    let rankVal = null;
+    if (rkIdx >= 0) {
+      const parsed = Number((cells[rkIdx] || '').replace(/[^\d.]/g, ''));
+      if (Number.isFinite(parsed) && parsed > 0) rankVal = parsed;
+    }
+    if (rankVal == null) {
+      const fallback = Number((cells[0] || '').replace(/[^\d.]/g, ''));
+      if (Number.isFinite(fallback) && fallback > 0) rankVal = fallback;
+    }
+    if (rankVal == null) continue;
+    out[`${posCanon}:${name}`] = rankVal;
+  }
+
+  return { map: out, usedWeek };
+}
+
+async function fetchRanksFromCsv(origin, season, week) {
+  const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DST'];
+  const results = await Promise.all(POSITIONS.map(pos => fetchRankCsvMap(origin, season, week, pos)));
+  const ranks = {};
+  const usedByPos = {};
+  results.forEach((res, idx) => {
+    Object.assign(ranks, res.map);
+    usedByPos[POSITIONS[idx]] = res.usedWeek ?? null;
+  });
+  const usedWeek = Object.values(usedByPos)
+    .reduce((max, w) => (w && (!max || w > max) ? w : max), null);
+  return { ranks, usedWeek, usedByPos };
+}
+
+async function loadEcrMap(origin, season, week) {
+  if (!origin || !season) return { ranks: {}, usedWeek: null, usedByPos: {} };
+  const key = `${origin}|${season}|${week || 'all'}`;
+  const cached = ECR_CACHE.get(key);
+  if (cached) {
+    if (cached.data && (!cached.expires || cached.expires > Date.now())) return cached.data;
+    if (cached.promise) return cached.promise;
+  }
+  const promise = (async () => {
+    try {
+      const data = await fetchRanksFromCsv(origin, season, week);
+      const out = { ranks: data.ranks || {}, usedWeek: data.usedWeek ?? null, usedByPos: data.usedByPos || {} };
+      ECR_CACHE.set(key, { data: out, expires: Date.now() + CACHE_TTL_MS });
+      return out;
+    } catch {
+      const out = { ranks: {}, usedWeek: null, usedByPos: {} };
+      ECR_CACHE.set(key, { data: out, expires: Date.now() + CACHE_TTL_MS });
+      return out;
+    }
+  })();
+  ECR_CACHE.set(key, { promise });
+  return promise;
+}
+
+async function loadDvpMap(origin, season) {
+  if (!origin || !season) return {};
+  const key = `${origin}|${season}`;
+  const cached = DVP_CACHE.get(key);
+  if (cached) {
+    if (cached.data && (!cached.expires || cached.expires > Date.now())) return cached.data;
+    if (cached.promise) return cached.promise;
+  }
+  const promise = (async () => {
+    try {
+      const fetchImpl = await getFetch();
+      const url = new URL(`/api/dvp?season=${encodeURIComponent(season)}`, origin).toString();
+      const res = await fetchImpl(url, { headers: { accept: 'application/json' }, redirect: 'follow' });
+      if (!res.ok) throw new Error(`dvp ${res.status}`);
+      const json = await res.json().catch(() => ({}));
+      const data = json?.map || json?.data || json || {};
+      DVP_CACHE.set(key, { data, expires: Date.now() + CACHE_TTL_MS });
+      return data;
+    } catch {
+      const data = {};
+      DVP_CACHE.set(key, { data, expires: Date.now() + CACHE_TTL_MS });
+      return data;
+    }
+  })();
+  DVP_CACHE.set(key, { promise });
+  return promise;
+}
+
+function buildProScheduleMaps(root, maxWeek = NFL_MAX_WEEK) {
+  const proTeams = Array.isArray(root?.settings?.proTeams)
+    ? root.settings.proTeams
+    : Array.isArray(root?.proTeams)
+    ? root.proTeams
+    : [];
+  const scheduleMap = {};
+  const byeWeekMap = {};
+  const ensure = (abbr) => {
+    if (!abbr) return;
+    if (!scheduleMap[abbr]) scheduleMap[abbr] = {};
+  };
+  for (const team of proTeams) {
+    const abbr = String(team?.abbreviation || team?.abbrev || team?.teamAbbrev || '').toUpperCase();
+    if (!abbr) continue;
+    ensure(abbr);
+    const byWeek = team?.proGamesByScoringPeriod || team?.schedule?.items || {};
+    for (const [wkStr, value] of Object.entries(byWeek)) {
+      const wk = Number(wkStr);
+      if (!Number.isFinite(wk) || wk < 1 || wk > maxWeek) continue;
+      const games = Array.isArray(value) ? value : (value ? [value] : []);
+      if (!games.length) {
+        scheduleMap[abbr][wk] = { opponent: 'BYE', homeAway: null, isBye: true };
+        if (!byeWeekMap[abbr]) byeWeekMap[abbr] = wk;
+        continue;
+      }
+      const game = games[0] || {};
+      const homeId = Number(game.homeProTeamId ?? game.homeTeamId ?? game.homeProTeam ?? game.homeTeam?.id);
+      const awayId = Number(game.awayProTeamId ?? game.awayTeamId ?? game.awayProTeam ?? game.awayTeam?.id);
+      const homeAbbr = TEAM_ABBR[homeId];
+      const awayAbbr = TEAM_ABBR[awayId];
+      if (homeAbbr) {
+        ensure(homeAbbr);
+        scheduleMap[homeAbbr][wk] = { opponent: awayAbbr || null, homeAway: 'HOME', isBye: false };
+      }
+      if (awayAbbr) {
+        ensure(awayAbbr);
+        scheduleMap[awayAbbr][wk] = { opponent: homeAbbr || null, homeAway: 'AWAY', isBye: false };
+      }
+    }
+  }
+  return { scheduleMap, byeWeekMap };
+}
+
+function extractOpponentFromStats(stats, week) {
+  if (!Array.isArray(stats)) return { opponent: null, homeAway: null, isBye: false };
+  const wk = Number(week);
+  if (!Number.isFinite(wk)) return { opponent: null, homeAway: null, isBye: false };
+  const rows = stats.filter(s => Number(s?.scoringPeriodId) === wk);
+  if (!rows.length) return { opponent: null, homeAway: null, isBye: false };
+  const prefer = rows.find(r => Number(r?.statSourceId) === 0) || rows[0];
+  if (!prefer) return { opponent: null, homeAway: null, isBye: false };
+  const oppId = Number(prefer?.opponentProTeamId ?? prefer?.opponentTeamId ?? prefer?.opponentId ?? prefer?.opponent?.id);
+  const opponent = TEAM_ABBR[oppId] || null;
+  const haRaw = String(prefer?.homeAway || prefer?.homeOrAway || prefer?.location || '').toUpperCase();
+  let homeAway = null;
+  if (haRaw.startsWith('HOME') || haRaw === 'H') homeAway = 'HOME';
+  else if (haRaw.startsWith('AWAY') || haRaw === 'A') homeAway = 'AWAY';
+  const isBye = Boolean(prefer?.isBye || prefer?.byeWeek || prefer?.wasBye) && !opponent;
+  return { opponent, homeAway, isBye };
+}
+
+function buildRecentWeekStats(stats, currentWeek, limit = HISTORY_LIMIT_DEFAULT) {
+  if (!Array.isArray(stats) || limit <= 0) return [];
+  const weekMap = new Map();
+  for (const row of stats) {
+    const wk = Number(row?.scoringPeriodId);
+    if (!Number.isFinite(wk) || wk < 1) continue;
+    const source = Number(row?.statSourceId);
+    const val = Number(row?.appliedTotal ?? row?.appliedProjectedTotal ?? row?.totalProjectedPoints ?? row?.appliedAverage ?? row?.points);
+    if (!Number.isFinite(val)) continue;
+    let rec = weekMap.get(wk);
+    if (!rec) {
+      rec = { week: wk, proj: null, actual: null };
+      weekMap.set(wk, rec);
+    }
+    if (source === 1) rec.proj = val;
+    else if (source === 0) rec.actual = val;
+  }
+  const cutoff = Number(currentWeek);
+  const rows = Array.from(weekMap.values())
+    .filter(r => !Number.isFinite(cutoff) || r.week < cutoff)
+    .sort((a, b) => b.week - a.week);
+  const out = [];
+  for (const rec of rows) {
+    const proj = Number.isFinite(rec.proj) ? roundTo(rec.proj) : null;
+    const actual = Number.isFinite(rec.actual) ? roundTo(rec.actual) : null;
+    const delta = proj != null && actual != null ? roundTo(actual - proj) : null;
+    out.push({ week: rec.week, proj, actual, delta });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function requestOrigin(req) {
+  if (!req) return null;
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  if (!host) return null;
+  return `${proto}://${host}`;
+}
+
 function headshotFor(p, pos, abbr) {
   return p?.headshot?.href || p?.image?.href || p?.photo?.href ||
     (pos === 'DST' && abbr
