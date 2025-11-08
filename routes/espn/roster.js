@@ -41,7 +41,12 @@ async function espnGET(url, cand) {
 }
 
 // ====== Mapping helpers ====================================================
-const TEAM_ABBR = {1:'ATL',2:'BUF',3:'CHI',4:'CIN',5:'CLE',6:'DAL',7:'DEN',8:'DET',9:'GB',10:'TEN',11:'IND',12:'KC',13:'LV',14:'LAR',15:'MIA',16:'MIN',17:'NE',18:'NO',19:'NYG',20:'NYJ',21:'PHI',22:'ARI',23:'PIT',24:'LAC',25:'SF',26:'SEA',27:'TB',28:'WSH',29:'CAR',30:'JAX',33:'BAL',34:'HOU'};
+const TEAM_ABBR = {
+  1:'ATL', 2:'BUF', 3:'CHI', 4:'CIN', 5:'CLE', 6:'DAL', 7:'DEN', 8:'DET',
+  9:'GB', 10:'TEN', 11:'IND', 12:'KC', 13:'LV', 14:'LAR', 15:'MIA', 16:'MIN',
+  17:'NE', 18:'NO', 19:'NYG', 20:'NYJ', 21:'PHI', 22:'ARI', 23:'PIT', 24:'LAC',
+  25:'SF', 26:'SEA', 27:'TB', 28:'WSH', 29:'CAR', 30:'JAX', 31:'BAL', 32:'HOU'
+};
 const TEAM_FULL_NAMES = {
   ATL:'Atlanta Falcons',
   BUF:'Buffalo Bills',
@@ -76,6 +81,9 @@ const TEAM_FULL_NAMES = {
   BAL:'Baltimore Ravens',
   HOU:'Houston Texans'
 };
+const TEAM_ABBR_BY_NAME = Object.fromEntries(
+  Object.entries(TEAM_FULL_NAMES).map(([abbr, name]) => [String(name || '').toUpperCase(), abbr])
+);
 const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, abbr]) => [Number(id), TEAM_FULL_NAMES[abbr] || abbr]));
 const POS       = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'};
 const SLOT      = {0:'QB',2:'RB',4:'WR',6:'TE',7:'OP',16:'DST',17:'K',20:'BN',21:'IR',23:'FLEX',24:'FLEX',25:'FLEX',26:'FLEX',27:'FLEX'};
@@ -489,38 +497,139 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     }
     const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
 
-    const scheduleForTeam = schedule?.[teamAbbr] || {};
-    const scheduleEntry = scheduleForTeam[weekNum] ?? scheduleForTeam[String(weekNum)];
-    let opponentAbbr = null;
-    let homeAway = null;
+    const scheduleForTeam = schedule?.[teamAbbr] || schedule?.[String(teamAbbr || '').toUpperCase()] || {};
+    const scheduleEntry = scheduleForTeam?.[weekNum] ?? scheduleForTeam?.[String(weekNum)];
+    const opponentCandidates = [];
+    const homeAwayCandidates = [];
+    const byeWeekCandidates = [];
     let scheduledBye = false;
+
+    const mappedBye = byeWeekMap?.[teamAbbr];
+    if (Number.isFinite(Number(mappedBye))) byeWeekCandidates.push(Number(mappedBye));
+
     if (scheduleEntry) {
       if (typeof scheduleEntry === 'string') {
-        opponentAbbr = scheduleEntry;
-        scheduledBye = scheduleEntry === 'BYE';
+        opponentCandidates.push(scheduleEntry);
+        if (String(scheduleEntry).trim().toUpperCase() === 'BYE') scheduledBye = true;
       } else if (typeof scheduleEntry === 'object') {
-        opponentAbbr = scheduleEntry.opponent ?? null;
-        homeAway = scheduleEntry.homeAway ?? null;
-        scheduledBye = Boolean(scheduleEntry.isBye);
+        opponentCandidates.push(scheduleEntry.opponent);
+        homeAwayCandidates.push(scheduleEntry.homeAway);
+        if (scheduleEntry.isBye) scheduledBye = true;
       }
     }
-    if (!opponentAbbr) {
-      const fallback = extractOpponentFromStats(stats, weekNum);
-      if (fallback.opponent) opponentAbbr = fallback.opponent;
-      if (!homeAway && fallback.homeAway) homeAway = fallback.homeAway;
-      if (fallback.isBye) scheduledBye = true;
+
+    const statsFallback = extractOpponentFromStats(stats, weekNum);
+    if (statsFallback.opponent) opponentCandidates.push(statsFallback.opponent);
+    if (statsFallback.homeAway) homeAwayCandidates.push(statsFallback.homeAway);
+    if (statsFallback.isBye) scheduledBye = true;
+
+    opponentCandidates.push(
+      p?.opponentAbbreviation,
+      p?.opponentAbbrev,
+      p?.opponent,
+      p?.opponentTeamAbbrev,
+      p?.opponentShortName,
+      p?.matchup?.opponentTeamAbbrev,
+      p?.matchup?.opponent?.teamAbbrev,
+      p?.matchup?.opponent?.abbrev,
+      p?.matchup?.opponent?.shortName,
+      p?.gameProjection?.opponentTeamAbbrev,
+      p?.gameProjection?.opponentAbbrev,
+      p?.gameProjection?.opponentShortName,
+      p?.upcomingOpponentAbbrev,
+      p?.upcomingOpponent?.teamAbbrev,
+      p?.upcomingOpponent?.abbrev,
+      p?.upcomingOpponent,
+      e?.opponentAbbrev,
+      e?.opponent?.teamAbbrev,
+      e?.opponent?.abbrev,
+      e?.opponent?.shortName,
+      TEAM_ABBR[Number(p?.matchup?.opponentTeamId)],
+      TEAM_ABBR[Number(p?.opponentProTeamId)],
+      TEAM_ABBR[Number(e?.opponentProTeamId)]
+    );
+
+    homeAwayCandidates.push(
+      scheduleEntry && typeof scheduleEntry === 'object' ? scheduleEntry.homeAway : null,
+      statsFallback.homeAway,
+      p?.matchup?.homeAway,
+      p?.matchup?.homeOrAway,
+      p?.gameProjection?.homeAway,
+      p?.gameProjection?.homeOrAway,
+      p?.homeAway,
+      p?.homeOrAway,
+      e?.homeAway,
+      e?.homeOrAway
+    );
+
+    byeWeekCandidates.push(
+      p?.byeWeek,
+      p?.player?.byeWeek,
+      p?.schedule?.byeWeek,
+      p?.proTeamByeWeek,
+      e?.byeWeek
+    );
+
+    const normalizeOpponent = (val) => {
+      if (val == null) return null;
+      if (typeof val === 'number') {
+        return TEAM_ABBR[Number(val)] || null;
+      }
+      let str = String(val).trim();
+      if (!str) return null;
+      str = str.replace(/[.,]$/, '');
+      if (/^BYE$/i.test(str)) return 'BYE';
+      str = str.replace(/^@/, '').trim();
+      str = str.replace(/^(VS?\.?|V\.?)\s*/i, '');
+      if (!str) return null;
+      const compact = str.replace(/\s+/g, ' ').trim();
+      const upper = compact.toUpperCase();
+      if (TEAM_FULL_NAMES[upper]) return upper;
+      if (compact.length <= 3) return upper;
+      if (TEAM_ABBR_BY_NAME[upper]) return TEAM_ABBR_BY_NAME[upper];
+      return null;
+    };
+
+    const normalizeHomeAway = (val) => {
+      if (val == null) return null;
+      const upper = String(val).trim().toUpperCase();
+      if (!upper) return null;
+      if (upper === 'HOME' || upper === 'H' || upper === 'HOME_TEAM') return 'HOME';
+      if (upper === 'AWAY' || upper === 'A' || upper === 'AWAY_TEAM' || upper === 'ROAD') return 'AWAY';
+      return null;
+    };
+
+    const normalizeBye = (val) => {
+      const num = Number(val);
+      return Number.isFinite(num) && num > 0 ? num : null;
+    };
+
+    let opponentAbbr = null;
+    for (const cand of opponentCandidates) {
+      const norm = normalizeOpponent(cand);
+      if (norm) { opponentAbbr = norm; break; }
     }
-    const mappedBye = byeWeekMap?.[teamAbbr];
-    let byeWeek = Number.isFinite(Number(mappedBye)) ? Number(mappedBye) : null;
-    if ((scheduledBye || opponentAbbr === 'BYE') && !byeWeek && Number.isFinite(weekNum)) {
+
+    let homeAway = null;
+    for (const cand of homeAwayCandidates) {
+      const norm = normalizeHomeAway(cand);
+      if (norm) { homeAway = norm; break; }
+    }
+
+    let byeWeek = null;
+    for (const cand of byeWeekCandidates) {
+      const norm = normalizeBye(cand);
+      if (norm != null) { byeWeek = norm; break; }
+    }
+
+    if ((scheduledBye || opponentAbbr === 'BYE') && !byeWeek && Number.isFinite(weekNum) && weekNum > 0) {
       byeWeek = weekNum;
     }
-    if (!opponentAbbr && byeWeek === weekNum) {
+    if (byeWeek === weekNum && opponentAbbr !== 'BYE' && Number.isFinite(weekNum) && weekNum > 0) {
       opponentAbbr = 'BYE';
     }
-    if (opponentAbbr) {
-      opponentAbbr = String(opponentAbbr).replace(/^@/, '').toUpperCase();
-      if (opponentAbbr === 'BYE' && !byeWeek && Number.isFinite(weekNum)) byeWeek = weekNum;
+    if (opponentAbbr === 'BYE') {
+      homeAway = null;
     }
 
     let defensiveRank = null;
