@@ -220,6 +220,18 @@ async function fetchRanksFromCsv(origin, season, week) {
   return { ranks, usedWeek, usedByPos };
 }
 
+function computeFMV(posRank, dvp, position) {
+  const rankVal = Number(posRank);
+  const dvpVal = Number(dvp);
+  if (!Number.isFinite(rankVal) || !Number.isFinite(dvpVal)) return null;
+  const P = rankPos(position);
+  let value;
+  if (P === 'QB' || P === 'K' || P === 'DST') value = rankVal + dvpVal;
+  else if (P === 'TE') value = (rankVal / 1.4) + dvpVal;
+  else value = (rankVal / 2) + dvpVal;
+  return Math.round(value);
+}
+
 async function loadEcrMap(origin, season, week) {
   if (!origin || !season) return { ranks: {}, usedWeek: null, usedByPos: {} };
   const key = `${origin}|${season}|${week || 'all'}`;
@@ -407,32 +419,36 @@ function teamNameOf(t) {
       || `Team ${t?.id}`;
 }
 
-function mapEntriesToPlayers(entries, week) {
+function mapEntriesToPlayers(entries, week, ctx = {}) {
+  const weekNum = Number(week);
+  const schedule = ctx.schedule || ctx.oppByTeam || {};
+  const byeWeekMap = ctx.byeWeekByTeam || ctx.byeWeekMap || {};
+  const ranksMap = ctx.ranksMap && typeof ctx.ranksMap === 'object' ? ctx.ranksMap : {};
+  const dvpMap = ctx.dvpMap && typeof ctx.dvpMap === 'object' ? ctx.dvpMap : {};
+  const historyLimit = Number.isFinite(ctx.historyLimit) ? ctx.historyLimit : HISTORY_LIMIT_DEFAULT;
+  const getRank = (key) => (ranksMap instanceof Map ? ranksMap.get(key) : ranksMap?.[key]);
+  const getDvp = (key) => (dvpMap instanceof Map ? dvpMap.get(key) : dvpMap?.[key]);
+
   return entries.map(e => {
     const slotId = Number(e?.lineupSlotId);
-    const slot   = SLOT[slotId] || 'BN';
-    const isStarter = ![20,21].includes(slotId) && slot !== 'BN' && slot !== 'IR';
+    const slot = SLOT[slotId] || 'BN';
+    const isStarter = ![20, 21].includes(slotId) && slot !== 'BN' && slot !== 'IR';
 
-    const p     = e?.playerPoolEntry?.player || e.player || {};
-    const pos   = POS[p?.defaultPositionId] || p?.defaultPosition || p?.primaryPosition || '';
-    const abbr  = p?.proTeamAbbreviation || (p?.proTeamId ? TEAM_ABBR[p.proTeamId] : null);
+    const p = e?.playerPoolEntry?.player || e.player || {};
+    const pos = POS[p?.defaultPositionId] || p?.defaultPosition || p?.primaryPosition || '';
+    const proTeamId = Number(p?.proTeamId);
+    const abbrRaw = p?.proTeamAbbreviation || (Number.isFinite(proTeamId) ? TEAM_ABBR[proTeamId] : null);
+    const teamAbbr = abbrRaw ? String(abbrRaw).toUpperCase() : '';
     const stats = p?.stats || e?.playerStats || [];
 
-    // Raw values from ESPN (may be null)
-// inside mapEntriesToPlayers(...)
-const projRaw = pickProjected(stats, week);                  // can be null on byes
-const ptsRaw  = pickActual(stats, week);                     // null unless the WEEK row exists
-const hasActual  = (ptsRaw != null);
-const projZero   = projRaw == null ? 0 : Number(projRaw);    // bye ⇒ 0
-const points     = hasActual ? Number(ptsRaw) : null;        // raw actuals (nullable)
-const appliedPts = isStarter ? (points ?? 0) : 0;            // starter total (zero until live)
-const projApplied= isStarter ? projZero : 0;
+    const projRaw = pickProjected(stats, weekNum);
+    const ptsRaw = pickActual(stats, weekNum);
+    const hasActual = ptsRaw != null;
+    const projZero = projRaw == null ? 0 : Number(projRaw);
+    const points = hasActual ? Number(ptsRaw) : null;
+    const appliedPts = isStarter ? (points ?? 0) : 0;
+    const projApplied = isStarter ? projZero : 0;
 
-    // Season-to-date actual totals: prefer ESPN aggregate (scoringPeriodId=0),
-    // otherwise inspect the per-week rows. Some leagues store the running season
-    // total in week=1 (or cumulative per week), so detect monotonic growth and
-    // fall back to the summed weekly totals only when the numbers actually
-    // fluctuate.
     let seasonTotal = null;
     let derivedSource = null;
     if (Array.isArray(stats) && stats.length) {
@@ -445,7 +461,7 @@ const projApplied= isStarter ? projZero : 0;
         } else {
           const weeklyRows = actualRows
             .filter(s => Number(s?.scoringPeriodId) > 0)
-            .sort((a,b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
+            .sort((a, b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
           if (weeklyRows.length) {
             let monotonic = true;
             let prev = null;
@@ -456,7 +472,7 @@ const projApplied= isStarter ? projZero : 0;
               prev = val;
             }
             if (monotonic) {
-              seasonTotal = Number((weeklyRows.at(-1)?.appliedTotal ?? 0));
+              seasonTotal = Number(weeklyRows.at(-1)?.appliedTotal ?? 0);
               derivedSource = 'cumulative';
             } else {
               let sum = 0;
@@ -471,32 +487,125 @@ const projApplied= isStarter ? projZero : 0;
         }
       }
     }
-const seasonPts = seasonTotal != null ? Number(seasonTotal.toFixed(2)) : null;
+    const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
 
-return {
-  slot, isStarter,
+    const scheduleForTeam = schedule?.[teamAbbr] || {};
+    const scheduleEntry = scheduleForTeam[weekNum] ?? scheduleForTeam[String(weekNum)];
+    let opponentAbbr = null;
+    let homeAway = null;
+    let scheduledBye = false;
+    if (scheduleEntry) {
+      if (typeof scheduleEntry === 'string') {
+        opponentAbbr = scheduleEntry;
+        scheduledBye = scheduleEntry === 'BYE';
+      } else if (typeof scheduleEntry === 'object') {
+        opponentAbbr = scheduleEntry.opponent ?? null;
+        homeAway = scheduleEntry.homeAway ?? null;
+        scheduledBye = Boolean(scheduleEntry.isBye);
+      }
+    }
+    if (!opponentAbbr) {
+      const fallback = extractOpponentFromStats(stats, weekNum);
+      if (fallback.opponent) opponentAbbr = fallback.opponent;
+      if (!homeAway && fallback.homeAway) homeAway = fallback.homeAway;
+      if (fallback.isBye) scheduledBye = true;
+    }
+    const mappedBye = byeWeekMap?.[teamAbbr];
+    let byeWeek = Number.isFinite(Number(mappedBye)) ? Number(mappedBye) : null;
+    if ((scheduledBye || opponentAbbr === 'BYE') && !byeWeek && Number.isFinite(weekNum)) {
+      byeWeek = weekNum;
+    }
+    if (!opponentAbbr && byeWeek === weekNum) {
+      opponentAbbr = 'BYE';
+    }
+    if (opponentAbbr) {
+      opponentAbbr = String(opponentAbbr).replace(/^@/, '').toUpperCase();
+      if (opponentAbbr === 'BYE' && !byeWeek && Number.isFinite(weekNum)) byeWeek = weekNum;
+    }
+
+    let defensiveRank = null;
+    if (opponentAbbr && opponentAbbr !== 'BYE' && pos) {
+      const posKey = normPosForDvp(pos);
+      const dvpVal = getDvp(`${opponentAbbr}|${posKey}`) ?? getDvp(`${opponentAbbr}|${rankPos(pos)}`);
+      if (Number.isFinite(Number(dvpVal))) defensiveRank = Number(dvpVal);
+    }
+
+    let ecrRank = null;
+    if (pos) {
+      const posKey = rankPos(pos);
+      if (posKey) {
+        const nameCandidates = [
+          p?.fullName,
+          p?.name,
+          [p?.firstName, p?.lastName].filter(Boolean).join(' ')
+        ];
+        if (posKey === 'DST' && teamAbbr) {
+          nameCandidates.push(TEAM_FULL_NAMES[teamAbbr] || teamAbbr);
+        }
+        for (const candidate of nameCandidates) {
+          const nm = posKey === 'DST' ? stripDstSuffix(candidate) : String(candidate || '');
+          if (!nm) continue;
+          const val = getRank(`${posKey}:${nm}`);
+          if (Number.isFinite(Number(val))) { ecrRank = Number(val); break; }
+        }
+      }
+    }
+
+    const fmv = computeFMV(ecrRank, defensiveRank, pos);
+    const recentWeeks = buildRecentWeekStats(stats, weekNum, historyLimit);
+    const prev = recentWeeks.length ? recentWeeks[0] : null;
+    const delta = (points != null && projRaw != null) ? roundTo(points - Number(projRaw)) : null;
+
+    const fallbackTeamName = p?.proTeam?.name || p?.proTeam?.nickname || '';
+    const teamName = teamAbbr
+      ? (TEAM_FULL_NAMES[teamAbbr] || TEAM_NAME_BY_ID[proTeamId] || fallbackTeamName || '')
+      : (TEAM_NAME_BY_ID[proTeamId] || fallbackTeamName || '');
+    const opponentName = opponentAbbr && opponentAbbr !== 'BYE'
+      ? (TEAM_FULL_NAMES[opponentAbbr] || opponentAbbr)
+      : opponentAbbr || null;
+    const statusTag = p?.injuryStatus || p?.status || null;
+
+    return {
+      slot,
+      isStarter,
       name: p?.fullName || [p?.firstName, p?.lastName].filter(Boolean).join(' ') || p?.name || '',
-  position: pos,
-  teamAbbr: abbr || '',
-  proj: projZero,                  // now zero-filled
-  points,                          // only set when week actual exists (0 allowed)
-  appliedPoints: appliedPts,       // numeric always (starters zero-filled)
-  headshot: headshotFor(p, pos, abbr),
-  playerId: p?.id,
-  lineupSlotId: slotId,
-
-  // optional helpers you already added
-  proj_raw: projRaw == null ? null : Number(projRaw),
-  projApplied, hasActual, bye: (projRaw == null && ptsRaw == null),
-  seasonPts,
-  seasonActual: seasonPts != null && derivedSource !== null,
-  seasonSource: derivedSource || null
-};
-
+      position: pos,
+      teamAbbr: teamAbbr || '',
+      proTeamAbbr: teamAbbr || '',
+      proTeamId: Number.isFinite(proTeamId) ? proTeamId : null,
+      teamName,
+      opponent: opponentAbbr || null,
+      opponentAbbr: opponentAbbr || null,
+      opponentName,
+      homeAway: homeAway || null,
+      proj: projZero,
+      points,
+      delta,
+      appliedPoints: appliedPts,
+      headshot: headshotFor(p, pos, teamAbbr || abbrRaw || ''),
+      playerId: p?.id,
+      lineupSlotId: slotId,
+      statusTag,
+      oppAbbr: opponentAbbr || null,
+      proj_raw: projRaw == null ? null : Number(projRaw),
+      projApplied,
+      hasActual,
+      bye: (projRaw == null && ptsRaw == null) || opponentAbbr === 'BYE',
+      byeWeek,
+      seasonPts,
+      seasonActual: seasonPts != null && derivedSource !== null,
+      seasonSource: derivedSource || null,
+      defensiveRank: defensiveRank != null ? defensiveRank : null,
+      ecrRank: ecrRank != null ? ecrRank : null,
+      fmv: fmv != null ? fmv : null,
+      recentWeeks,
+      prevWeek: prev?.week ?? null,
+      prevProj: prev?.proj ?? null,
+      prevActual: prev?.actual ?? null,
+      prevDelta: prev?.delta ?? null
+    };
   });
 }
-
-
 // ====== Route ==============================================================
 router.get('/roster', async (req, res) => {
   try {
@@ -572,36 +681,61 @@ router.get('/roster', async (req, res) => {
 
     const teams = Array.isArray(data?.teams) ? data.teams : [];
 
+    const origin = requestOrigin(req);
+    let ecrInfo = { ranks: {}, usedWeek: null, usedByPos: {} };
+    let dvpMap = {};
+    if (Number.isFinite(season)) {
+      const [ecrRes, dvpRes] = await Promise.allSettled([
+        loadEcrMap(origin, season, week),
+        loadDvpMap(origin, season)
+      ]);
+      if (ecrRes.status === 'fulfilled' && ecrRes.value) ecrInfo = ecrRes.value;
+      if (dvpRes.status === 'fulfilled' && dvpRes.value) dvpMap = dvpRes.value;
+    }
+    const { scheduleMap, byeWeekMap } = buildProScheduleMaps(data, NFL_MAX_WEEK);
+    const mapContext = {
+      week,
+      schedule: scheduleMap,
+      byeWeekByTeam: byeWeekMap,
+      ranksMap: ecrInfo.ranks,
+      dvpMap,
+      historyLimit: HISTORY_LIMIT_DEFAULT
+    };
+    const meta = {
+      ecrWeek: ecrInfo.usedWeek ?? null,
+      ecrUsedByPos: ecrInfo.usedByPos || {},
+      dvpSeason: season
+    };
+    try {
+      if (ecrInfo.usedWeek != null) res.set('x-ff-ecr-week', String(ecrInfo.usedWeek));
+    } catch {}
+
     if (teamId != null && Number.isFinite(teamId)) {
       const t = teams.find(x => Number(x?.id) === Number(teamId));
       if (!t) return res.status(404).json({ ok:false, error:'team_not_found' });
 
-const entries = t?.roster?.entries || [];
-const players = mapEntriesToPlayers(entries, week);
-const totals  = teamTotalsFor(players);
+      const entries = t?.roster?.entries || [];
+      const players = mapEntriesToPlayers(entries, week, mapContext);
+      const totals  = teamTotalsFor(players);
 
-return res.json({
-  ok: true, platform:'espn', leagueId, season, week,
-  teamId, team_name: teamNameOf(t),
-  totals,                 // <— NEW (non-breaking)
-  players
-});
-
+      return res.json({
+        ok: true, platform:'espn', leagueId, season, week,
+        teamId, team_name: teamNameOf(t),
+        totals,
+        players,
+        meta
+      });
     }
 
-    // No teamId provided → return all teams with mapped players
-// No teamId provided → return all teams with mapped players
-const teamsOut = teams.map(t => {
-  const teamId    = Number(t?.id);
-  const team_name = teamNameOf(t);
-  const entries   = t?.roster?.entries || [];
-  const players   = mapEntriesToPlayers(entries, week);
-  const totals    = teamTotalsFor(players);
+    const teamsOut = teams.map(t => {
+      const teamId = Number(t?.id);
+      const team_name = teamNameOf(t);
+      const entries = t?.roster?.entries || [];
+      const players = mapEntriesToPlayers(entries, week, mapContext);
+      const totals = teamTotalsFor(players);
 
-  return { teamId, team_name, totals, players };
-});
-
-// Build quick lookup maps (back-compat for older consumers)
+      return { teamId, team_name, totals, players };
+    });
 const ownership   = {};
 const acquisition = {};
 for (const t of teamsOut) {
@@ -619,7 +753,8 @@ return res.json({
   leagueId, season, week,
   teams: teamsOut,
   ownership,
-  acquisition
+  acquisition,
+  meta
 });
   } catch (e) {
     return res.status(500).json({ ok:false, error: String(e?.message || e) });
