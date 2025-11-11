@@ -162,6 +162,8 @@ const HISTORY_LIMIT_DEFAULT = 4;
 const DVP_CACHE = new Map();
 const ECR_CACHE = new Map();
 let fetchModulePromise = null;
+let CSV_SCHEDULE_CACHE = null;
+let CSV_SCHEDULE_PROMISE = null;
 
 async function getFetch() {
   if (typeof global.fetch === 'function') return global.fetch.bind(global);
@@ -686,6 +688,110 @@ function buildProScheduleMaps(root, maxWeek = NFL_MAX_WEEK) {
   return { scheduleMap, byeWeekMap };
 }
 
+async function loadCsvSchedule() {
+  if (CSV_SCHEDULE_CACHE) return CSV_SCHEDULE_CACHE;
+  if (CSV_SCHEDULE_PROMISE) return CSV_SCHEDULE_PROMISE;
+  CSV_SCHEDULE_PROMISE = (async () => {
+    try {
+      const file = path.resolve(__dirname, '..', '..', 'utils', '2025_NFL.csv');
+      const content = await fs.readFile(file, 'utf8');
+      const parsed = parseCsvSchedule(content);
+      CSV_SCHEDULE_CACHE = parsed;
+      return parsed;
+    } catch {
+      const fallback = { schedule: {}, byeWeekMap: {} };
+      CSV_SCHEDULE_CACHE = fallback;
+      return fallback;
+    } finally {
+      CSV_SCHEDULE_PROMISE = null;
+    }
+  })();
+  return CSV_SCHEDULE_PROMISE;
+}
+
+function parseCsvSchedule(csvText) {
+  const schedule = {};
+  const byeWeekMap = {};
+  if (typeof csvText !== 'string' || !csvText.trim()) return { schedule, byeWeekMap };
+  const lines = csvText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!lines.length) return { schedule, byeWeekMap };
+  const headers = lines[0].split(',').map(h => h.trim());
+  const weekHeaders = headers.slice(1);
+  for (let i = 1; i < lines.length; i++) {
+    const rowRaw = lines[i];
+    if (!rowRaw) continue;
+    const row = rowRaw.split(',').map(cell => cell.trim());
+    const teamAbbr = String(row[0] || '').toUpperCase();
+    if (!teamAbbr) continue;
+    if (!schedule[teamAbbr]) schedule[teamAbbr] = {};
+    for (let w = 0; w < weekHeaders.length; w++) {
+      const weekLabel = weekHeaders[w];
+      const weekNum = Number(weekLabel.replace(/[^\d]/g, ''));
+      if (!Number.isFinite(weekNum) || weekNum < 1 || weekNum > NFL_MAX_WEEK) continue;
+      const cell = row[w + 1] ?? '';
+      const parsed = parseCsvScheduleValue(cell);
+      if (!parsed) continue;
+      schedule[teamAbbr][weekNum] = parsed;
+      if (parsed.isBye && !byeWeekMap[teamAbbr]) byeWeekMap[teamAbbr] = weekNum;
+    }
+  }
+  return { schedule, byeWeekMap };
+}
+
+function parseCsvScheduleValue(raw) {
+  if (raw == null) return null;
+  let str = String(raw).trim();
+  if (!str) return null;
+  const out = { opponent: null, homeAway: null, isBye: false };
+  if (/^BYE$/i.test(str)) {
+    out.opponent = 'BYE';
+    out.isBye = true;
+    return out;
+  }
+  let homeAway = 'HOME';
+  if (str.startsWith('@')) {
+    homeAway = 'AWAY';
+    str = str.slice(1).trim();
+  } else if (/^(VS\.?|V\.?)/i.test(str)) {
+    str = str.replace(/^(VS\.?|V\.?)\s*/i, '').trim();
+  }
+  const normalized = normalizeOpponentValue(str);
+  if (!normalized) return null;
+  out.opponent = normalized;
+  out.homeAway = homeAway;
+  return out;
+}
+
+function mergeScheduleMaps(baseSchedule = {}, baseBye = {}, fallbackSchedule = {}, fallbackBye = {}) {
+  if (fallbackSchedule && typeof fallbackSchedule === 'object') {
+    for (const [team, weeks] of Object.entries(fallbackSchedule)) {
+      if (!baseSchedule[team]) baseSchedule[team] = {};
+      for (const [weekKey, value] of Object.entries(weeks || {})) {
+        const weekNum = Number(weekKey);
+        if (!Number.isFinite(weekNum)) continue;
+        const existing = baseSchedule[team][weekNum];
+        const fallback = value || {};
+        const fallbackOpponent = fallback.opponent;
+        if (!fallbackOpponent) continue;
+        if (!existing || !existing.opponent || existing.opponent === team || existing.opponent === 'BYE') {
+          baseSchedule[team][weekNum] = {
+            opponent: fallbackOpponent,
+            homeAway: fallback.homeAway ?? null,
+            isBye: Boolean(fallback.isBye)
+          };
+        }
+      }
+    }
+  }
+  if (fallbackBye && typeof fallbackBye === 'object') {
+    for (const [team, byeWeek] of Object.entries(fallbackBye)) {
+      if (!baseBye[team] && Number.isFinite(Number(byeWeek))) {
+        baseBye[team] = Number(byeWeek);
+      }
+    }
+  }
+}
+
 function extractOpponentFromStats(stats, week) {
   if (!Array.isArray(stats)) return { opponent: null, homeAway: null, isBye: false };
   const wk = Number(week);
@@ -1173,7 +1279,13 @@ router.get('/roster', async (req, res) => {
       if (ecrRes.status === 'fulfilled' && ecrRes.value) ecrInfo = ecrRes.value;
       if (dvpRes.status === 'fulfilled' && dvpRes.value) dvpMap = dvpRes.value;
     }
-    const { scheduleMap, byeWeekMap } = buildProScheduleMaps(data, NFL_MAX_WEEK);
+    const espnSchedule = buildProScheduleMaps(data, NFL_MAX_WEEK);
+    const csvFallback = await loadCsvSchedule();
+    const scheduleMap = espnSchedule.scheduleMap || {};
+    const byeWeekMap = espnSchedule.byeWeekMap || {};
+    if (csvFallback && csvFallback.schedule) {
+      mergeScheduleMaps(scheduleMap, byeWeekMap, csvFallback.schedule, csvFallback.byeWeekMap);
+    }
     const mapContext = {
       week: effectiveWeek,
       schedule: scheduleMap,
