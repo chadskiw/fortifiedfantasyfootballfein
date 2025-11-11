@@ -288,34 +288,22 @@ function extractSeasonPoints(row) {
     ? row.weeks
     : (row.week && typeof row.week === 'object' ? row.week : null);
   if (weeks) {
-    const weekKeys = Object.keys(weeks);
-    if (weekKeys.length) {
-      if (weekKeys.length > 1) {
-        const w1 = weeks['1'] ?? weeks[1];
-        const val = Number(w1);
-        if (Number.isFinite(val)) return val;
-        const numericKeys = weekKeys
-          .map(k => ({ key: k, num: Number(k) }))
-          .filter(({ num }) => Number.isFinite(num))
-          .sort((a, b) => a.num - b.num);
-        const firstKey = numericKeys.length ? numericKeys[0].key : weekKeys[0];
-        const firstVal = Number(weeks[firstKey]);
-        if (Number.isFinite(firstVal)) return firstVal;
-      } else {
-        const onlyVal = Number(weeks[weekKeys[0]]);
-        if (Number.isFinite(onlyVal)) return onlyVal;
-      }
-    }
     let total = 0;
     let seen = false;
     for (const val of Object.values(weeks)) {
       const num = Number(val);
-      if (Number.isFinite(num)) {
-        total += num;
-        seen = true;
-      }
+      if (!Number.isFinite(num)) continue;
+      total += num;
+      seen = true;
     }
-    if (seen) return total;
+    if (seen) {
+      if (!Number.isFinite(total) || Math.abs(total) < 1e-9) {
+        const w1 = weeks['1'] ?? weeks[1];
+        const first = Number(w1);
+        if (Number.isFinite(first)) return first;
+      }
+      return total;
+    }
   }
   const candidates = [
     row.seasonPoints,
