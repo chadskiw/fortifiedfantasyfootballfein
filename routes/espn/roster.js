@@ -5,7 +5,7 @@ const { resolveEspnCredCandidates } = require('./_cred');
 
 // ====== Week helpers =======================================================
 const NFL_MAX_WEEK  = 18;
-const DEFAULT_WEEK  = Number(process.env.CURRENT_WEEK || 7);
+const DEFAULT_WEEK  = Number(process.env.CURRENT_WEEK || null);
 function safeWeek(req) {
   const raw = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp;
   const w = Number(raw);
