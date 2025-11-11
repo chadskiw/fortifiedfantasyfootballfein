@@ -1,6 +1,8 @@
 // routes/espn/roster.js
 const express = require('express');
 const router  = express.Router();
+const fs      = require('fs/promises');
+const path    = require('path');
 const { resolveEspnCredCandidates } = require('./_cred');
 
 // ====== Week helpers =======================================================
@@ -16,8 +18,20 @@ function teamTotalsFor(players, { isSeasonScope = false } = {}) {
   for (const p of players) {
     proj        += Number(p?.projApplied ?? (p?.isStarter ? (p?.proj ?? 0) : 0));
     projRaw     += Number(p?.proj_raw   ?? 0);                 // totals the raw weekly proj (bye => 0 now)
-    actual      += Number(p?.appliedPoints ?? 0);              // zero-filled starter totals
-    hasActuals ||= !!p?.hasActual;
+    if (isSeasonScope) {
+      if (p?.isStarter) {
+        const seasonVal = Number(p?.seasonPts ?? p?.points ?? 0);
+        if (Number.isFinite(seasonVal)) {
+          actual += seasonVal;
+          hasActuals = true;
+        } else {
+          actual += Number(p?.appliedPoints ?? 0);
+        }
+      }
+    } else {
+      actual      += Number(p?.appliedPoints ?? 0);            // zero-filled starter totals
+      hasActuals ||= !!p?.hasActual;
+    }
     if (p?.isStarter) starters++;
   }
   if (isSeasonScope) hasActuals = true;
@@ -128,6 +142,17 @@ const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, a
 const POS       = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'};
 const SLOT      = {0:'QB',2:'RB',4:'WR',6:'TE',7:'OP',16:'DST',17:'K',20:'BN',21:'IR',23:'FLEX',24:'FLEX',25:'FLEX',26:'FLEX',27:'FLEX'};
 
+const FP_SEASON_CACHE = new Map();
+const FP_SEASON_MISS  = new Set();
+const DST_BACKFILLS = {
+  WAS:'WSH', WSH:'WAS',
+  JAC:'JAX', JAX:'JAC',
+  LV:'LVR',  LVR:'LV',
+  LAR:'LA',  LA:'LAR',
+  ARI:'ARZ', ARZ:'ARI'
+};
+const ROOT_DIR = path.resolve(__dirname, '../../..');
+
 const FP_RANK_CSV_BASE = '/fp';
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const HISTORY_LIMIT_DEFAULT = 4;
@@ -166,6 +191,259 @@ function stripDstSuffix(name = '') {
 
 function normPosForDvp(pos) {
   return rankPos(pos);
+}
+
+const NAME_SUFFIX_RE = /\b(jr|sr|ii|iii|iv|v)\b/gi;
+
+function normalizeNameForFp(raw) {
+  if (!raw) return '';
+  let s = String(raw)
+    .toLowerCase()
+    .replace(/[\.\']/g, '')
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  s = s.replace(NAME_SUFFIX_RE, '').replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function normalizeScoringLabel(raw) {
+  if (!raw) return null;
+  const upper = String(raw).trim().toUpperCase();
+  if (!upper) return null;
+  if (['STD', 'STANDARD', 'CLASSIC'].includes(upper)) return 'STD';
+  if (['PPR', 'FULL', 'FULL_PPR', 'FULLPPR'].includes(upper)) return 'PPR';
+  if (['HALF', 'HALF_PPR', 'HALFPPR', '0.5', '0.5PPR', 'HALF-PPR'].includes(upper)) return 'HALF';
+  return null;
+}
+
+function determineScoringLabel(req, data) {
+  const queryPref = normalizeScoringLabel(
+    req?.query?.scoring ??
+    req?.query?.scoringFormat ??
+    req?.query?.scoringType ??
+    req?.query?.format
+  );
+  if (queryPref) return queryPref;
+
+  const ppr = Number(data?.settings?.scoringSettings?.pointsPerReception);
+  if (Number.isFinite(ppr)) {
+    if (Math.abs(ppr - 1) < 1e-6) return 'PPR';
+    if (Math.abs(ppr - 0.5) < 1e-6) return 'HALF';
+    if (Math.abs(ppr) < 1e-6) return 'STD';
+  }
+
+  const typeRaw = String(
+    data?.settings?.scoringSettings?.scoringType ||
+    data?.settings?.scoringSettings?.playerRankTypeId ||
+    data?.scoringType ||
+    ''
+  ).toUpperCase();
+  if (typeRaw.includes('HALF')) return 'HALF';
+  if (typeRaw.includes('PPR')) return 'PPR';
+
+  return 'STD';
+}
+
+function buildFpIndex(rows = []) {
+  const byId = new Map();
+  const byKey = new Map();
+
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const fpId = row.fpId ?? row.playerId ?? row.id;
+    if (fpId != null) {
+      const key = String(fpId);
+      if (key) byId.set(key, row);
+    }
+
+    const pos = rankPos(row.position || row.pos || row.slot || '');
+    if (!pos) continue;
+    const team = String(row.team || row.teamAbbrev || row.proTeam || row.teamId || '').toUpperCase();
+    const name = normalizeNameForFp(row.name || row.fullName || '');
+
+    const primaryKey = pos === 'DST'
+      ? `DST|${team}|`
+      : `${pos}|${team}|${name}`;
+    if (primaryKey && !byKey.has(primaryKey)) byKey.set(primaryKey, row);
+
+    const teamlessKey = `${pos}||${name}`;
+    if (name && !byKey.has(teamlessKey)) byKey.set(teamlessKey, row);
+
+    if (pos === 'DST' && team) {
+      const alt = DST_BACKFILLS[team];
+      if (alt) {
+        const altKey = `DST|${alt}|`;
+        if (!byKey.has(altKey)) byKey.set(altKey, row);
+      }
+    }
+  }
+
+  return { byId, byKey };
+}
+
+function extractSeasonPoints(row) {
+  if (!row || typeof row !== 'object') return null;
+  const weeks = (row.weeks && typeof row.weeks === 'object')
+    ? row.weeks
+    : (row.week && typeof row.week === 'object' ? row.week : null);
+  if (weeks) {
+    let total = 0;
+    let seen = false;
+    for (const val of Object.values(weeks)) {
+      const num = Number(val);
+      if (Number.isFinite(num)) {
+        total += num;
+        seen = true;
+      }
+    }
+    if (seen) return total;
+  }
+  const candidates = [
+    row.seasonPoints,
+    row.seasonPts,
+    row.total,
+    row.points,
+    row.projectedSeasonPoints
+  ];
+  for (const cand of candidates) {
+    const num = Number(cand);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+
+async function loadFpSeasonIndex(season, scoring) {
+  if (!Number.isFinite(Number(season))) return null;
+  const labels = [];
+  const normalized = normalizeScoringLabel(scoring);
+  if (normalized) labels.push(normalized);
+  if (!labels.includes('STD')) labels.push('STD');
+
+  for (const label of labels) {
+    const key = `${season}|${label}`;
+    if (FP_SEASON_CACHE.has(key)) {
+      const cached = FP_SEASON_CACHE.get(key);
+      if (cached) return cached;
+      continue;
+    }
+    if (FP_SEASON_MISS.has(key)) continue;
+
+    const filePath = path.join(ROOT_DIR, 'public', 'data', 'fp', String(season), `${label}.json`);
+    try {
+      const text = await fs.readFile(filePath, 'utf8');
+      const json = JSON.parse(text);
+      const players = Array.isArray(json?.players) ? json.players : [];
+      const idx = buildFpIndex(players);
+      const payload = {
+        season: Number(season),
+        scoring: label,
+        meta: json?.meta || {},
+        players,
+        ...idx
+      };
+      FP_SEASON_CACHE.set(key, payload);
+      return payload;
+    } catch (err) {
+      FP_SEASON_CACHE.set(key, null);
+      FP_SEASON_MISS.add(key);
+    }
+  }
+
+  return null;
+}
+
+function findFpMatchForPlayer(player, fpIndex) {
+  if (!player || !fpIndex) return null;
+
+  const idCandidates = [
+    player.fantasyProsId,
+    player.fantasyProsPlayerId,
+    player.fpId,
+    player.fp_id,
+    player.fpID
+  ];
+  for (const id of idCandidates) {
+    if (id == null) continue;
+    const key = String(id);
+    if (!key) continue;
+    const hit = fpIndex.byId.get(key);
+    if (hit) return hit;
+  }
+
+  const pos = rankPos(player.position || player.pos || player.slot || '');
+  if (!pos) return null;
+  const teamAbbr = String(
+    player.teamAbbr ||
+    player.proTeamAbbr ||
+    player.proTeam ||
+    player.team ||
+    TEAM_ABBR[Number(player.proTeamId)]
+  ).toUpperCase();
+
+  if (pos === 'DST') {
+    if (teamAbbr) {
+      const direct = fpIndex.byKey.get(`DST|${teamAbbr}|`);
+      if (direct) return direct;
+      const alt = DST_BACKFILLS[teamAbbr];
+      if (alt) {
+        const hit = fpIndex.byKey.get(`DST|${alt}|`);
+        if (hit) return hit;
+      }
+    }
+    const teamName = normalizeNameForFp(
+      stripDstSuffix(player.teamName || TEAM_FULL_NAMES[teamAbbr] || player.name || '')
+    );
+    if (teamName) {
+      const hit = fpIndex.byKey.get(`DST||${teamName}`);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  const name = normalizeNameForFp(player.name || player.fullName || '');
+  const primary = `${pos}|${teamAbbr}|${name}`;
+  let hit = fpIndex.byKey.get(primary);
+  if (hit) return hit;
+
+  if (teamAbbr) {
+    const alias = TEAM_NAME_ALIASES[teamAbbr];
+    if (alias) {
+      hit = fpIndex.byKey.get(`${pos}|${alias}|${name}`);
+      if (hit) return hit;
+    }
+  }
+
+  hit = fpIndex.byKey.get(`${pos}||${name}`);
+  return hit || null;
+}
+
+function applyFpSeasonTotals(players, fpIndex, { isSeasonScope = false } = {}) {
+  if (!Array.isArray(players) || !players.length || !fpIndex) return;
+
+  for (const player of players) {
+    const match = findFpMatchForPlayer(player, fpIndex);
+    if (!match) continue;
+    const seasonPts = extractSeasonPoints(match);
+    if (seasonPts == null) continue;
+    const rounded = roundTo(seasonPts);
+
+    if (match.fpId != null && player.fpId == null) {
+      const fpIdNum = Number(match.fpId);
+      player.fpId = Number.isFinite(fpIdNum) ? fpIdNum : match.fpId;
+      player.fantasyProsId = player.fantasyProsId ?? player.fpId;
+    }
+
+    player.seasonPts = rounded;
+    player.seasonActual = true;
+    player.seasonSource = player.seasonSource || 'fp-season';
+
+    if (isSeasonScope) {
+      player.points = rounded;
+      if (player.isStarter) player.appliedPoints = rounded;
+      player.hasActual = true;
+    }
+  }
 }
 
 function splitCsvLine(line = '') {
@@ -488,6 +766,17 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     const abbrRaw = p?.proTeamAbbreviation || (Number.isFinite(proTeamId) ? TEAM_ABBR[proTeamId] : null);
     const teamAbbr = abbrRaw ? String(abbrRaw).toUpperCase() : '';
     const stats = p?.stats || e?.playerStats || [];
+    const rawFpId =
+      p?.fantasyProsId ??
+      p?.fantasyProsPlayerId ??
+      e?.playerPoolEntry?.player?.fantasyProsId ??
+      e?.playerPoolEntry?.player?.fantasyProsPlayerId ??
+      null;
+    let fpId = null;
+    if (rawFpId != null && rawFpId !== '') {
+      const fpNum = Number(rawFpId);
+      fpId = Number.isFinite(fpNum) ? fpNum : String(rawFpId);
+    }
 
     const projRaw = pickProjected(stats, weekNum);
     const ptsRaw = pickActual(stats, weekNum);
@@ -736,6 +1025,8 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
       appliedPoints: appliedPts,
       headshot: headshotFor(p, pos, teamAbbr || abbrRaw || ''),
       playerId: p?.id,
+      fpId,
+      fantasyProsId: fpId,
       lineupSlotId: slotId,
       statusTag,
       oppAbbr: opponentAbbr || null,
@@ -764,6 +1055,9 @@ router.get('/roster', async (req, res) => {
     const season   = Number(req.query.season);
     const leagueId = String(req.query.leagueId || '').trim();
     const teamId   = req.query.teamId != null && req.query.teamId !== '' ? Number(req.query.teamId) : null;
+    const scopeRaw = String(req.query.scope || '').trim().toLowerCase();
+    const weekHint = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp;
+    const isSeasonScope = scopeRaw === 'season' || scopeRaw === 'full' || scopeRaw === 'year' || Number(weekHint) === 0;
     const week     = safeWeek(req);
 
     if (!Number.isFinite(season) || !leagueId) {
@@ -832,6 +1126,8 @@ router.get('/roster', async (req, res) => {
     } catch {}
 
     const teams = Array.isArray(data?.teams) ? data.teams : [];
+    const scoringLabel = determineScoringLabel(req, data);
+    const fpSeasonIndex = isSeasonScope ? await loadFpSeasonIndex(season, scoringLabel) : null;
 
     const origin = requestOrigin(req);
     let ecrInfo = { ranks: {}, usedWeek: null, usedByPos: {} };
@@ -856,8 +1152,17 @@ router.get('/roster', async (req, res) => {
     const meta = {
       ecrWeek: ecrInfo.usedWeek ?? null,
       ecrUsedByPos: ecrInfo.usedByPos || {},
-      dvpSeason: season
+      dvpSeason: season,
+      scoring: scoringLabel,
+      scope: isSeasonScope ? 'season' : 'week'
     };
+    if (fpSeasonIndex) {
+      meta.fpSeason = {
+        scoring: fpSeasonIndex.scoring,
+        weeks: Array.isArray(fpSeasonIndex.meta?.weeks) ? fpSeasonIndex.meta.weeks : [],
+        source: fpSeasonIndex.meta?.source || 'fp'
+      };
+    }
     try {
       if (ecrInfo.usedWeek != null) res.set('x-ff-ecr-week', String(ecrInfo.usedWeek));
     } catch {}
@@ -868,7 +1173,10 @@ router.get('/roster', async (req, res) => {
 
       const entries = t?.roster?.entries || [];
       const players = mapEntriesToPlayers(entries, week, mapContext);
-      const totals  = teamTotalsFor(players);
+      if (isSeasonScope && fpSeasonIndex) {
+        applyFpSeasonTotals(players, fpSeasonIndex, { isSeasonScope: true });
+      }
+      const totals  = teamTotalsFor(players, { isSeasonScope });
 
       return res.json({
         ok: true, platform:'espn', leagueId, season, week,
@@ -884,7 +1192,10 @@ router.get('/roster', async (req, res) => {
       const team_name = teamNameOf(t);
       const entries = t?.roster?.entries || [];
       const players = mapEntriesToPlayers(entries, week, mapContext);
-      const totals = teamTotalsFor(players);
+      if (isSeasonScope && fpSeasonIndex) {
+        applyFpSeasonTotals(players, fpSeasonIndex, { isSeasonScope: true });
+      }
+      const totals = teamTotalsFor(players, { isSeasonScope });
 
       return { teamId, team_name, totals, players };
     });
