@@ -193,6 +193,29 @@ function normPosForDvp(pos) {
   return rankPos(pos);
 }
 
+function normalizeOpponentValue(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') {
+    return TEAM_ABBR[Number(val)] || null;
+  }
+  let str = String(val).trim();
+  if (!str) return null;
+  str = str.replace(/[.,]$/, '');
+  if (/^BYE$/i.test(str)) return 'BYE';
+  str = str.replace(/^@/, '').trim();
+  str = str.replace(/^(VS?\.?|V\.?)\s*/i, '');
+  if (!str) return null;
+  const compact = str.replace(/\s+/g, ' ').trim();
+  const upper = compact.toUpperCase();
+  if (compact.length <= 3) {
+    if (TEAM_FULL_NAMES[upper]) return upper;
+    return upper.length ? upper : null;
+  }
+  const alias = TEAM_ABBR_BY_NAME[upper] || TEAM_NAME_ALIASES[upper];
+  if (alias) return alias;
+  return TEAM_ABBR_BY_NAME[upper] || null;
+}
+
 const NAME_SUFFIX_RE = /\b(jr|sr|ii|iii|iv|v)\b/gi;
 
 function normalizeNameForFp(raw) {
@@ -689,8 +712,28 @@ function buildRecentWeekStats(stats, currentWeek, limit = HISTORY_LIMIT_DEFAULT)
     if (!Number.isFinite(val)) continue;
     let rec = weekMap.get(wk);
     if (!rec) {
-      rec = { week: wk, proj: null, actual: null };
+      rec = { week: wk, proj: null, actual: null, opponent: null };
       weekMap.set(wk, rec);
+    }
+    if (rec.opponent == null) {
+      const oppCandidates = [
+        row?.opponentTeamAbbrev,
+        row?.opponentAbbrev,
+        row?.opponentShortName,
+        row?.opponent,
+        row?.opponentName,
+        row?.opponentNickname,
+        row?.opponentAbbreviation,
+        TEAM_ABBR[Number(row?.opponentTeamId)],
+        TEAM_ABBR[Number(row?.opponentId)],
+        TEAM_ABBR[Number(row?.opponent?.teamId)],
+        row?.opponent?.abbrev,
+        row?.opponent?.shortName
+      ];
+      for (const candidate of oppCandidates) {
+        const norm = normalizeOpponentValue(candidate);
+        if (norm) { rec.opponent = norm; break; }
+      }
     }
     if (source === 1) rec.proj = val;
     else if (source === 0) rec.actual = val;
@@ -704,7 +747,7 @@ function buildRecentWeekStats(stats, currentWeek, limit = HISTORY_LIMIT_DEFAULT)
     const proj = Number.isFinite(rec.proj) ? roundTo(rec.proj) : null;
     const actual = Number.isFinite(rec.actual) ? roundTo(rec.actual) : null;
     const delta = proj != null && actual != null ? roundTo(actual - proj) : null;
-    out.push({ week: rec.week, proj, actual, delta });
+    out.push({ week: rec.week, proj, actual, delta, opp: rec.opponent || null, opponent: rec.opponent || null });
     if (out.length >= limit) break;
   }
   return out;
@@ -896,29 +939,6 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
       e?.byeWeek
     );
 
-    const normalizeOpponent = (val) => {
-      if (val == null) return null;
-      if (typeof val === 'number') {
-        return TEAM_ABBR[Number(val)] || null;
-      }
-      let str = String(val).trim();
-      if (!str) return null;
-      str = str.replace(/[.,]$/, '');
-      if (/^BYE$/i.test(str)) return 'BYE';
-      str = str.replace(/^@/, '').trim();
-      str = str.replace(/^(VS?\.?|V\.?)\s*/i, '');
-      if (!str) return null;
-      const compact = str.replace(/\s+/g, ' ').trim();
-      const upper = compact.toUpperCase();
-      if (compact.length <= 3) {
-        if (TEAM_FULL_NAMES[upper]) return upper;
-        return null;
-      }
-      const alias = TEAM_ABBR_BY_NAME[upper] || TEAM_NAME_ALIASES[upper];
-      if (alias) return alias;
-      return null;
-    };
-
     const normalizeHomeAway = (val) => {
       if (val == null) return null;
       const upper = String(val).trim().toUpperCase();
@@ -935,7 +955,7 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
 
     let opponentAbbr = null;
     for (const cand of opponentCandidates) {
-      const norm = normalizeOpponent(cand);
+      const norm = normalizeOpponentValue(cand);
       if (norm) { opponentAbbr = norm; break; }
     }
 
@@ -1076,6 +1096,7 @@ router.get('/roster', async (req, res) => {
     params.append('view','mRoster');
     params.append('view','mSettings');
     params.append('view','mBoxscore');
+    params.append('view','mProTeam');
     const url = `${base}?${params.toString()}`;
 
     // Resolve ESPN cred candidates (server-side only)
