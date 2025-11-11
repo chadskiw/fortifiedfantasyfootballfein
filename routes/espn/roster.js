@@ -11,7 +11,7 @@ function safeWeek(req) {
   const w = Number(raw);
   return Number.isFinite(w) && w >= 1 ? Math.min(w, NFL_MAX_WEEK) : DEFAULT_WEEK;
 }
-function teamTotalsFor(players) {
+function teamTotalsFor(players, { isSeasonScope = false } = {}) {
   let proj = 0, projRaw = 0, actual = 0, hasActuals = false, starters = 0;
   for (const p of players) {
     proj        += Number(p?.projApplied ?? (p?.isStarter ? (p?.proj ?? 0) : 0));
@@ -20,6 +20,7 @@ function teamTotalsFor(players) {
     hasActuals ||= !!p?.hasActual;
     if (p?.isStarter) starters++;
   }
+  if (isSeasonScope) hasActuals = true;
   return { proj, proj_raw: projRaw, actual, hasActuals, starters };
 }
 
