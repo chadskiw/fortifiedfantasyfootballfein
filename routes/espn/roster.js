@@ -796,38 +796,39 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     let derivedSource = null;
     if (Array.isArray(stats) && stats.length) {
       const actualRows = stats.filter(s => Number(s?.statSourceId) === 0 && Number.isFinite(+s?.appliedTotal));
-      if (actualRows.length) {/*
-        const aggregate = actualRows.find(s => Number(s?.scoringPeriodId) === 0);
-        if (aggregate) {
-          seasonTotal = Number(aggregate.appliedTotal);
-          derivedSource = 'aggregate';
-        } else { */
-          const weeklyRows = actualRows
-            .filter(s => Number(s?.scoringPeriodId) > 0)
-            .sort((a, b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
-          if (weeklyRows.length) {
-            let monotonic = true;
-            let prev = null;
+      if (actualRows.length) {
+        const weeklyRows = actualRows
+          .filter(s => Number(s?.scoringPeriodId) > 0)
+          .sort((a, b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
+        if (weeklyRows.length) {
+          let monotonic = true;
+          let prev = null;
+          for (const row of weeklyRows) {
+            const val = Number(row.appliedTotal);
+            if (!Number.isFinite(val)) continue;
+            if (prev != null && val < prev - 0.001) { monotonic = false; break; }
+            prev = val;
+          }
+          if (monotonic) {
+            seasonTotal = Number(weeklyRows.at(-1)?.appliedTotal ?? 0);
+            derivedSource = 'cumulative';
+          } else {
+            let sum = 0;
             for (const row of weeklyRows) {
               const val = Number(row.appliedTotal);
-              if (!Number.isFinite(val)) continue;
-              if (prev != null && val < prev - 0.001) { monotonic = false; break; }
-              prev = val;
+              if (Number.isFinite(val)) sum += val;
             }
-            if (monotonic) {
-              seasonTotal = Number(weeklyRows.at(-1)?.appliedTotal ?? 0);
-              derivedSource = 'cumulative';
-            } else {
-              let sum = 0;
-              for (const row of weeklyRows) {
-                const val = Number(row.appliedTotal);
-                if (Number.isFinite(val)) sum += val;
-              }
-              seasonTotal = sum;
-              derivedSource = 'summed';
-            }
+            seasonTotal = sum;
+            derivedSource = 'summed';
           }
-        //}
+        }
+        if (seasonTotal == null) {
+          const aggregate = actualRows.find(s => Number(s?.scoringPeriodId) === 0);
+          if (aggregate) {
+            seasonTotal = Number(aggregate.appliedTotal);
+            derivedSource = 'aggregate';
+          }
+        }
       }
     }
     const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
