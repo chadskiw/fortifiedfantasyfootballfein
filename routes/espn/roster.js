@@ -7,7 +7,10 @@ const { resolveEspnCredCandidates } = require('./_cred');
 
 // ====== Week helpers =======================================================
 const NFL_MAX_WEEK  = 18;
-const DEFAULT_WEEK  = Number(process.env.CURRENT_WEEK || null);
+const ENV_CURRENT_WEEK = Number(process.env.CURRENT_WEEK);
+const DEFAULT_WEEK  = Number.isFinite(ENV_CURRENT_WEEK) && ENV_CURRENT_WEEK > 0
+  ? ENV_CURRENT_WEEK
+  : 1;
 function safeWeek(req) {
   const raw = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp;
   const w = Number(raw);
@@ -795,7 +798,12 @@ function teamNameOf(t) {
 }
 
 function mapEntriesToPlayers(entries, week, ctx = {}) {
-  const weekNum = Number(week);
+  const rawWeekNum = Number(week);
+  const ctxWeekNum = Number(ctx.week);
+  const weekNum = Number.isFinite(rawWeekNum) ? rawWeekNum : null;
+  const scheduleWeek = Number.isFinite(weekNum) && weekNum > 0
+    ? weekNum
+    : (Number.isFinite(ctxWeekNum) && ctxWeekNum > 0 ? ctxWeekNum : null);
   const schedule = ctx.schedule || ctx.oppByTeam || {};
   const byeWeekMap = ctx.byeWeekByTeam || ctx.byeWeekMap || {};
   const ranksMap = ctx.ranksMap && typeof ctx.ranksMap === 'object' ? ctx.ranksMap : {};
@@ -867,7 +875,9 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
 
     const scheduleForTeam = schedule?.[teamAbbr] || schedule?.[String(teamAbbr || '').toUpperCase()] || {};
-    const scheduleEntry = scheduleForTeam?.[weekNum] ?? scheduleForTeam?.[String(weekNum)];
+    const scheduleEntry = scheduleWeek != null
+      ? (scheduleForTeam?.[scheduleWeek] ?? scheduleForTeam?.[String(scheduleWeek)])
+      : null;
     const opponentCandidates = [];
     const homeAwayCandidates = [];
     const byeWeekCandidates = [];
