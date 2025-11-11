@@ -796,12 +796,12 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     let derivedSource = null;
     if (Array.isArray(stats) && stats.length) {
       const actualRows = stats.filter(s => Number(s?.statSourceId) === 0 && Number.isFinite(+s?.appliedTotal));
-      if (actualRows.length) {
+      if (actualRows.length) {/*
         const aggregate = actualRows.find(s => Number(s?.scoringPeriodId) === 0);
         if (aggregate) {
           seasonTotal = Number(aggregate.appliedTotal);
           derivedSource = 'aggregate';
-        } else {
+        } else { */
           const weeklyRows = actualRows
             .filter(s => Number(s?.scoringPeriodId) > 0)
             .sort((a, b) => Number(a.scoringPeriodId) - Number(b.scoringPeriodId));
@@ -827,7 +827,7 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
               derivedSource = 'summed';
             }
           }
-        }
+        //}
       }
     }
     const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
