@@ -812,8 +812,11 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
         if (seasonTotal == null) {
           const aggregate = actualRows.find(s => Number(s?.scoringPeriodId) === 0);
           if (aggregate) {
-            seasonTotal = Number(aggregate.appliedTotal);
-            derivedSource = 'aggregate';
+            const aggVal = Number(aggregate.appliedTotal);
+            if (Number.isFinite(aggVal) && Math.abs(aggVal) < 1e-6) {
+              seasonTotal = 0;
+              derivedSource = 'aggregate';
+            }
           }
         }
       }
