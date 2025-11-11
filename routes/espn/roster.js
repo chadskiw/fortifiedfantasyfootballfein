@@ -1077,6 +1077,11 @@ router.get('/roster', async (req, res) => {
     const weekHint = req.query.week ?? req.query.scoringPeriodId ?? req.query.sp;
     const isSeasonScope = scopeRaw === 'season' || scopeRaw === 'full' || scopeRaw === 'year' || Number(weekHint) === 0;
     const week     = safeWeek(req);
+    const rawWeekHintNum = Number(weekHint);
+    const seasonWeek = Number.isFinite(rawWeekHintNum) && rawWeekHintNum > 0
+      ? Math.min(Math.max(rawWeekHintNum, 1), NFL_MAX_WEEK)
+      : 1;
+    const effectiveWeek = isSeasonScope ? seasonWeek : week;
 
     if (!Number.isFinite(season) || !leagueId) {
       return res.status(400).json({ ok:false, error:'missing_params' });
@@ -1085,8 +1090,8 @@ router.get('/roster', async (req, res) => {
     // Build ESPN URL (single call covers teams, roster, settings, boxscore for week)
     const base   = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
     const params = new URLSearchParams({
-      scoringPeriodId: String(week),
-      matchupPeriodId: String(week)
+      scoringPeriodId: String(effectiveWeek),
+      matchupPeriodId: String(effectiveWeek)
     });
     params.append('view','mTeam');
     params.append('view','mRoster');
@@ -1152,7 +1157,7 @@ router.get('/roster', async (req, res) => {
     let dvpMap = {};
     if (Number.isFinite(season)) {
       const [ecrRes, dvpRes] = await Promise.allSettled([
-        loadEcrMap(origin, season, week),
+        loadEcrMap(origin, season, effectiveWeek),
         loadDvpMap(origin, season)
       ]);
       if (ecrRes.status === 'fulfilled' && ecrRes.value) ecrInfo = ecrRes.value;
@@ -1160,7 +1165,7 @@ router.get('/roster', async (req, res) => {
     }
     const { scheduleMap, byeWeekMap } = buildProScheduleMaps(data, NFL_MAX_WEEK);
     const mapContext = {
-      week,
+      week: effectiveWeek,
       schedule: scheduleMap,
       byeWeekByTeam: byeWeekMap,
       ranksMap: ecrInfo.ranks,
@@ -1172,6 +1177,7 @@ router.get('/roster', async (req, res) => {
       ecrUsedByPos: ecrInfo.usedByPos || {},
       dvpSeason: season,
       scoring: scoringLabel,
+      espnWeek: effectiveWeek,
       scope: isSeasonScope ? 'season' : 'week'
     };
     if (fpSeasonIndex) {
@@ -1190,14 +1196,14 @@ router.get('/roster', async (req, res) => {
       if (!t) return res.status(404).json({ ok:false, error:'team_not_found' });
 
       const entries = t?.roster?.entries || [];
-      const players = mapEntriesToPlayers(entries, week, mapContext);
+      const players = mapEntriesToPlayers(entries, effectiveWeek, mapContext);
       if (isSeasonScope && fpSeasonIndex) {
         applyFpSeasonTotals(players, fpSeasonIndex, { isSeasonScope: true });
       }
       const totals  = teamTotalsFor(players, { isSeasonScope });
 
       return res.json({
-        ok: true, platform:'espn', leagueId, season, week,
+        ok: true, platform:'espn', leagueId, season, week: effectiveWeek,
         teamId, team_name: teamNameOf(t),
         totals,
         players,
@@ -1209,7 +1215,7 @@ router.get('/roster', async (req, res) => {
       const teamId = Number(t?.id);
       const team_name = teamNameOf(t);
       const entries = t?.roster?.entries || [];
-      const players = mapEntriesToPlayers(entries, week, mapContext);
+      const players = mapEntriesToPlayers(entries, effectiveWeek, mapContext);
       if (isSeasonScope && fpSeasonIndex) {
         applyFpSeasonTotals(players, fpSeasonIndex, { isSeasonScope: true });
       }
@@ -1231,7 +1237,7 @@ for (const t of teamsOut) {
 return res.json({
   ok: true,
   platform: 'espn',
-  leagueId, season, week,
+  leagueId, season, week: effectiveWeek,
   teams: teamsOut,
   ownership,
   acquisition,
