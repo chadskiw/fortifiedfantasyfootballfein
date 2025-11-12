@@ -122,13 +122,11 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 // routes/espnconnect.js
 async function upsertCred(pool, { memberId, swid, espn_s2, ref, ip, userAgent }) {
   const sql = `
-    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, ref, ip, user_agent, last_seen)
-    VALUES ($1,$2,$3,$4,$5,$6, NOW())
+    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, ref, last_seen)
+    VALUES ($1,$2,$3,$4, NOW())
     ON CONFLICT (swid) DO UPDATE
       SET espn_s2=EXCLUDED.espn_s2,
           ref=EXCLUDED.ref,
-          ip=EXCLUDED.ip,
-          user_agent=EXCLUDED.user_agent,
           last_seen=NOW()
     RETURNING cred_id, member_id, swid;
   `;
