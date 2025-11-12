@@ -118,28 +118,27 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 
 // ---------- DB helpers ----------
 
-async function upsertCred(pool, { swid, s2, memberId = null, ref = null }) {
-  const sqlUpd = `
-    update ff_espn_cred
-       set espn_s2   = $2,
-           member_id = coalesce($3, member_id),
-           last_seen = now()
-     where swid = $1
-     returning 1
-  `;
-  const upd = await pool.query(sqlUpd, [swid, s2, memberId]);
-  if (upd.rowCount) return { inserted:0, updated:1 };
+// upsertCred: use SWID as the conflict target
+async function upsertCred({ memberId, swid, s2, ref, ip, userAgent }) {
+  // normalize swid just in case (keeps braces but trims/downs case)
+  const swidNorm = String(swid || '').trim();
 
-  const sqlIns = `
-    insert into ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, first_seen, last_seen, ref)
-    values ($1, $2,
-            encode(digest($1, 'sha256'), 'hex'),
-            encode(digest($2, 'sha256'), 'hex'),
-            $3, now(), now(), $4)
+  const sql = `
+    INSERT INTO ff_espn_cred (member_id, swid, s2, ref, ip, user_agent, last_seen)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    ON CONFLICT (swid) DO UPDATE
+      SET s2         = EXCLUDED.s2,
+          ref        = EXCLUDED.ref,
+          ip         = EXCLUDED.ip,
+          user_agent = EXCLUDED.user_agent,
+          last_seen  = NOW()
+    RETURNING cred_id, member_id, swid;
   `;
-  await pool.query(sqlIns, [swid, s2, memberId, ref]);
-  return { inserted:1, updated:0 };
+  const vals = [memberId, swidNorm, s2, ref || 'espnconnect', ip || null, userAgent || null];
+  const { rows } = await pool.query(sql, vals);
+  return rows[0];
 }
+
 
 // db/upsertSport.js
 // upsert_sport.js
