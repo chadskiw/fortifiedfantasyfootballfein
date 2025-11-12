@@ -119,20 +119,42 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 // ---------- DB helpers ----------
 
 // upsertCred: use SWID as the conflict target
-// routes/espnconnect.js
-async function upsertCred(pool, { memberId, swid, espn_s2, ref }) {
+async function upsertCred(pool, { memberId, swid, s2, ref }) {
+  const swidNorm = normalizeSwid(swid);
+  const s2Norm = String(s2 || '').trim();
+  if (!swidNorm || !s2Norm) {
+    return { inserted: 0, updated: 0, skipped: true };
+  }
+
   const sql = `
-    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, ref, last_seen)
-    VALUES ($1,$2,$3,$4, NOW())
+    INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, ref, first_seen, last_seen)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
     ON CONFLICT (swid) DO UPDATE
-      SET espn_s2=EXCLUDED.espn_s2,
-          ref=EXCLUDED.ref,
-          last_seen=NOW()
-    RETURNING cred_id, member_id, swid;
+      SET espn_s2   = EXCLUDED.espn_s2,
+          s2_hash   = EXCLUDED.s2_hash,
+          member_id = COALESCE(EXCLUDED.member_id, ff_espn_cred.member_id),
+          ref       = EXCLUDED.ref,
+          last_seen = NOW()
+    RETURNING cred_id, member_id, swid, (xmax = 0)::int AS inserted;
   `;
-  const vals = [memberId, String(swid).trim(), espn_s2, ref || 'espnconnect'];
+  const vals = [
+    swidNorm,
+    s2Norm,
+    sha256(swidNorm),
+    sha256(s2Norm),
+    memberId ? String(memberId).trim() : null,
+    ref || 'espnconnect'
+  ];
   const { rows } = await pool.query(sql, vals);
-  return rows[0];
+  const row = rows[0] || {};
+  const inserted = row.inserted === 1;
+  return {
+    credId: row.cred_id || null,
+    memberId: row.member_id || (memberId ? String(memberId).trim() : null),
+    swid: row.swid || swidNorm,
+    inserted: inserted ? 1 : 0,
+    updated: inserted ? 0 : 1
+  };
 }
 
 
