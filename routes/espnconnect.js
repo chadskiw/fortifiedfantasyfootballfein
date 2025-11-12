@@ -120,7 +120,7 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 
 // upsertCred: use SWID as the conflict target
 // routes/espnconnect.js
-async function upsertCred(pool, { memberId, swid, espn_s2, ref, ip, userAgent }) {
+async function upsertCred(pool, { memberId, swid, espn_s2, ref }) {
   const sql = `
     INSERT INTO ff_espn_cred (member_id, swid, espn_s2, ref, last_seen)
     VALUES ($1,$2,$3,$4, NOW())
@@ -130,7 +130,7 @@ async function upsertCred(pool, { memberId, swid, espn_s2, ref, ip, userAgent })
           last_seen=NOW()
     RETURNING cred_id, member_id, swid;
   `;
-  const vals = [memberId, String(swid).trim(), espn_s2, ref || 'espnconnect', ip || null, userAgent || null];
+  const vals = [memberId, String(swid).trim(), espn_s2, ref || 'espnconnect'];
   const { rows } = await pool.query(sql, vals);
   return rows[0];
 }
