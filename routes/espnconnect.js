@@ -119,9 +119,8 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 // ---------- DB helpers ----------
 
 // upsertCred: use SWID as the conflict target
-async function upsertCred({ memberId, swid, s2, ref, ip, userAgent }) {
-  // normalize swid just in case (keeps braces but trims/downs case)
-  const swidNorm = String(swid || '').trim();
+async function upsertCred(pool, { memberId, swid, s2, ref, ip, userAgent }) {
+  const swidNorm = normalizeSwid(swid);
 
   const sql = `
     INSERT INTO ff_espn_cred (member_id, swid, s2, ref, ip, user_agent, last_seen)
@@ -132,11 +131,26 @@ async function upsertCred({ memberId, swid, s2, ref, ip, userAgent }) {
           ip         = EXCLUDED.ip,
           user_agent = EXCLUDED.user_agent,
           last_seen  = NOW()
-    RETURNING cred_id, member_id, swid;
+    RETURNING cred_id, member_id, swid, (xmax = 0)::int AS inserted;
   `;
-  const vals = [memberId, swidNorm, s2, ref || 'espnconnect', ip || null, userAgent || null];
+  const vals = [
+    memberId || null,
+    swidNorm,
+    s2 || null,
+    ref || 'espnconnect',
+    ip || null,
+    userAgent || null
+  ];
   const { rows } = await pool.query(sql, vals);
-  return rows[0];
+  const row = rows[0] || {};
+  const inserted = row.inserted === 1;
+  return {
+    credId: row.cred_id || null,
+    memberId: row.member_id || memberId || null,
+    swid: row.swid || swidNorm,
+    inserted: inserted ? 1 : 0,
+    updated: inserted ? 0 : 1
+  };
 }
 
 
