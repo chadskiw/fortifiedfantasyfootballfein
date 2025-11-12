@@ -1279,13 +1279,14 @@ router.get('/roster', async (req, res) => {
       if (ecrRes.status === 'fulfilled' && ecrRes.value) ecrInfo = ecrRes.value;
       if (dvpRes.status === 'fulfilled' && dvpRes.value) dvpMap = dvpRes.value;
     }
-    const espnSchedule = buildProScheduleMaps(data, NFL_MAX_WEEK);
     const csvFallback = await loadCsvSchedule();
-    const scheduleMap = espnSchedule.scheduleMap || {};
-    const byeWeekMap = espnSchedule.byeWeekMap || {};
-    if (csvFallback && csvFallback.schedule) {
-      mergeScheduleMaps(scheduleMap, byeWeekMap, csvFallback.schedule, csvFallback.byeWeekMap);
-    }
+    const csvSchedule = csvFallback.schedule || {};
+    const csvByeMap = csvFallback.byeWeekMap || {};
+    const espnSchedule = buildProScheduleMaps(data, NFL_MAX_WEEK);
+    const scheduleMap = {};
+    const byeWeekMap = {};
+    mergeScheduleMaps(scheduleMap, byeWeekMap, csvSchedule, csvByeMap);
+    mergeScheduleMaps(scheduleMap, byeWeekMap, espnSchedule.scheduleMap, espnSchedule.byeWeekMap);
     const mapContext = {
       week: effectiveWeek,
       schedule: scheduleMap,
