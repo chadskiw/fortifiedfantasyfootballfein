@@ -119,27 +119,30 @@ async function hydrateFromEspn(req, { game='ffl', season, leagueId, teamId }) {
 // ---------- DB helpers ----------
 
 // upsertCred: use SWID as the conflict target
-async function upsertCred(pool, { memberId, swid, s2, ref, ip, userAgent }) {
+async function upsertCred(pool, { memberId, swid, s2, ref }) {
   const swidNorm = normalizeSwid(swid);
+  if (!swidNorm || !s2) {
+    return { inserted: 0, updated: 0, skipped: true };
+  }
 
   const sql = `
-    INSERT INTO ff_espn_cred (member_id, swid, espn_s2, ref, ip, user_agent, last_seen)
-    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    INSERT INTO ff_espn_cred (swid, espn_s2, swid_hash, s2_hash, member_id, ref, first_seen, last_seen)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
     ON CONFLICT (swid) DO UPDATE
-      SET espn_s2         = EXCLUDED.espn_s2,
-          ref        = EXCLUDED.ref,
-          ip         = EXCLUDED.ip,
-          user_agent = EXCLUDED.user_agent,
-          last_seen  = NOW()
+      SET espn_s2   = EXCLUDED.espn_s2,
+          s2_hash   = EXCLUDED.s2_hash,
+          member_id = COALESCE(EXCLUDED.member_id, ff_espn_cred.member_id),
+          ref       = EXCLUDED.ref,
+          last_seen = NOW()
     RETURNING cred_id, member_id, swid, (xmax = 0)::int AS inserted;
   `;
   const vals = [
-    memberId || null,
     swidNorm,
-    s2 || null,
-    ref || 'espnconnect',
-    ip || null,
-    userAgent || null
+    s2,
+    sha256(swidNorm),
+    sha256(s2),
+    memberId || null,
+    ref || 'espnconnect'
   ];
   const { rows } = await pool.query(sql, vals);
   const row = rows[0] || {};
