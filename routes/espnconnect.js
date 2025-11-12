@@ -132,7 +132,7 @@ async function upsertCred(pool, { memberId, swid, espn_s2, ref, ip, userAgent })
           last_seen=NOW()
     RETURNING cred_id, member_id, swid;
   `;
-  const vals = [memberId, String(swid).trim(), s2, ref || 'espnconnect', ip || null, userAgent || null];
+  const vals = [memberId, String(swid).trim(), espn_s2, ref || 'espnconnect', ip || null, userAgent || null];
   const { rows } = await pool.query(sql, vals);
   return rows[0];
 }
