@@ -140,6 +140,8 @@ const TEAM_NAME_ALIASES = {
   'TENNESSEE':'TEN',
   'WASHINGTON':'WSH',
   'WASHINGTON COMMANDERS':'WSH',
+  'WASHINGTON FOOTBALL TEAM':'WSH',
+  'WASHINGTON FT':'WSH',
   'WAS':'WSH'
 };
 const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, abbr]) => [Number(id), TEAM_FULL_NAMES[abbr] || abbr]));
@@ -222,6 +224,14 @@ function normalizeOpponentValue(val) {
   const abbr = TEAM_ABBR_BY_NAME[upper];
   if (abbr) return abbr;
   return null;
+}
+
+function canonicalTeamAbbr(raw) {
+  const norm = normalizeOpponentValue(raw);
+  if (norm && norm !== 'BYE') return norm;
+  const upper = String(raw ?? '').trim().toUpperCase();
+  if (!upper || upper === 'BYE') return '';
+  return upper;
 }
 
 const NAME_SUFFIX_RE = /\b(jr|sr|ii|iii|iv|v)\b/gi;
@@ -656,21 +666,22 @@ function buildProScheduleMaps(root, maxWeek = NFL_MAX_WEEK) {
   const scheduleMap = {};
   const byeWeekMap = {};
   const ensure = (abbr) => {
-    if (!abbr) return;
-    if (!scheduleMap[abbr]) scheduleMap[abbr] = {};
+    const key = canonicalTeamAbbr(abbr);
+    if (!key) return null;
+    if (!scheduleMap[key]) scheduleMap[key] = {};
+    return key;
   };
   for (const team of proTeams) {
-    const abbr = String(team?.abbreviation || team?.abbrev || team?.teamAbbrev || '').toUpperCase();
-    if (!abbr) continue;
-    ensure(abbr);
+    const teamKey = ensure(team?.abbreviation || team?.abbrev || team?.teamAbbrev || '');
+    if (!teamKey) continue;
     const byWeek = team?.proGamesByScoringPeriod || team?.schedule?.items || {};
     for (const [wkStr, value] of Object.entries(byWeek)) {
       const wk = Number(wkStr);
       if (!Number.isFinite(wk) || wk < 1 || wk > maxWeek) continue;
       const games = Array.isArray(value) ? value : (value ? [value] : []);
       if (!games.length) {
-        scheduleMap[abbr][wk] = { opponent: 'BYE', homeAway: null, isBye: true };
-        if (!byeWeekMap[abbr]) byeWeekMap[abbr] = wk;
+        scheduleMap[teamKey][wk] = { opponent: 'BYE', homeAway: null, isBye: true };
+        if (!byeWeekMap[teamKey]) byeWeekMap[teamKey] = wk;
         continue;
       }
       const game = games[0] || {};
@@ -678,13 +689,13 @@ function buildProScheduleMaps(root, maxWeek = NFL_MAX_WEEK) {
       const awayId = Number(game.awayProTeamId ?? game.awayTeamId ?? game.awayProTeam ?? game.awayTeam?.id);
       const homeAbbr = TEAM_ABBR[homeId];
       const awayAbbr = TEAM_ABBR[awayId];
-      if (homeAbbr) {
-        ensure(homeAbbr);
-        scheduleMap[homeAbbr][wk] = { opponent: awayAbbr || null, homeAway: 'HOME', isBye: false };
+      const homeKey = ensure(homeAbbr);
+      if (homeKey) {
+        scheduleMap[homeKey][wk] = { opponent: awayAbbr ? canonicalTeamAbbr(awayAbbr) || awayAbbr : null, homeAway: 'HOME', isBye: false };
       }
-      if (awayAbbr) {
-        ensure(awayAbbr);
-        scheduleMap[awayAbbr][wk] = { opponent: homeAbbr || null, homeAway: 'AWAY', isBye: false };
+      const awayKey = ensure(awayAbbr);
+      if (awayKey) {
+        scheduleMap[awayKey][wk] = { opponent: homeAbbr ? canonicalTeamAbbr(homeAbbr) || homeAbbr : null, homeAway: 'AWAY', isBye: false };
       }
     }
   }
@@ -724,7 +735,9 @@ function parseCsvSchedule(csvText) {
     const rowRaw = lines[i];
     if (!rowRaw) continue;
     const row = rowRaw.split(',').map(cell => cell.trim());
-    const teamAbbr = String(row[0] || '').toUpperCase();
+    const rawTeam = row[0] ?? '';
+    const fallbackTeam = String(rawTeam).trim().toUpperCase();
+    const teamAbbr = canonicalTeamAbbr(rawTeam) || fallbackTeam;
     if (!teamAbbr) continue;
     if (!schedule[teamAbbr]) schedule[teamAbbr] = {};
     for (let w = 0; w < weekHeaders.length; w++) {
@@ -768,16 +781,18 @@ function parseCsvScheduleValue(raw) {
 function mergeScheduleMaps(baseSchedule = {}, baseBye = {}, fallbackSchedule = {}, fallbackBye = {}) {
   if (fallbackSchedule && typeof fallbackSchedule === 'object') {
     for (const [team, weeks] of Object.entries(fallbackSchedule)) {
-      if (!baseSchedule[team]) baseSchedule[team] = {};
+      const teamKey = canonicalTeamAbbr(team) || String(team || '').trim().toUpperCase();
+      if (!teamKey) continue;
+      if (!baseSchedule[teamKey]) baseSchedule[teamKey] = {};
       for (const [weekKey, value] of Object.entries(weeks || {})) {
         const weekNum = Number(weekKey);
         if (!Number.isFinite(weekNum)) continue;
-        const existing = baseSchedule[team][weekNum];
+        const existing = baseSchedule[teamKey][weekNum];
         const fallback = value || {};
-        const fallbackOpponent = fallback.opponent;
+        const fallbackOpponent = normalizeOpponentValue(fallback.opponent ?? (fallback.isBye ? 'BYE' : null));
         if (!fallbackOpponent) continue;
-        if (!existing || !existing.opponent || existing.opponent === team || existing.opponent === 'BYE') {
-          baseSchedule[team][weekNum] = {
+        if (!existing || !existing.opponent || existing.opponent === teamKey || existing.opponent === 'BYE') {
+          baseSchedule[teamKey][weekNum] = {
             opponent: fallbackOpponent,
             homeAway: fallback.homeAway ?? null,
             isBye: Boolean(fallback.isBye)
@@ -788,8 +803,10 @@ function mergeScheduleMaps(baseSchedule = {}, baseBye = {}, fallbackSchedule = {
   }
   if (fallbackBye && typeof fallbackBye === 'object') {
     for (const [team, byeWeek] of Object.entries(fallbackBye)) {
-      if (!baseBye[team] && Number.isFinite(Number(byeWeek))) {
-        baseBye[team] = Number(byeWeek);
+      const teamKey = canonicalTeamAbbr(team) || String(team || '').trim().toUpperCase();
+      if (!teamKey || baseBye[teamKey]) continue;
+      if (Number.isFinite(Number(byeWeek))) {
+        baseBye[teamKey] = Number(byeWeek);
       }
     }
   }
@@ -931,6 +948,18 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     const proTeamId = Number(p?.proTeamId);
     const abbrRaw = p?.proTeamAbbreviation || (Number.isFinite(proTeamId) ? TEAM_ABBR[proTeamId] : null);
     const teamAbbr = abbrRaw ? String(abbrRaw).toUpperCase() : '';
+    const teamAbbrUpper = teamAbbr ? String(teamAbbr).toUpperCase() : '';
+    const canonicalTeam = canonicalTeamAbbr(teamAbbrUpper) || teamAbbrUpper;
+    const scheduleKeySet = new Set();
+    if (canonicalTeam) scheduleKeySet.add(canonicalTeam);
+    if (teamAbbrUpper) scheduleKeySet.add(teamAbbrUpper);
+    const altAbbrRaw = DST_BACKFILLS[canonicalTeam] || DST_BACKFILLS[teamAbbrUpper];
+    if (altAbbrRaw) {
+      const altCanonical = canonicalTeamAbbr(altAbbrRaw) || String(altAbbrRaw).toUpperCase();
+      if (altCanonical) scheduleKeySet.add(altCanonical);
+      scheduleKeySet.add(String(altAbbrRaw).toUpperCase());
+    }
+    const scheduleKeyList = Array.from(scheduleKeySet);
     const stats = p?.stats || e?.playerStats || [];
     const rawFpId =
       p?.fantasyProsId ??
@@ -983,7 +1012,13 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     }
     const seasonPts = seasonTotal != null ? roundTo(seasonTotal) : null;
 
-    const scheduleForTeam = schedule?.[teamAbbr] || schedule?.[String(teamAbbr || '').toUpperCase()] || {};
+    let scheduleForTeam = {};
+    for (const key of scheduleKeyList) {
+      if (key && schedule?.[key]) {
+        scheduleForTeam = schedule[key];
+        break;
+      }
+    }
     const scheduleEntry = scheduleWeek != null
       ? (scheduleForTeam?.[scheduleWeek] ?? scheduleForTeam?.[String(scheduleWeek)])
       : null;
@@ -992,8 +1027,13 @@ function mapEntriesToPlayers(entries, week, ctx = {}) {
     const byeWeekCandidates = [];
     let scheduledBye = false;
 
-    const mappedBye = byeWeekMap?.[teamAbbr];
-    if (Number.isFinite(Number(mappedBye))) byeWeekCandidates.push(Number(mappedBye));
+    for (const key of scheduleKeyList) {
+      const byeVal = byeWeekMap?.[key];
+      if (Number.isFinite(Number(byeVal))) {
+        byeWeekCandidates.push(Number(byeVal));
+        break;
+      }
+    }
 
     if (scheduleEntry) {
       if (typeof scheduleEntry === 'string') {
