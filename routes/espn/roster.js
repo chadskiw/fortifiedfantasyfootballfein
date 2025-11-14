@@ -139,7 +139,8 @@ const TEAM_NAME_ALIASES = {
   'TAMPA BAY':'TB',
   'TENNESSEE':'TEN',
   'WASHINGTON':'WSH',
-  'WASHINGTON COMMANDERS':'WSH'
+  'WASHINGTON COMMANDERS':'WSH',
+  'WAS':'WSH'
 };
 const TEAM_NAME_BY_ID = Object.fromEntries(Object.entries(TEAM_ABBR).map(([id, abbr]) => [Number(id), TEAM_FULL_NAMES[abbr] || abbr]));
 const POS       = {1:'QB',2:'RB',3:'WR',4:'TE',5:'K',16:'DST'};
@@ -212,13 +213,15 @@ function normalizeOpponentValue(val) {
   if (!str) return null;
   const compact = str.replace(/\s+/g, ' ').trim();
   const upper = compact.toUpperCase();
+  const alias = TEAM_NAME_ALIASES[upper];
+  if (alias) return alias;
   if (compact.length <= 3) {
     if (TEAM_FULL_NAMES[upper]) return upper;
     return upper.length ? upper : null;
   }
-  const alias = TEAM_ABBR_BY_NAME[upper] || TEAM_NAME_ALIASES[upper];
-  if (alias) return alias;
-  return TEAM_ABBR_BY_NAME[upper] || null;
+  const abbr = TEAM_ABBR_BY_NAME[upper];
+  if (abbr) return abbr;
+  return null;
 }
 
 const NAME_SUFFIX_RE = /\b(jr|sr|ii|iii|iv|v)\b/gi;
