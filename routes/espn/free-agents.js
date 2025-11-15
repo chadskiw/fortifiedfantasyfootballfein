@@ -158,7 +158,8 @@ function filterPlayersNotOwned(players, rosteredIdsInput) {
 }
 
 async function loadRosteredPlayerIds({ req, season, leagueId, teamId, memberId, week }) {
-  if (!Number.isFinite(season) || !leagueId) return new Set();
+  const empty = { ids: new Set(), ok: false, reason: null };
+  if (!Number.isFinite(season) || !leagueId) return { ...empty, reason: 'invalid_params' };
   try {
     const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}`;
     const params = new URLSearchParams();
@@ -203,7 +204,7 @@ async function loadRosteredPlayerIds({ req, season, leagueId, teamId, memberId, 
       if (last?.status && last.status !== 404) {
         console.warn('[free-agents] failed to load rostered ids', last.status);
       }
-      return new Set();
+      return { ...empty, reason: last?.status ? `status_${last.status}` : 'no_data' };
     }
 
     const owned = new Set();
@@ -231,21 +232,31 @@ async function loadRosteredPlayerIds({ req, season, leagueId, teamId, memberId, 
         }
       }
     }
-    return owned;
+    return { ids: owned, ok: true, reason: null };
   } catch (e) {
     console.warn('[free-agents] ownership lookup failed', e?.message || e);
-    return new Set();
+    return { ...empty, reason: e?.message || 'exception' };
   }
 }
 
 function prepareFreeAgentResult(result, rosteredIds) {
-  const filtered = filterPlayersNotOwned(result?.players, rosteredIds);
+  const original = Array.isArray(result?.players) ? result.players : [];
+  const filtered = filterPlayersNotOwned(original, rosteredIds);
+  let players = filtered.players;
+  let filterFallback = false;
+  if (filtered.totalCount > 0 && players.length === 0 && original.length) {
+    players = original;
+    filterFallback = true;
+  }
+  const filterApplied = !filterFallback && filtered.totalCount > players.length;
   return {
     ...result,
-    players: filtered.players,
-    filteredCount: filtered.filteredCount,
-    duplicateCount: filtered.duplicateCount,
-    totalCount: filtered.totalCount
+    players,
+    filteredCount: filterApplied ? filtered.filteredCount : 0,
+    duplicateCount: filterApplied ? filtered.duplicateCount : 0,
+    totalCount: filtered.totalCount,
+    filterApplied,
+    filterFallback
   };
 }
 
@@ -334,7 +345,8 @@ router.get('/free-agents', async (req, res) => {
       return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
-    const rosteredIds = await loadRosteredPlayerIds({ req, season, leagueId, teamId, memberId, week });
+    const rosterLookup = await loadRosteredPlayerIds({ req, season, leagueId, teamId, memberId, week });
+    const rosteredIds = rosterLookup.ids;
 
     const primaryRaw = await pullFreeAgents({ season, leagueId, week, pos, minProj, onlyEligible }, req);
     const primaryOut = prepareFreeAgentResult(primaryRaw, rosteredIds);
@@ -366,11 +378,17 @@ router.get('/free-agents', async (req, res) => {
         tried_primary: primaryTried,
         tried_fallback: fallbackTried,
         upstream_path: out.upstream,
+        filter_applied: out.filterApplied,
+        filter_fallback: out.filterFallback,
         filtered: {
           before: out.totalCount ?? 0,
           removed_rostered: out.filteredCount ?? 0,
           removed_duplicates: out.duplicateCount ?? 0,
           rostered_id_count: rosteredIds.size
+        },
+        roster_lookup: {
+          ok: rosterLookup.ok,
+          reason: rosterLookup.reason
         }
       };
     }
@@ -383,6 +401,8 @@ router.get('/free-agents', async (req, res) => {
     res.set('X-FF-FA-Filtered', String(out.filteredCount ?? 0));
     res.set('X-FF-FA-Total', String(out.totalCount ?? out.players.length));
     res.set('X-FF-FA-Rostered', String(rosteredIds.size));
+    res.set('X-FF-FA-RosterLookup', rosterLookup.ok ? 'ok' : (rosterLookup.reason || 'fail'));
+    res.set('X-FF-FA-FilterFallback', out.filterFallback ? '1' : '0');
 
     return res.json(payload);
   } catch (e){
