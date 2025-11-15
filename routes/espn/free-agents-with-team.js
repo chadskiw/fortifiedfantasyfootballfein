@@ -69,7 +69,7 @@ function vWeek(p){
 }
 
 /* ---------------- ESPN fetch (with X-Fantasy-Filter) ---------------- */
-async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit }, req, credCandidate){
+async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit, teamId, memberId }, req, credCandidate){
   // ESPN requires filters in the X-Fantasy-Filter header (query-string filters are ignored/inconsistent)
   const filter = {
     filterStatus: { value: ['FREEAGENT','WAIVERS'] },
@@ -87,6 +87,8 @@ async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit 
   const { status, body, used, attempts, error } = await fetchFromEspnWithCandidates(url, req, {
     season,
     leagueId,
+    teamId,
+    memberId,
     cand: credCandidate || undefined,
     allowPublicFallback: !credCandidate,
     extraHeaders: {
@@ -102,7 +104,7 @@ async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit 
 }
 
 /* ---------------- core pull ---------------- */
-async function pullFreeAgentsDirect({ season, leagueId, week, pos }, req, credCandidate){
+async function pullFreeAgentsDirect({ season, leagueId, week, pos, teamId, memberId }, req, credCandidate){
   const slotIds = SLOT_IDS[pos] || SLOT_IDS.ALL;
   const LIMIT   = 50;
   const all     = [];
@@ -116,7 +118,7 @@ async function pullFreeAgentsDirect({ season, leagueId, week, pos }, req, credCa
 
   for (let offset=0; offset<1000; offset+=LIMIT){
     const { status, arr, url, used, attempts: pageAttempts, error } =
-      await espnPlayersPage({ season, leagueId, week, slotIds, offset, limit: LIMIT }, req, activeCred);
+      await espnPlayersPage({ season, leagueId, week, slotIds, offset, limit: LIMIT, teamId, memberId }, req, activeCred);
     tried.push(url);
     if (!attempts.length && Array.isArray(pageAttempts)) attempts = pageAttempts;
     if (!usedCred && used) usedCred = used;
@@ -141,11 +143,13 @@ router.get('/free-agents-with-team', async (req, res) => {
     const leagueId = String(req.query.leagueId || '');
     const week     = num(req.query.week, 1);
     const pos      = String(req.query.pos || 'ALL').toUpperCase();
+    const teamId   = req.query.teamId != null && req.query.teamId !== '' ? Number(req.query.teamId) : null;
+    const memberId = req.query.memberId != null && req.query.memberId !== '' ? String(req.query.memberId) : undefined;
     // (We ignore onlyEligible/minProj here; ESPN gives true FA/Waivers already.)
 
     if (!season || !leagueId) return res.status(400).json({ ok:false, error:'missing_params' });
 
-    const { rows, tried } = await pullFreeAgentsDirect({ season, leagueId, week, pos }, req);
+    const { rows, tried } = await pullFreeAgentsDirect({ season, leagueId, week, pos, teamId, memberId }, req);
 
     let players = rows.map(p => normEspnPlayer(p, week));
     players.forEach(p => p._val = vWeek(p));

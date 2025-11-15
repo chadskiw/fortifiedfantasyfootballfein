@@ -495,7 +495,7 @@ router.get('/free-agents', async (req, res) => {
       typeof normEspnPlayerFn === 'function'
     ) {
       try {
-        const directRes = await pullFreeAgentsDirectFn({ season, leagueId, week, pos }, req);
+        const directRes = await pullFreeAgentsDirectFn({ season, leagueId, week, pos, teamId: normalizedTeamId, memberId }, req);
         directTried = Array.isArray(directRes?.tried) ? directRes.tried : [];
         const rows = Array.isArray(directRes?.rows) ? directRes.rows : [];
         if (rows.length) {
