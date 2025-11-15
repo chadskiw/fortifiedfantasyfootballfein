@@ -84,9 +84,11 @@ async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit 
 
   const url = `${ESPN_PLAYERS_BASE(season, leagueId)}?scoringPeriodId=${week}&view=kona_player_info`;
 
-  const { status, body, used, error } = await fetchFromEspnWithCandidates(url, req, {
+  const { status, body, used, attempts, error } = await fetchFromEspnWithCandidates(url, req, {
+    season,
     leagueId,
     cand: credCandidate || undefined,
+    allowPublicFallback: !credCandidate,
     extraHeaders: {
       // Extra headers ESPN looks for:
       'x-fantasy-filter': JSON.stringify(filter),
@@ -96,7 +98,7 @@ async function espnPlayersPage({ season, leagueId, week, slotIds, offset, limit 
   });
 
   const arr = safeParseArr(body);
-  return { status, arr, url, used, error };
+  return { status, arr, url, used, attempts, error };
 }
 
 /* ---------------- core pull ---------------- */
@@ -106,17 +108,30 @@ async function pullFreeAgentsDirect({ season, leagueId, week, pos }, req, credCa
   const all     = [];
   const tried   = [];
   const errors  = [];
+  let activeCred = credCandidate || null;
+  let usedCred   = credCandidate || null;
+  let attempts   = [];
+  let lastStatus = null;
+  let lastError  = null;
 
   for (let offset=0; offset<1000; offset+=LIMIT){
-    const { status, arr, url, used, error } = await espnPlayersPage({ season, leagueId, week, slotIds, offset, limit: LIMIT }, req, credCandidate);
+    const { status, arr, url, used, attempts: pageAttempts, error } =
+      await espnPlayersPage({ season, leagueId, week, slotIds, offset, limit: LIMIT }, req, activeCred);
     tried.push(url);
-    if (error) errors.push(error);
+    if (!attempts.length && Array.isArray(pageAttempts)) attempts = pageAttempts;
+    if (!usedCred && used) usedCred = used;
+    if (!activeCred && used) activeCred = used;
+    if (error) {
+      errors.push(error);
+      lastError = error;
+    }
+    lastStatus = status;
     if (status < 200 || status >= 300) break;
     if (!arr.length) break;
     all.push(...arr);
     if (arr.length < LIMIT) break; // last page
   }
-  return { rows: all, tried, errors };
+  return { rows: all, tried, errors, status: lastStatus, attempts, used: usedCred, error: lastError };
 }
 
 /* ---------------- route ---------------- */
