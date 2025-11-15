@@ -87,12 +87,12 @@ async function memberIdsForContext({ season, leagueId, teamId, memberId }) {
 
   const { rows: anyRows } = await pool.query(
     `
-      SELECT DISTINCT member_id
+      SELECT DISTINCT ON (member_id) member_id
       FROM ff_sport_ffl
       WHERE (platform = '018' OR lower(platform) = 'espn')
         AND league_id = $1
         AND member_id IS NOT NULL
-      ORDER BY updated_at DESC NULLS LAST
+      ORDER BY member_id, updated_at DESC NULLS LAST
     `,
     [leagueStr]
   );
