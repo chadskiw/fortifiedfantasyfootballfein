@@ -154,3 +154,6 @@ router.get('/free-agents-with-team', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.pullFreeAgentsDirect = pullFreeAgentsDirect;
+module.exports.normEspnPlayer = normEspnPlayer;
+module.exports.vWeek = vWeek;

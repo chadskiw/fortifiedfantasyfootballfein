@@ -3,14 +3,29 @@
 const express = require('express');
 const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
+const freeAgentsDirectModule = require('./free-agents-with-team');
 
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
+const SELF_FREE_AGENTS_PATH = '/api/platforms/espn/free-agents';
+
+const pullFreeAgentsDirectFn = typeof freeAgentsDirectModule?.pullFreeAgentsDirect === 'function'
+  ? freeAgentsDirectModule.pullFreeAgentsDirect
+  : null;
+const normEspnPlayerFn = typeof freeAgentsDirectModule?.normEspnPlayer === 'function'
+  ? freeAgentsDirectModule.normEspnPlayer
+  : null;
+const vWeekFn = typeof freeAgentsDirectModule?.vWeek === 'function'
+  ? freeAgentsDirectModule.vWeek
+  : null;
 
 // Try these FA worker paths in order (configurable)
-const FA_PATH_CANDIDATES = (
+const RAW_FA_PATH_CANDIDATES = (
   process.env.FUNCTION_FREE_AGENTS_PATHS ||
   `${process.env.FUNCTION_FREE_AGENTS_PATH || ''},/api/platforms/espn/free-agents,/api/free-agents`
 ).split(',').map(s => s.trim()).filter(Boolean);
+const SELF_PATH_NORMALIZED = normalizeRelativeFaPath(SELF_FREE_AGENTS_PATH) || SELF_FREE_AGENTS_PATH;
+const PAGES_ORIGIN_ORIGIN = safeOrigin(PAGES_ORIGIN);
+const FA_PATH_CANDIDATES = sanitizeFaPathCandidates(RAW_FA_PATH_CANDIDATES);
 
 // Tunables
 const PER_REQ_TIMEOUT_MS  = Number(process.env.FA_PER_REQ_TIMEOUT_MS || 1500);
@@ -28,6 +43,63 @@ function normalizePlayers(payload){
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(payload))          return payload;
   return [];
+}
+
+function safeOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeFaPathCandidates(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(list) ? list : []) {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) continue;
+    if (isSelfFaCandidate(trimmed)) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  if (!out.length) out.push('/api/free-agents');
+  return out;
+}
+
+function isSelfFaCandidate(value) {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed, PAGES_ORIGIN);
+    const pathname = normalizeRelativeFaPath(parsed.pathname);
+    const origin = parsed.origin;
+    if (PAGES_ORIGIN_ORIGIN && origin === PAGES_ORIGIN_ORIGIN && pathname.toLowerCase() === SELF_PATH_NORMALIZED.toLowerCase()) {
+      return true;
+    }
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+      const rel = normalizeRelativeFaPath(trimmed);
+      if (rel && rel.toLowerCase() === SELF_PATH_NORMALIZED.toLowerCase()) return true;
+    }
+  } catch {
+    const rel = normalizeRelativeFaPath(trimmed);
+    if (rel && rel.toLowerCase() === SELF_PATH_NORMALIZED.toLowerCase()) return true;
+  }
+  return false;
+}
+
+function normalizeRelativeFaPath(path) {
+  if (!path) return null;
+  const trimmed = path.trim();
+  if (!trimmed) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+  const base = trimmed.split('?')[0].split('#')[0];
+  if (!base) return '/';
+  const withSlash = base.startsWith('/') ? base : `/${base}`;
+  return withSlash.replace(/\/+$/, '') || '/';
 }
 
 let fetchModulePromise = null;
@@ -363,20 +435,69 @@ router.get('/free-agents', async (req, res) => {
       }
     }
 
+    let directTried = [];
+    let directUsed = false;
+    let directError = null;
+    if (
+      out.players.length === 0 &&
+      typeof pullFreeAgentsDirectFn === 'function' &&
+      typeof normEspnPlayerFn === 'function'
+    ) {
+      try {
+        const directRes = await pullFreeAgentsDirectFn({ season, leagueId, week, pos }, req);
+        directTried = Array.isArray(directRes?.tried) ? directRes.tried : [];
+        const rows = Array.isArray(directRes?.rows) ? directRes.rows : [];
+        if (rows.length) {
+          let directPlayers = rows.map(p => {
+            const mapped = normEspnPlayerFn(p, week);
+            if (mapped && typeof mapped === 'object') {
+              if (mapped.pos && !mapped.position) mapped.position = mapped.pos;
+              if (mapped.team && !mapped.teamAbbr) mapped.teamAbbr = mapped.team;
+              if (mapped.team && !mapped.proTeamAbbr) mapped.proTeamAbbr = mapped.team;
+              if (mapped.id != null && mapped.playerId == null) mapped.playerId = mapped.id;
+            }
+            return mapped;
+          });
+          if (typeof vWeekFn === 'function') {
+            directPlayers.forEach(p => { if (p && typeof p === 'object') p._val = vWeekFn(p); });
+            directPlayers.sort((a, b) => (Number(b?._val) || 0) - (Number(a?._val) || 0));
+          }
+          const directOut = prepareFreeAgentResult({ players: directPlayers, upstream: 'espn-direct', tried: directTried }, rosteredIds);
+          if (Array.isArray(directOut.players) && directOut.players.length) {
+            directOut.upstream = 'espn-direct';
+            directUsed = true;
+            out = directOut;
+          }
+        }
+      } catch (err) {
+        directError = String(err?.message || err);
+      }
+    }
+
+    if (Array.isArray(out.players)) {
+      for (const pl of out.players) {
+        if (pl && typeof pl === 'object' && Object.prototype.hasOwnProperty.call(pl, '_val')) {
+          delete pl._val;
+        }
+      }
+    }
+
+    const playersList = Array.isArray(out.players) ? out.players : [];
     const payload = {
       ok: true,
       season,
       leagueId,
       week,
       pos,
-      count: out.players.length,
-      players: out.players
+      count: playersList.length,
+      players: playersList
     };
 
     if (debug) {
       payload._ff_debug = {
         tried_primary: primaryTried,
         tried_fallback: fallbackTried,
+        tried_direct: directTried,
         upstream_path: out.upstream,
         filter_applied: out.filterApplied,
         filter_fallback: out.filterFallback,
@@ -389,6 +510,10 @@ router.get('/free-agents', async (req, res) => {
         roster_lookup: {
           ok: rosterLookup.ok,
           reason: rosterLookup.reason
+        },
+        direct: {
+          used: directUsed,
+          error: directError
         }
       };
     }
@@ -396,13 +521,17 @@ router.get('/free-agents', async (req, res) => {
     res.set('Access-Control-Allow-Origin', req.headers.origin || 'https://fortifiedfantasy.com');
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Cache-Control', 'no-store, private');
-    res.set('X-FF-FA-Tried', [...primaryTried, ...fallbackTried].join(' | '));
+    const combinedTried = [...primaryTried, ...fallbackTried, ...directTried];
+    res.set('X-FF-FA-Tried', combinedTried.join(' | '));
     res.set('X-FF-FA-Upstream', out.upstream || primaryRaw.upstream || 'none');
     res.set('X-FF-FA-Filtered', String(out.filteredCount ?? 0));
-    res.set('X-FF-FA-Total', String(out.totalCount ?? out.players.length));
+    res.set('X-FF-FA-Total', String(out.totalCount ?? playersList.length));
     res.set('X-FF-FA-Rostered', String(rosteredIds.size));
     res.set('X-FF-FA-RosterLookup', rosterLookup.ok ? 'ok' : (rosterLookup.reason || 'fail'));
     res.set('X-FF-FA-FilterFallback', out.filterFallback ? '1' : '0');
+    res.set('X-FF-FA-Fallback', directUsed ? 'espn-direct' : (out.filterFallback ? 'filter' : 'none'));
+    if (directError) res.set('X-FF-FA-DirectError', directError);
+    res.set('X-FF-FA-Source', directUsed ? 'espn-direct:x-fantasy-filter' : 'worker');
 
     return res.json(payload);
   } catch (e){
