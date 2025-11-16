@@ -11,6 +11,34 @@ const maskHeaderSafe = (s, keep = 6) => {
   return `${start}...${end}`;
 };
 
+function normSwidRaw(value) {
+  const raw = (value || '').toString().trim();
+  if (!raw) return undefined;
+  const cleaned = raw.replace(/[{}]/g, '').toUpperCase();
+  if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/.test(cleaned)) return undefined;
+  return `{${cleaned}}`;
+}
+
+function cookieCandidateFromRequest(req) {
+  const raw = req?.headers?.cookie;
+  if (!raw) return null;
+  let swid = null;
+  let s2 = null;
+  for (const part of raw.split(';')) {
+    const [k, ...rest] = part.split('=');
+    if (!k || !rest.length) continue;
+    const key = k.trim().toLowerCase();
+    const value = rest.join('=').trim();
+    if (!value) continue;
+    if (key === 'swid') swid = normSwidRaw(value);
+    if (key === 'espn_s2') s2 = value;
+  }
+  if (swid && s2) {
+    return { swid, s2, source: 'request_cookie', stale: false };
+  }
+  return null;
+}
+
 async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
   const {
     season = req.query?.season || req.params?.season || null,
@@ -27,6 +55,10 @@ async function fetchFromEspnWithCandidates(upstreamUrl, req, ctx = {}) {
     cands = [cand];
   } else {
     cands = await resolveEspnCredCandidates({ req, season, leagueId, teamId, memberId });
+    const cookieCand = cookieCandidateFromRequest(req);
+    if (cookieCand && !cands.some(c => c?.swid === cookieCand.swid && c?.s2 === cookieCand.s2)) {
+      cands.unshift(cookieCand);
+    }
   }
 
   if (allowPublicFallback) {

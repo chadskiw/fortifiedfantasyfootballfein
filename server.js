@@ -67,8 +67,12 @@ async function deriveFromEspnRoster({ season, week, leagueId, teamId }) {
 }
 
 const app = express();
+const modelLabRouter = require('./routes/model-lab');
+
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.use(express.json());
+app.use('/api/model-lab', modelLabRouter);
 
 // REPLACE your current /ff-mini.js route with this one:
 app.get('/ff-mini.js', (req, res) => {
