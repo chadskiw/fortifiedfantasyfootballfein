@@ -111,6 +111,30 @@ function sanitizeKnobs(raw) {
   return out;
 }
 
+function normalizeKnobBlob(blob) {
+  if (blob == null) return {};
+  if (typeof blob === 'string') {
+    try {
+      const parsed = JSON.parse(blob);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (err) {
+      console.warn('[model-lab] unable to parse knob blob string, falling back to {}', err);
+      return {};
+    }
+  }
+  if (Buffer.isBuffer(blob)) {
+    try {
+      const parsed = JSON.parse(blob.toString('utf8'));
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (err) {
+      console.warn('[model-lab] unable to parse knob blob buffer, falling back to {}', err);
+      return {};
+    }
+  }
+  if (typeof blob !== 'object') return {};
+  return blob;
+}
+
 
 // --- Routes --------------------------------------------------------------
 
@@ -138,6 +162,8 @@ router.get('/settings', async (req, res) => {
     if (!payload) {
       return res.status(404).json({ ok: false, error: 'no_preset_found' });
     }
+
+    payload.knobs = normalizeKnobBlob(payload.knobs);
 
     // inject per-position delta thresholds
     try {
@@ -214,7 +240,7 @@ router.get('/presets', async (req, res) => {
       context:     row.context,
       preset_name: row.preset_name,
       is_default:  row.is_default,
-      knobs:       row.knobs,
+      knobs:       normalizeKnobBlob(row.knobs),
       created_at:  row.created_at,
       updated_at:  row.updated_at,
     }));
@@ -285,7 +311,9 @@ router.post('/presets', async (req, res) => {
       [memberId, context, presetName, isDefault, knobs]
     );
 
-    return res.status(201).json({ ok: true, preset: rows[0] });
+    const created = rows[0];
+    created.knobs = normalizeKnobBlob(created.knobs);
+    return res.status(201).json({ ok: true, preset: created });
   } catch (err) {
     console.error('[model-lab] POST /presets error', err);
 
@@ -331,7 +359,8 @@ router.patch('/presets/:presetId', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'not_found' });
     }
 
-    const existing = existingRes.rows[0];
+  const existing = existingRes.rows[0];
+  existing.knobs = normalizeKnobBlob(existing.knobs);
     const context  = newContext || existing.context;
 
     // If setting this as default, unset other defaults for this member/context
@@ -384,7 +413,7 @@ router.patch('/presets/:presetId', async (req, res) => {
           context:    existing.context,
           preset_name: existing.preset_name,
           is_default: existing.is_default,
-          knobs:      existing.knobs,
+          knobs:      normalizeKnobBlob(existing.knobs),
           created_at: existing.created_at,
           updated_at: existing.updated_at,
         },
@@ -408,7 +437,9 @@ router.patch('/presets/:presetId', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'not_found' });
     }
 
-    return res.json({ ok: true, preset: rows[0] });
+    const updated = rows[0];
+    updated.knobs = normalizeKnobBlob(updated.knobs);
+    return res.json({ ok: true, preset: updated });
   } catch (err) {
     console.error('[model-lab] PATCH /presets/:presetId error', err);
 
