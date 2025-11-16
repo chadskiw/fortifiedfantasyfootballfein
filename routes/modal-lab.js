@@ -39,6 +39,7 @@ const ALLOWED_KNOBS = new Set([
   'positionAdjustments', // per-pos mul/add
   'bigDeltaByPos',       // per-pos “big game” thresholds
   'stinkDeltaByPos',     // per-pos “stinker” thresholds
+  'contextAdjustments',  // per-pos/home/venue scenario adjustments
 ]);
 
 
@@ -76,6 +77,28 @@ function sanitizeKnobs(raw) {
         m[pos] = num;
       }
       out[key] = m;
+      continue;
+    }
+
+    if (key === 'contextAdjustments' && value && typeof value === 'object') {
+      const ctx = {};
+      for (const [pos, homeAwayMap] of Object.entries(value)) {
+        if (!homeAwayMap || typeof homeAwayMap !== 'object') continue;
+        const normalizedPos = pos.toUpperCase();
+        ctx[normalizedPos] = ctx[normalizedPos] || {};
+        for (const [homeKey, scenarios] of Object.entries(homeAwayMap)) {
+          const normalizedHome = homeKey.toLowerCase() === 'away' ? 'away' : 'home';
+          ctx[normalizedPos][normalizedHome] = ctx[normalizedPos][normalizedHome] || {};
+          if (!scenarios || typeof scenarios !== 'object') continue;
+          for (const [scenarioKey, val] of Object.entries(scenarios)) {
+            const normalizedScenario = scenarioKey.toLowerCase();
+            const num = Number(val);
+            if (!Number.isFinite(num)) continue;
+            ctx[normalizedPos][normalizedHome][normalizedScenario] = num;
+          }
+        }
+      }
+      out[key] = ctx;
       continue;
     }
 
