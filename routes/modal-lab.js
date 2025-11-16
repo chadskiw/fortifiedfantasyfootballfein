@@ -135,6 +135,31 @@ function normalizeKnobBlob(blob) {
   return blob;
 }
 
+function normalizePresetPayload(payload) {
+  if (payload == null) return null;
+  let preset = payload;
+  if (typeof preset === 'string') {
+    try {
+      preset = JSON.parse(preset);
+    } catch (err) {
+      console.warn('[model-lab] unable to parse preset payload string', err);
+      return null;
+    }
+  } else if (Buffer.isBuffer(preset)) {
+    try {
+      preset = JSON.parse(preset.toString('utf8'));
+    } catch (err) {
+      console.warn('[model-lab] unable to parse preset payload buffer', err);
+      return null;
+    }
+  }
+  if (!preset || typeof preset !== 'object') return null;
+  return {
+    ...preset,
+    knobs: normalizeKnobBlob(preset.knobs),
+  };
+}
+
 
 // --- Routes --------------------------------------------------------------
 
@@ -157,13 +182,12 @@ router.get('/settings', async (req, res) => {
       [memberId, context]
     );
 
-    const payload = rows[0]?.payload || null;
+    const payloadRaw = rows[0]?.payload || null;
+    const preset = normalizePresetPayload(payloadRaw);
 
-    if (!payload) {
+    if (!preset) {
       return res.status(404).json({ ok: false, error: 'no_preset_found' });
     }
-
-    payload.knobs = normalizeKnobBlob(payload.knobs);
 
     // inject per-position delta thresholds
     try {
@@ -179,8 +203,8 @@ router.get('/settings', async (req, res) => {
         if (row.big_delta != null) bigMap[pos] = Number(row.big_delta);
         if (row.stink_delta != null) stinkMap[pos] = Number(row.stink_delta);
       });
-      const knobs = payload.knobs || {};
-      payload.knobs = {
+      const knobs = preset.knobs || {};
+      preset.knobs = {
         ...knobs,
         bigDeltaByPos: { ...(knobs.bigDeltaByPos || {}), ...bigMap },
         stinkDeltaByPos: { ...(knobs.stinkDeltaByPos || {}), ...stinkMap }
@@ -191,7 +215,7 @@ router.get('/settings', async (req, res) => {
 
     // Hide any internal meta here if you ever add it to the function.
     // Right now payload already only contains: preset_id, context, preset_name, knobs.
-    return res.json({ ok: true, preset: payload });
+    return res.json({ ok: true, preset });
   } catch (err) {
     console.error('[model-lab] GET /settings error', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
