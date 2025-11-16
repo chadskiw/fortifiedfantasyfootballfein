@@ -34,7 +34,13 @@ const ALLOWED_KNOBS = new Set([
   'afterByeBonus',
   'postBigAdj',
   'postStinkAdj',
+
+  // new complex knobs
+  'positionAdjustments', // per-pos mul/add
+  'bigDeltaByPos',       // per-pos “big game” thresholds
+  'stinkDeltaByPos',     // per-pos “stinker” thresholds
 ]);
+
 
 // Sanitize incoming knobs: only numeric, only from ALLOWED_KNOBS
 function sanitizeKnobs(raw) {
@@ -43,12 +49,45 @@ function sanitizeKnobs(raw) {
 
   for (const [key, value] of Object.entries(raw)) {
     if (!ALLOWED_KNOBS.has(key)) continue;
+
+    // positionAdjustments: { QB: {mul,add}, WR: {mul,add}, ... }
+    if (key === 'positionAdjustments' && value && typeof value === 'object') {
+      const pa = {};
+      for (const [pos, adj] of Object.entries(value)) {
+        if (!adj || typeof adj !== 'object') continue;
+        const mul = Number(adj.mul);
+        const add = Number(adj.add);
+        pa[pos] = {
+          mul: Number.isFinite(mul) ? mul : 1,
+          add: Number.isFinite(add) ? add : 0,
+        };
+      }
+      out[key] = pa;
+      continue;
+    }
+
+    // bigDeltaByPos / stinkDeltaByPos: { QB: 8, RB: 6, ... }
+    if ((key === 'bigDeltaByPos' || key === 'stinkDeltaByPos') &&
+        value && typeof value === 'object') {
+      const m = {};
+      for (const [pos, v] of Object.entries(value)) {
+        const num = Number(v);
+        if (!Number.isFinite(num)) continue;
+        m[pos] = num;
+      }
+      out[key] = m;
+      continue;
+    }
+
+    // simple numeric knobs
     const num = Number(value);
     if (!Number.isFinite(num)) continue;
     out[key] = num;
   }
+
   return out;
 }
+
 
 // --- Routes --------------------------------------------------------------
 
@@ -75,6 +114,30 @@ router.get('/settings', async (req, res) => {
 
     if (!payload) {
       return res.status(404).json({ ok: false, error: 'no_preset_found' });
+    }
+
+    // inject per-position delta thresholds
+    try {
+      const thresholdsRes = await pool.query(
+        'select position, big_delta, stink_delta from ff_model_delta_threshold where context = $1',
+        [context]
+      );
+      const bigMap = {};
+      const stinkMap = {};
+      thresholdsRes.rows.forEach(row => {
+        const pos = (row.position || '').toUpperCase();
+        if (!pos) return;
+        if (row.big_delta != null) bigMap[pos] = Number(row.big_delta);
+        if (row.stink_delta != null) stinkMap[pos] = Number(row.stink_delta);
+      });
+      const knobs = payload.knobs || {};
+      payload.knobs = {
+        ...knobs,
+        bigDeltaByPos: { ...(knobs.bigDeltaByPos || {}), ...bigMap },
+        stinkDeltaByPos: { ...(knobs.stinkDeltaByPos || {}), ...stinkMap }
+      };
+    } catch (thresholdErr) {
+      console.warn('[model-lab] failed to load delta thresholds', thresholdErr);
     }
 
     // Hide any internal meta here if you ever add it to the function.
