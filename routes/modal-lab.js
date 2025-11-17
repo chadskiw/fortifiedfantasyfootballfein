@@ -11,7 +11,12 @@ if (!pool || typeof pool.query !== 'function') {
   throw new Error('[model-lab] pg pool.query not available — check require path/export');
 }
 
-// --- Helpers -------------------------------------------------------------
+// Parse JSON bodies
+router.use(express.json());
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 // Try to get the current member_id from whatever auth you use.
 // Tweak this to match your actual auth plumbing.
@@ -20,7 +25,7 @@ function getMemberId(req) {
     req.member?.member_id ||
     req.user?.member_id   ||
     req.auth?.member_id   ||
-    req.member_id         || // fallback if you set it directly
+    req.member_id         || // fallback if you set it directly on req
     null
   );
 }
@@ -35,15 +40,14 @@ const ALLOWED_KNOBS = new Set([
   'postBigAdj',
   'postStinkAdj',
 
-  // new complex knobs
+  // more complex knobs
   'positionAdjustments', // per-pos mul/add
   'bigDeltaByPos',       // per-pos “big game” thresholds
   'stinkDeltaByPos',     // per-pos “stinker” thresholds
   'contextAdjustments',  // per-pos/home/venue scenario adjustments
 ]);
 
-
-// Sanitize incoming knobs: only numeric, only from ALLOWED_KNOBS
+// Sanitize incoming knobs: only allow known keys, force numbers where needed
 function sanitizeKnobs(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
@@ -80,6 +84,14 @@ function sanitizeKnobs(raw) {
       continue;
     }
 
+    // contextAdjustments:
+    // {
+    //   QB: {
+    //     home: { postBig: 0.5, postStink: -0.3, afterBye: 0.7 },
+    //     away: { ... }
+    //   },
+    //   ...
+    // }
     if (key === 'contextAdjustments' && value && typeof value === 'object') {
       const ctx = {};
       for (const [pos, homeAwayMap] of Object.entries(value)) {
@@ -111,14 +123,14 @@ function sanitizeKnobs(raw) {
   return out;
 }
 
+// Normalize whatever comes out of Postgres for knobs → plain JS object
 function normalizeKnobBlob(blob) {
   if (blob == null) return {};
   if (typeof blob === 'string') {
     try {
       const parsed = JSON.parse(blob);
       return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch (err) {
-      console.warn('[model-lab] unable to parse knob blob string, falling back to {}', err);
+    } catch {
       return {};
     }
   }
@@ -126,8 +138,7 @@ function normalizeKnobBlob(blob) {
     try {
       const parsed = JSON.parse(blob.toString('utf8'));
       return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch (err) {
-      console.warn('[model-lab] unable to parse knob blob buffer, falling back to {}', err);
+    } catch {
       return {};
     }
   }
@@ -135,86 +146,118 @@ function normalizeKnobBlob(blob) {
   return blob;
 }
 
-function normalizePresetPayload(payload) {
-  if (payload == null) return null;
-  let preset = payload;
-  if (typeof preset === 'string') {
-    try {
-      preset = JSON.parse(preset);
-    } catch (err) {
-      console.warn('[model-lab] unable to parse preset payload string', err);
-      return null;
-    }
-  } else if (Buffer.isBuffer(preset)) {
-    try {
-      preset = JSON.parse(preset.toString('utf8'));
-    } catch (err) {
-      console.warn('[model-lab] unable to parse preset payload buffer', err);
-      return null;
-    }
-  }
-  if (!preset || typeof preset !== 'object') return null;
-  return {
-    ...preset,
-    knobs: normalizeKnobBlob(preset.knobs),
-  };
-}
-
-
-// --- Routes --------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
 
 /**
  * GET /api/model-lab/settings?context=playoffs
  *
  * Returns the "effective" preset for this member/context:
  *  - member default if it exists
- *  - else global default (member_id NULL)
- *
- * Uses the ff_model_preset_effective(in_member_id text, in_context text) function.
+ *  - else global default (member_id IS NULL)
+ *  - else first preset for that context (member > global)
  */
 router.get('/settings', async (req, res) => {
   const memberId = getMemberId(req); // may be null
   const context  = (req.query.context || 'playoffs').toString();
 
   try {
-    const { rows } = await pool.query(
-      'select ff_model_preset_effective($1, $2) as payload',
-      [memberId, context]
-    );
+    let row = null;
 
-    const payloadRaw = rows[0]?.payload || null;
-    const preset = normalizePresetPayload(payloadRaw);
+    // 1) member default
+    if (memberId) {
+      const r1 = await pool.query(
+        `
+        select
+          preset_id,
+          member_id,
+          context,
+          preset_name,
+          is_default,
+          knobs,
+          created_at,
+          updated_at
+        from ff_model_preset
+        where context   = $1
+          and member_id = $2
+          and is_default = true
+        order by created_at desc
+        limit 1
+        `,
+        [context, memberId]
+      );
+      if (r1.rows.length) row = r1.rows[0];
+    }
 
-    if (!preset) {
+    // 2) global default
+    if (!row) {
+      const r2 = await pool.query(
+        `
+        select
+          preset_id,
+          member_id,
+          context,
+          preset_name,
+          is_default,
+          knobs,
+          created_at,
+          updated_at
+        from ff_model_preset
+        where context   = $1
+          and member_id is null
+          and is_default = true
+        order by created_at desc
+        limit 1
+        `,
+        [context]
+      );
+      if (r2.rows.length) row = r2.rows[0];
+    }
+
+    // 3) any preset for this context (prefer member > global)
+    if (!row) {
+      const r3 = await pool.query(
+        `
+        select
+          preset_id,
+          member_id,
+          context,
+          preset_name,
+          is_default,
+          knobs,
+          created_at,
+          updated_at
+        from ff_model_preset
+        where context = $1
+          and (member_id = $2 or member_id is null)
+        order by
+          (member_id = $2) desc,
+          member_id nulls last,
+          is_default desc,
+          created_at asc
+        limit 1
+        `,
+        [context, memberId]
+      );
+      if (r3.rows.length) row = r3.rows[0];
+    }
+
+    if (!row) {
       return res.status(404).json({ ok: false, error: 'no_preset_found' });
     }
 
-    // inject per-position delta thresholds
-    try {
-      const thresholdsRes = await pool.query(
-        'select position, big_delta, stink_delta from ff_model_delta_threshold where context = $1',
-        [context]
-      );
-      const bigMap = {};
-      const stinkMap = {};
-      thresholdsRes.rows.forEach(row => {
-        const pos = (row.position || '').toUpperCase();
-        if (!pos) return;
-        if (row.big_delta != null) bigMap[pos] = Number(row.big_delta);
-        if (row.stink_delta != null) stinkMap[pos] = Number(row.stink_delta);
-      });
-      const knobs = preset.knobs || {};
-      preset.knobs = {
-        ...knobs,
-        bigDeltaByPos: { ...(knobs.bigDeltaByPos || {}), ...bigMap },
-        stinkDeltaByPos: { ...(knobs.stinkDeltaByPos || {}), ...stinkMap }
-      };
-    } catch (thresholdErr) {
-      console.warn('[model-lab] failed to load delta thresholds', thresholdErr);
-    }
+    const preset = {
+      preset_id:   row.preset_id,
+      member_id:   row.member_id,
+      context:     row.context,
+      preset_name: row.preset_name,
+      is_default:  row.is_default,
+      knobs:       normalizeKnobBlob(row.knobs),
+      created_at:  row.created_at,
+      updated_at:  row.updated_at,
+    };
 
-    // Hide any internal meta here if you ever add it to the function.
-    // Right now payload already only contains: preset_id, context, preset_name, knobs.
     return res.json({ ok: true, preset });
   } catch (err) {
     console.error('[model-lab] GET /settings error', err);
@@ -257,7 +300,6 @@ router.get('/presets', async (req, res) => {
       [context, memberId]
     );
 
-    // Hide meta + keep member_id only so you can tell which are yours vs global.
     const presets = rows.map(row => ({
       preset_id:   row.preset_id,
       member_id:   row.member_id, // null = global
@@ -337,6 +379,7 @@ router.post('/presets', async (req, res) => {
 
     const created = rows[0];
     created.knobs = normalizeKnobBlob(created.knobs);
+
     return res.status(201).json({ ok: true, preset: created });
   } catch (err) {
     console.error('[model-lab] POST /presets error', err);
@@ -367,10 +410,10 @@ router.patch('/presets/:presetId', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid_preset_id' });
   }
 
-  const newContext  = req.body.context ? req.body.context.toString() : null;
-  const presetName  = req.body.preset_name ? req.body.preset_name.toString() : null;
-  const isDefault   = (typeof req.body.is_default === 'boolean') ? req.body.is_default : null;
-  const knobsPatch  = req.body.knobs ? sanitizeKnobs(req.body.knobs) : null;
+  const newContext = req.body.context ? req.body.context.toString() : null;
+  const presetName = req.body.preset_name ? req.body.preset_name.toString() : null;
+  const isDefault  = (typeof req.body.is_default === 'boolean') ? req.body.is_default : null;
+  const knobsPatch = req.body.knobs ? sanitizeKnobs(req.body.knobs) : null;
 
   try {
     // Must own this preset
@@ -383,8 +426,8 @@ router.patch('/presets/:presetId', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'not_found' });
     }
 
-  const existing = existingRes.rows[0];
-  existing.knobs = normalizeKnobBlob(existing.knobs);
+    const existing = existingRes.rows[0];
+    existing.knobs = normalizeKnobBlob(existing.knobs);
     const context  = newContext || existing.context;
 
     // If setting this as default, unset other defaults for this member/context
@@ -432,14 +475,14 @@ router.patch('/presets/:presetId', async (req, res) => {
       return res.json({
         ok: true,
         preset: {
-          preset_id:  existing.preset_id,
-          member_id:  existing.member_id,
-          context:    existing.context,
+          preset_id:   existing.preset_id,
+          member_id:   existing.member_id,
+          context:     existing.context,
           preset_name: existing.preset_name,
-          is_default: existing.is_default,
-          knobs:      normalizeKnobBlob(existing.knobs),
-          created_at: existing.created_at,
-          updated_at: existing.updated_at,
+          is_default:  existing.is_default,
+          knobs:       normalizeKnobBlob(existing.knobs),
+          created_at:  existing.created_at,
+          updated_at:  existing.updated_at,
         },
       });
     }
@@ -463,6 +506,7 @@ router.patch('/presets/:presetId', async (req, res) => {
 
     const updated = rows[0];
     updated.knobs = normalizeKnobBlob(updated.knobs);
+
     return res.json({ ok: true, preset: updated });
   } catch (err) {
     console.error('[model-lab] PATCH /presets/:presetId error', err);
@@ -507,7 +551,5 @@ router.delete('/presets/:presetId', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-
-// ------------------------------------------------------------------------
 
 module.exports = router;
