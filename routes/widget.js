@@ -450,11 +450,13 @@ router.get('/team-edge', async (req, res) => {
     );
 
     const response = {
+      week: currentWeek,
       teamName: resolvedTeamName,
       record: recordStr,
       rank: rank || null,
       size: leagueSize,
       thisWeek: {
+        week: currentWeek,
         espnProj,
         ffProj,
         delta: weekDelta,
