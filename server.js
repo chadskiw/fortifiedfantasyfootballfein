@@ -68,11 +68,13 @@ async function deriveFromEspnRoster({ season, week, leagueId, teamId }) {
 
 const app = express();
 const modelLabRouter = require('./routes/modal-lab');
+const widgetRouter = require('./routes/widget');
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json());
 app.use('/api/modal-lab', modelLabRouter);
+app.use('/api/widget', widgetRouter);
 
 // REPLACE your current /ff-mini.js route with this one:
 app.get('/ff-mini.js', (req, res) => {
