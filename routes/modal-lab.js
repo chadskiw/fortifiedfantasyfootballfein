@@ -1,4 +1,4 @@
-// routes/model-lab.js
+// routes/modal-lab.js
 // ModelLab presets backend for playoffs / projection tuning
 
 const express = require('express');
@@ -8,7 +8,7 @@ let db   = require('../src/db/pool'); // adjust path if needed
 let pool = db.pool || db;
 
 if (!pool || typeof pool.query !== 'function') {
-  throw new Error('[model-lab] pg pool.query not available — check require path/export');
+  throw new Error('[modal-lab] pg pool.query not available — check require path/export');
 }
 
 // Parse JSON bodies
@@ -18,16 +18,72 @@ router.use(express.json());
 // Helpers
 // ---------------------------------------------------------------------------
 
+function parseCookies(req) {
+  if (req?.cookies && typeof req.cookies === 'object') {
+    return req.cookies;
+  }
+
+  const header = req?.headers?.cookie;
+  if (!header || typeof header !== 'string') return {};
+
+  return header.split(';').reduce((acc, part) => {
+    const idx = part.indexOf('=');
+    if (idx < 0) return acc;
+    const key = part.slice(0, idx).trim();
+    if (!key) return acc;
+    const rawVal = part.slice(idx + 1).trim();
+    try {
+      acc[key] = decodeURIComponent(rawVal);
+    } catch {
+      acc[key] = rawVal;
+    }
+    return acc;
+  }, {});
+}
+
+function normalizeMemberId(value) {
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  return normalized.toUpperCase();
+}
+
 // Try to get the current member_id from whatever auth you use.
-// Tweak this to match your actual auth plumbing.
+// Pulls from req context, cookies, headers, and explicit payload fields.
 function getMemberId(req) {
-  return (
+  const direct = normalizeMemberId(
     req.member?.member_id ||
     req.user?.member_id   ||
     req.auth?.member_id   ||
-    req.member_id         || // fallback if you set it directly on req
-    null
+    req.member_id
   );
+  if (direct) return direct;
+
+  const cookies = parseCookies(req);
+  if (cookies && typeof cookies === 'object') {
+    const loggedIn =
+      cookies.ff_logged_in === '1' ||
+      cookies.ff_logged_in === 'true' ||
+      cookies.ff_logged_in === 1;
+    if (loggedIn && cookies.ff_member_id) {
+      const cookieMid = normalizeMemberId(cookies.ff_member_id);
+      if (cookieMid) return cookieMid;
+    }
+    const fallbackCookieMid = normalizeMemberId(cookies.ff_member_id || cookies.ff_member);
+    if (fallbackCookieMid) return fallbackCookieMid;
+  }
+
+  const headerMid = normalizeMemberId(
+    (typeof req.get === 'function' && (req.get('x-ff-member-id') || req.get('x-member-id'))) ||
+    req.headers?.['x-ff-member-id'] ||
+    req.headers?.['x-member-id']
+  );
+  if (headerMid) return headerMid;
+
+  const payloadMid = normalizeMemberId(req.body?.memberId || req.query?.memberId);
+  if (payloadMid) return payloadMid;
+
+  return null;
 }
 
 // Which knobs are allowed to be stored/updated
@@ -151,7 +207,7 @@ function normalizeKnobBlob(blob) {
 // ---------------------------------------------------------------------------
 
 /**
- * GET /api/model-lab/settings?context=playoffs
+ * GET /api/modal-lab/settings?context=playoffs
  *
  * Returns the "effective" preset for this member/context:
  *  - member default if it exists
@@ -260,13 +316,13 @@ router.get('/settings', async (req, res) => {
 
     return res.json({ ok: true, preset });
   } catch (err) {
-    console.error('[model-lab] GET /settings error', err);
+    console.error('[modal-lab] GET /settings error', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
 /**
- * GET /api/model-lab/presets?context=playoffs
+ * GET /api/modal-lab/presets?context=playoffs
  *
  * Lists presets visible to this member for a context:
  *  - user's presets (member_id = current)
@@ -313,13 +369,13 @@ router.get('/presets', async (req, res) => {
 
     return res.json({ ok: true, presets });
   } catch (err) {
-    console.error('[model-lab] GET /presets error', err);
+    console.error('[modal-lab] GET /presets error', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
 /**
- * POST /api/model-lab/presets
+ * POST /api/modal-lab/presets
  *
  * Create a new preset for the current member.
  *
@@ -382,7 +438,7 @@ router.post('/presets', async (req, res) => {
 
     return res.status(201).json({ ok: true, preset: created });
   } catch (err) {
-    console.error('[model-lab] POST /presets error', err);
+    console.error('[modal-lab] POST /presets error', err);
 
     if (err.code === '23505') {
       // unique violation (likely name/context/member clash)
@@ -394,7 +450,7 @@ router.post('/presets', async (req, res) => {
 });
 
 /**
- * PATCH /api/model-lab/presets/:presetId
+ * PATCH /api/modal-lab/presets/:presetId
  *
  * Update a preset owned by the current member.
  * You can rename, change knobs, and/or mark it as default.
@@ -509,7 +565,7 @@ router.patch('/presets/:presetId', async (req, res) => {
 
     return res.json({ ok: true, preset: updated });
   } catch (err) {
-    console.error('[model-lab] PATCH /presets/:presetId error', err);
+    console.error('[modal-lab] PATCH /presets/:presetId error', err);
 
     if (err.code === '23505') {
       return res.status(409).json({ ok: false, error: 'duplicate_name' });
@@ -520,7 +576,7 @@ router.patch('/presets/:presetId', async (req, res) => {
 });
 
 /**
- * DELETE /api/model-lab/presets/:presetId
+ * DELETE /api/modal-lab/presets/:presetId
  *
  * Delete a preset owned by the current member.
  */
@@ -547,7 +603,7 @@ router.delete('/presets/:presetId', async (req, res) => {
 
     return res.json({ ok: true, deleted: true });
   } catch (err) {
-    console.error('[model-lab] DELETE /presets/:presetId error', err);
+    console.error('[modal-lab] DELETE /presets/:presetId error', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
