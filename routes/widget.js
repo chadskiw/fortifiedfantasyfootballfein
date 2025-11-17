@@ -37,6 +37,7 @@ router.use(
 
 const CURRENT_SEASON = Number(process.env.FF_CURRENT_SEASON) || new Date().getUTCFullYear();
 const CURRENT_WEEK = Number(process.env.FF_CURRENT_WEEK || process.env.CURRENT_WEEK) || 1;
+const PRESET_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const clamp = (val, lo, hi) => Math.min(hi, Math.max(lo, val));
 const round = (value, digits = 1) => {
@@ -49,6 +50,10 @@ const asInt = (value) => {
   if (value === undefined || value === null || value === '') return null;
   const num = Number(value);
   return Number.isFinite(num) ? Math.trunc(num) : null;
+};
+const asNumber = (value, fallback = 0) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
 };
 
 function normalizeRecord(record) {
@@ -66,6 +71,40 @@ function momentumLabel(score) {
   if (score >= 0.45) return 'Steady';
   if (score >= 0.3) return 'Grinding';
   return 'Reset Mode';
+}
+
+const presetCache = new Map();
+async function fetchDefaultPreset(client, context = 'playoffs') {
+  const key = context || 'default';
+  const cached = presetCache.get(key);
+  const now = Date.now();
+  if (cached && cached.expires > now) {
+    return cached.knobs;
+  }
+  try {
+    const { rows } = await client.query(
+      `
+        SELECT knobs
+          FROM ff_model_preset
+         WHERE context = $1
+         ORDER BY is_default DESC, updated_at DESC
+         LIMIT 1
+      `,
+      [context]
+    );
+    const rawKnobs = rows[0]?.knobs;
+    const knobs =
+      rawKnobs && typeof rawKnobs === 'string'
+        ? JSON.parse(rawKnobs)
+        : rawKnobs && typeof rawKnobs === 'object'
+        ? rawKnobs
+        : {};
+    presetCache.set(key, { knobs, expires: now + PRESET_CACHE_TTL_MS });
+    return knobs;
+  } catch (err) {
+    console.warn('[widget] failed to load modal-lab preset', err?.message || err);
+    return {};
+  }
 }
 
 async function fetchFreeAgentSuggestion({ season, leagueId, teamId, week }, req) {
@@ -129,6 +168,7 @@ router.get('/team-edge', async (req, res) => {
   const teamId = asInt(req.query.teamId ?? req.query.team_id ?? req.query.team);
   const teamIdText = teamId != null ? String(teamId) : null;
   const season = asInt(req.query.season) || CURRENT_SEASON;
+  const modelContext = String(req.query.context || 'playoffs').toLowerCase();
   let scoring = String(req.query.scoring || 'PPR').toUpperCase();
 
   if (!leagueId || teamIdText == null) {
@@ -151,7 +191,7 @@ router.get('/team-edge', async (req, res) => {
       [season, leagueId, teamIdText, scoring]
     );
 
-    let ffProj = 0;
+    let lastActual = 0;
     let currentWeek = CURRENT_WEEK;
     let weekCount = 0;
     let teamWeeklyAvg = 0;
@@ -180,7 +220,7 @@ router.get('/team-edge', async (req, res) => {
         recentSample.length > 0
           ? recentSample.reduce((sum, row) => sum + Number(row.points || 0), 0) / recentSample.length
           : teamWeeklyAvg;
-      ffProj = round(Number(lastWeekRow.points || 0), 1);
+      lastActual = round(Number(lastWeekRow.points || 0), 1);
 
       const { rows: leagueWeekAggRows } = await client.query(
         `
@@ -222,8 +262,8 @@ router.get('/team-edge', async (req, res) => {
         leagueWeekAvg ||
         (leagueSeasonAvg && weekCount ? leagueSeasonAvg / weekCount : leagueSeasonAvg || 0);
       deltaPerGame = round(teamWeeklyAvg - leagueAvgPerGame, 1);
-      espnProj = round(leagueWeekAvg || leagueAvgPerGame || ffProj, 1);
-      weekDelta = round(ffProj - espnProj, 1);
+      espnProj = round(leagueWeekAvg || leagueAvgPerGame || lastActual, 1);
+      weekDelta = round(lastActual - espnProj, 1);
     } else {
       let historyResult = await client.query(
         `
@@ -273,7 +313,7 @@ router.get('/team-edge', async (req, res) => {
         recentSample.length > 0
           ? recentSample.reduce((sum, row) => sum + Number(row.week_pts || 0), 0) / recentSample.length
           : teamWeeklyAvg;
-      ffProj = round(Number(latestRow.week_pts || 0), 1);
+      lastActual = round(Number(latestRow.week_pts || 0), 1);
 
       const { rows: leagueWeekAggRows } = await client.query(
         `
@@ -332,8 +372,8 @@ router.get('/team-edge', async (req, res) => {
         leagueWeekAvg ||
         (leagueSeasonAvg && weekCount ? leagueSeasonAvg / weekCount : leagueSeasonAvg || 0);
       deltaPerGame = round(teamWeeklyAvg - leagueAvgPerGame, 1);
-      espnProj = round(leagueWeekAvg || leagueAvgPerGame || ffProj, 1);
-      weekDelta = round(ffProj - espnProj, 1);
+      espnProj = round(leagueWeekAvg || leagueAvgPerGame || lastActual, 1);
+      weekDelta = round(lastActual - espnProj, 1);
     }
 
     const { rows: teamRows } = await client.query(
@@ -353,8 +393,24 @@ router.get('/team-edge', async (req, res) => {
     const fallbackTeamName = historyRows.length ? historyRows[0]?.team_name : null;
     const resolvedTeamName = teamRows[0]?.name || fallbackTeamName || null;
 
+    const presetKnobs = await fetchDefaultPreset(client, modelContext);
+    const trendWeight = asNumber(presetKnobs?.playerTrendWeight, 0.45);
+    const defenseWeight = asNumber(presetKnobs?.defTrendWeight, 0.55);
+    const homeBonus = asNumber(presetKnobs?.homeBonus, 0);
+    const awayBonus = asNumber(presetKnobs?.awayBonus, 0);
+    const baselineDelta = teamWeeklyAvg - leagueAvgPerGame;
+    deltaPerGame = round(baselineDelta, 1);
+    const trendDelta = (recentAvg - teamWeeklyAvg) * (trendWeight / 2);
+    const defenseDelta = baselineDelta * (defenseWeight / 2);
+    const contextBonus = baselineDelta >= 0 ? homeBonus : awayBonus;
+    const fortifiedWeekDelta = trendDelta + defenseDelta + contextBonus;
+    const ffProj = round(espnProj + fortifiedWeekDelta, 1);
+    weekDelta = round(ffProj - espnProj, 1);
+
+    const playoffScale = Math.max(1, Math.min(weekCount || 1, 4));
     const playoffsEspn = round(leagueSeasonAvg || seasonPts, 1);
-    const playoffsDelta = round(seasonPts - playoffsEspn, 1);
+    const playoffsFF = round(playoffsEspn + fortifiedWeekDelta * playoffScale, 1);
+    const playoffsDelta = round(playoffsFF - playoffsEspn, 1);
     const leagueAvgSafe =
       leagueAvgPerGame ||
       (seasonPts && weekCount ? seasonPts / Math.max(weekCount, 1) : espnProj || 0);
@@ -373,7 +429,7 @@ router.get('/team-edge', async (req, res) => {
       `Averaging ${round(teamWeeklyAvg, 1)} pts (${deltaPerGame >= 0 ? '+' : ''}${round(deltaPerGame, 1)} vs league).`,
       `Season total ${round(seasonPts, 1)} pts (${playoffsDelta >= 0 ? '+' : ''}${round(playoffsDelta, 1)} vs baseline).`,
       rank && leagueSize ? `Point rank #${rank} of ${leagueSize}.` : `Tracking ${round(momentumValue * 100)}% win pace.`,
-      `Last card: ${ffProj} vs league ${espnProj}.`,
+      `Last card: ${lastActual} vs league ${round(leagueWeekAvg || leagueAvgPerGame, 1)}.`,
     ];
 
     const hypeLines = [
@@ -407,7 +463,7 @@ router.get('/team-edge', async (req, res) => {
       },
       playoffs: {
         espnProj: playoffsEspn,
-        ffProj: round(seasonPts, 1),
+        ffProj: playoffsFF,
         delta: playoffsDelta,
         confidence: Number(confidencePlayoffs.toFixed(2)),
         odds: oddsRaw,
@@ -428,7 +484,7 @@ router.get('/team-edge', async (req, res) => {
           : `Closing a ${Math.abs(round(deltaPerGame, 1))} pt gap per game keeps you in the hunt.`,
       deeplink: `https://fortifiedfantasy.com/fein/?season=${season}&leagueId=${encodeURIComponent(
         leagueId
-      )}&teamId=${encodeURIComponent(teamId)}`,
+      )}&teamId=${encodeURIComponent(teamIdText)}`,
       freeAgent: faSuggestion,
     };
 
