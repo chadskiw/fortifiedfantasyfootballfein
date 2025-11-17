@@ -6,9 +6,14 @@
 const express = require('express');
 const router = express.Router();
 
-const cors = require('cors');              // 👈 add this
+const cors = require('cors');
 
 const pool = require('../src/db/pool');
+const {
+  pullFreeAgentsDirect,
+  normEspnPlayer,
+  vWeek: valueFromPlayer,
+} = require('./espn/free-agents-with-team');
 
 const ALLOWED_ORIGINS = [
   'https://widget-test-9d8.pages.dev',
@@ -31,6 +36,7 @@ router.use(
 );
 
 const CURRENT_SEASON = Number(process.env.FF_CURRENT_SEASON) || new Date().getUTCFullYear();
+const CURRENT_WEEK = Number(process.env.FF_CURRENT_WEEK || process.env.CURRENT_WEEK) || 1;
 
 const clamp = (val, lo, hi) => Math.min(hi, Math.max(lo, val));
 const round = (value, digits = 1) => {
@@ -62,6 +68,56 @@ function momentumLabel(score) {
   return 'Reset Mode';
 }
 
+async function fetchFreeAgentSuggestion({ season, leagueId, teamId, week }, req) {
+  try {
+    const { rows } = await pullFreeAgentsDirect(
+      {
+        season,
+        leagueId,
+        week,
+        pos: 'ALL',
+        teamId: Number(teamId),
+      },
+      req
+    );
+
+    if (!Array.isArray(rows) || !rows.length) return null;
+
+    const players = rows
+      .map((p) => normEspnPlayer(p, week))
+      .filter((p) => p?.name)
+      .map((p) => ({
+        ...p,
+        value: valueFromPlayer(p),
+      }))
+      .sort((a, b) => (b.value || 0) - (a.value || 0));
+
+    const target =
+      players.find((p) => ['RB', 'WR', 'TE'].includes(p.pos)) ||
+      players.find((p) => ['QB', 'DST', 'K'].includes(p.pos)) ||
+      players[0];
+    if (!target) return null;
+
+    const projection = target.proj != null ? round(target.proj, 1) : target.value ? round(target.value, 1) : null;
+    return {
+      name: target.name,
+      pos: target.pos,
+      team: target.team,
+      proj: projection,
+      headshot: target.headshot,
+      headline: projection
+        ? `Add ${target.name} (${target.pos}) for +${projection.toFixed(1)} pts`
+        : `Add ${target.name} (${target.pos})`,
+      blurb: projection
+        ? `${target.name} is projected for ${projection.toFixed(1)} pts in week ${week}.`
+        : `${target.name} headlines available ${target.pos}s this week.`,
+    };
+  } catch (err) {
+    console.warn('[widget] free-agent suggestion failed', err?.message || err);
+    return null;
+  }
+}
+
 router.get('/team-edge', async (req, res) => {
   const leagueIdRaw =
     req.query.leagueId ||
@@ -71,167 +127,155 @@ router.get('/team-edge', async (req, res) => {
     '';
   const leagueId = String(leagueIdRaw || '').trim();
   const teamId = asInt(req.query.teamId ?? req.query.team_id ?? req.query.team);
+  const teamIdText = teamId != null ? String(teamId) : null;
   const season = asInt(req.query.season) || CURRENT_SEASON;
-  const scoring = String(req.query.scoring || 'PPR').toUpperCase();
+  let scoring = String(req.query.scoring || 'PPR').toUpperCase();
 
-  if (!leagueId || !teamId) {
+  if (!leagueId || teamIdText == null) {
     return res.status(400).json({ error: 'leagueId and teamId required' });
   }
 
   const client = await pool.connect();
   try {
-    // Latest cache row (week + season totals)
-    const { rows: cacheRows } = await client.query(
+    let { rows: historyRows } = await client.query(
       `
         SELECT season, league_id, team_id, team_name, scoring, week,
                week_pts, season_pts, updated_at
           FROM ff_team_points_cache
          WHERE season = $1
            AND league_id::text = $2::text
-           AND team_id::int = $3::int
+           AND team_id::text = $3::text
            AND scoring = $4
          ORDER BY week DESC
-         LIMIT 1
       `,
-      [season, leagueId, teamId, scoring]
+      [season, leagueId, teamIdText, scoring]
     );
-    const cacheRow = cacheRows[0];
-    if (!cacheRow) {
-      return res.status(404).json({ error: 'team_not_found' });
-    }
 
-    // Weekly data (exclude week 1 which is the season alias)
-    const { rows: weeklyRows } = await client.query(
-      `
-        SELECT week, points
-          FROM ff_team_weekly_points
-         WHERE season = $1
-           AND league_id::text = $2::text
-           AND team_id::int = $3::int
-           AND scoring = $4
-           AND week > 1
-         ORDER BY week ASC
-      `,
-      [season, leagueId, teamId, scoring]
-    );
-    const playedWeeks = weeklyRows.length;
-    const totalWeeklyPoints = weeklyRows.reduce((sum, row) => sum + Number(row.points || 0), 0);
-    const teamWeeklyAvg =
-      playedWeeks > 0
-        ? totalWeeklyPoints / playedWeeks
-        : Number(cacheRow.season_pts || 0);
-
-    const [{ rows: leagueWeekAggRows }, { rows: leagueSeasonAggRows }] = await Promise.all([
-      client.query(
+    if (!historyRows.length) {
+      const fallback = await client.query(
         `
-          SELECT AVG(points)::numeric AS avg_pts
-            FROM ff_team_weekly_points
+          SELECT season, league_id, team_id, team_name, scoring, week,
+                 week_pts, season_pts, updated_at
+            FROM ff_team_points_cache
            WHERE season = $1
              AND league_id::text = $2::text
-             AND scoring = $3
-             AND week > 1
+             AND team_id::text = $3::text
+           ORDER BY week DESC
         `,
-        [season, leagueId, scoring]
-      ),
-      client.query(
-        `
-          SELECT AVG(points)::numeric AS avg_pts
-            FROM ff_team_weekly_points
-           WHERE season = $1
-             AND league_id::text = $2::text
-             AND scoring = $3
-             AND week = 1
-        `,
-        [season, leagueId, scoring]
-      ),
-    ]);
-
-    const leagueAvgPerGame = Number(leagueWeekAggRows[0]?.avg_pts || 0);
-    const seasonLeagueAvg = Number(leagueSeasonAggRows[0]?.avg_pts || 0) || Number(cacheRow.season_pts || 0);
-
-    const deltaPerGame = round(teamWeeklyAvg - leagueAvgPerGame);
-
-    // Week-level comparison
-    const currentWeek = Number(cacheRow.week) || null;
-    let weekLeagueAvg = leagueAvgPerGame;
-    if (currentWeek) {
-      const { rows } = await client.query(
-        `
-          SELECT AVG(points)::numeric AS avg_pts
-            FROM ff_team_weekly_points
-           WHERE season = $1
-             AND league_id::text = $2::text
-             AND scoring = $3
-             AND week = $4
-        `,
-        [season, leagueId, scoring, currentWeek]
+        [season, leagueId, teamIdText]
       );
-      weekLeagueAvg = Number(rows[0]?.avg_pts || weekLeagueAvg || 0);
+      if (!fallback.rows.length) {
+        return res.status(404).json({ error: 'team_not_found' });
+      }
+      historyRows = fallback.rows;
+      scoring = fallback.rows[0].scoring;
     }
 
-    const ffProj = round(cacheRow.week_pts || 0, 1);
-    const espnProj = round(weekLeagueAvg || ffProj, 1);
-    const weekDelta = round(ffProj - espnProj, 1);
+    const latestRow = historyRows[0];
+    const currentWeek = Number(latestRow.week) || CURRENT_WEEK;
 
-    // Rank + league size from cache (week=1 rows)
-    const { rows: rankRows } = await client.query(
-      `
-        WITH season_rows AS (
-          SELECT
-            team_id,
-            season_pts,
-            RANK() OVER (ORDER BY season_pts DESC NULLS LAST) AS rk
-          FROM ff_team_points_cache
-          WHERE season = $1
-            AND league_id::text = $2::text
-            AND scoring = $3
-            AND week = 1
-        )
-        SELECT rk FROM season_rows WHERE team_id::int = $4::int
-      `,
-      [season, leagueId, scoring, teamId]
-    );
-    const rank = rankRows[0]?.rk ? Number(rankRows[0].rk) : null;
+    const weekRows = historyRows.filter((row) => Number(row.week) > 0);
+    const weekCount = weekRows.length || currentWeek || 1;
+    const teamWeeklyAvg =
+      weekRows.length > 0
+        ? weekRows.reduce((sum, row) => sum + Number(row.week_pts || 0), 0) / weekRows.length
+        : Number(latestRow.week_pts || 0);
+    const recentSample = weekRows.slice(0, Math.min(3, weekRows.length));
+    const recentAvg =
+      recentSample.length > 0
+        ? recentSample.reduce((sum, row) => sum + Number(row.week_pts || 0), 0) / recentSample.length
+        : teamWeeklyAvg;
 
-    const { rows: sizeRows } = await client.query(
+    const ffProj = round(latestRow.week_pts || 0, 1);
+
+    const { rows: leagueWeekAggRows } = await client.query(
       `
-        SELECT COUNT(DISTINCT team_id)::int AS size
+        SELECT AVG(week_pts)::numeric AS avg_pts
           FROM ff_team_points_cache
          WHERE season = $1
            AND league_id::text = $2::text
            AND scoring = $3
-           AND week = 1
+           AND week = $4
+      `,
+      [season, leagueId, scoring, currentWeek]
+    );
+
+    const { rows: seasonAggRows } = await client.query(
+      `
+        WITH latest AS (
+          SELECT DISTINCT ON (team_id)
+            team_id,
+            season_pts
+          FROM ff_team_points_cache
+          WHERE season = $1
+            AND league_id::text = $2::text
+            AND scoring = $3
+          ORDER BY team_id, week DESC
+        )
+        SELECT AVG(season_pts)::numeric AS avg_pts, COUNT(*)::int AS team_count
+          FROM latest
       `,
       [season, leagueId, scoring]
     );
-    const leagueSize = sizeRows[0]?.size || null;
 
-    // Record from ff_team (ingested via espn-fan)
+    const leagueWeekAvg = Number(leagueWeekAggRows[0]?.avg_pts || 0);
+    const leagueSeasonAvg = Number(seasonAggRows[0]?.avg_pts || 0);
+    const leagueSize = seasonAggRows[0]?.team_count || null;
+
+    const leagueAvgPerGame =
+      leagueWeekAvg ||
+      (leagueSeasonAvg && weekCount ? Number(leagueSeasonAvg) / Math.max(weekCount, 1) : Number(leagueSeasonAvg) || 0);
+    const deltaPerGame = round(teamWeeklyAvg - leagueAvgPerGame);
+
+    const espnProj = round(leagueWeekAvg || leagueAvgPerGame || ffProj, 1);
+    const weekDelta = round(ffProj - espnProj, 1);
+
+    const { rows: rankRows } = await client.query(
+      `
+        WITH latest AS (
+          SELECT DISTINCT ON (team_id)
+            team_id,
+            season_pts
+          FROM ff_team_points_cache
+          WHERE season = $1
+            AND league_id::text = $2::text
+            AND scoring = $3
+          ORDER BY team_id, week DESC
+        ),
+        ranked AS (
+          SELECT
+            team_id,
+            season_pts,
+            RANK() OVER (ORDER BY season_pts DESC NULLS LAST) AS rk
+          FROM latest
+        )
+        SELECT rk FROM ranked WHERE team_id::text = $4::text
+      `,
+      [season, leagueId, scoring, teamIdText]
+    );
+    const rank = rankRows[0]?.rk ? Number(rankRows[0].rk) : null;
+
     const { rows: teamRows } = await client.query(
       `
         SELECT name, record
           FROM ff_team
-         WHERE platform = 'espn'
+         WHERE (platform = 'espn' OR platform = '018')
            AND season = $1
            AND league_id::text = $2::text
-           AND team_id::int = $3::int
+           AND team_id::text = $3::text
          ORDER BY updated_at DESC NULLS LAST
          LIMIT 1
       `,
-      [season, leagueId, teamId]
+      [season, leagueId, teamIdText]
     );
     const recordStr = teamRows[0]?.record ? normalizeRecord(teamRows[0].record) : null;
 
-    const seasonPts = Number(cacheRow.season_pts || 0);
-    const playoffsEspn = round(seasonLeagueAvg || seasonPts, 1);
+    const seasonPts = Number(latestRow.season_pts || 0);
+    const playoffsEspn = round(leagueSeasonAvg || seasonPts, 1);
     const playoffsDelta = round(seasonPts - playoffsEspn, 1);
 
-    const leagueAvgSafe = leagueAvgPerGame || (seasonPts && playedWeeks ? seasonPts / Math.max(playedWeeks, 1) : espnProj);
-    const recentSample = weeklyRows.slice(-3);
-    const recentAvg =
-      recentSample.length > 0
-        ? recentSample.reduce((sum, row) => sum + Number(row.points || 0), 0) / recentSample.length
-        : teamWeeklyAvg;
+    const leagueAvgSafe =
+      leagueAvgPerGame || (seasonPts && weekCount ? seasonPts / Math.max(weekCount, 1) : espnProj || 0);
     const momentumScore = recentAvg - leagueAvgSafe;
     const momentumValue = clamp(0.5 + momentumScore / 30, 0, 1);
 
@@ -252,13 +296,23 @@ router.get('/team-edge', async (req, res) => {
 
     const hypeLines = [
       `Model projects ${weekDelta >= 0 ? '+' : ''}${weekDelta} this matchup.`,
-      `Recent ${recentSample.length || playedWeeks || 1} weeks: ${round(recentAvg, 1)} pts per tilt.`,
+      `Recent ${recentSample.length || weekRows.length || 1} weeks: ${round(recentAvg, 1)} pts per tilt.`,
       `Season pace beating league by ${deltaPerGame >= 0 ? '+' : ''}${round(deltaPerGame, 1)} a week.`,
       `Playoff odds clock in near ${oddsRaw}% with current surge.`,
     ];
 
+    const faSuggestion = await fetchFreeAgentSuggestion(
+      {
+        season,
+        leagueId,
+        teamId: teamIdText,
+        week: currentWeek < CURRENT_WEEK ? CURRENT_WEEK : currentWeek,
+      },
+      req
+    );
+
     const response = {
-      teamName: teamRows[0]?.name || cacheRow.team_name,
+      teamName: teamRows[0]?.name || latestRow.team_name,
       record: recordStr,
       rank: rank || null,
       size: leagueSize,
@@ -293,6 +347,7 @@ router.get('/team-edge', async (req, res) => {
       deeplink: `https://fortifiedfantasy.com/fein/?season=${season}&leagueId=${encodeURIComponent(
         leagueId
       )}&teamId=${encodeURIComponent(teamId)}`,
+      freeAgent: faSuggestion,
     };
 
     res.set('Cache-Control', 'no-store');
