@@ -6,7 +6,29 @@
 const express = require('express');
 const router = express.Router();
 
+const cors = require('cors');              // 👈 add this
+
 const pool = require('../src/db/pool');
+
+const ALLOWED_ORIGINS = [
+  'https://widget-test-9d8.pages.dev',
+  'https://fortifiedfantasy.com',
+  // add other sites that will embed this widget if you want
+];
+
+// Apply CORS to all routes in this router
+router.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow server-to-server / curl (no origin) and configured origins
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'));
+    },
+    methods: ['GET', 'OPTIONS'],
+  })
+);
 
 const CURRENT_SEASON = Number(process.env.FF_CURRENT_SEASON) || new Date().getUTCFullYear();
 
