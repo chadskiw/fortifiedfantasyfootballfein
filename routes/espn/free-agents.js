@@ -5,6 +5,33 @@ const router  = express.Router();
 const { resolveEspnCredCandidates } = require('./_cred');
 const freeAgentsDirectModule = require('./free-agents-with-team');
 
+const rawFaCorsList =
+  process.env.FREE_AGENT_CORS_ALLOW || process.env.ROSTER_CORS_ALLOW || process.env.WIDGET_CORS_ALLOW || '';
+const allowedFaCorsOrigins = rawFaCorsList
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+
+router.use((req, res, next) => {
+  const origin = req.get('origin');
+  if (origin && (!allowedFaCorsOrigins.length || allowedFaCorsOrigins.includes(origin))) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin && !allowedFaCorsOrigins.length) {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Vary', 'Origin');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Content-Type, X-Requested-With, X-ESPN-SWID, X-ESPN-S2, Authorization'
+  );
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
+
 const PAGES_ORIGIN = process.env.PAGES_ORIGIN || 'https://fortifiedfantasy.com';
 const SELF_FREE_AGENTS_PATH = '/api/platforms/espn/free-agents';
 
