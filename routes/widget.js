@@ -293,9 +293,12 @@ router.get('/team-edge', async (req, res) => {
           `,
           [season, leagueId, teamIdText]
         );
-        if (!fallback.rows.length) {
-          return res.status(404).json({ error: 'team_not_found' });
-        }
+      if (!fallback.rows.length) {
+        return res.status(403).json({
+          error: 'private_league',
+          message: 'This league requires a linked ESPN credential. Connect inside Fortified Fantasy and try again.',
+        });
+      }
         historyRows = fallback.rows;
         scoring = fallback.rows[0].scoring;
       }
@@ -389,9 +392,11 @@ router.get('/team-edge', async (req, res) => {
       `,
       [season, leagueId, teamIdText]
     );
-    const recordStr = teamRows[0]?.record ? normalizeRecord(teamRows[0].record) : null;
+    const teamRecordRow = teamRows[0];
+    const recordStr = teamRecordRow?.record ? normalizeRecord(teamRecordRow.record) : 'Record hidden — connect your team';
     const fallbackTeamName = historyRows.length ? historyRows[0]?.team_name : null;
-    const resolvedTeamName = teamRows[0]?.name || fallbackTeamName || null;
+    const resolvedTeamName =
+      teamRecordRow?.name || fallbackTeamName || 'Your team (connect FEIN to unlock name)';
 
     const presetKnobs = await fetchDefaultPreset(client, modelContext);
     const trendWeight = asNumber(presetKnobs?.playerTrendWeight, 0.45);
