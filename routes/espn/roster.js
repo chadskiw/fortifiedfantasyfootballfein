@@ -5,6 +5,33 @@ const fs      = require('fs/promises');
 const path    = require('path');
 const { resolveEspnCredCandidates } = require('./_cred');
 
+const rawCorsList = process.env.ROSTER_CORS_ALLOW || process.env.WIDGET_CORS_ALLOW || '';
+const allowedCorsOrigins = rawCorsList
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+
+router.use((req, res, next) => {
+  const origin = req.get('origin');
+  if (origin && (!allowedCorsOrigins.length || allowedCorsOrigins.includes(origin))) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin && !allowedCorsOrigins.length) {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Vary', 'Origin');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Content-Type, X-Requested-With, X-ESPN-SWID, X-ESPN-S2, Authorization'
+  );
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
+
 // ====== Week helpers =======================================================
 const NFL_MAX_WEEK  = 18;
 const ENV_CURRENT_WEEK = Number(process.env.CURRENT_WEEK);
