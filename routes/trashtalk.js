@@ -70,7 +70,20 @@ function getImageTimestamp(exifData) {
   // Fallback if nothing usable
   return Date.now();
 }
+function getCameraFingerprint(exifData) {
+  if (!exifData) return null;
 
+  const parts = [
+    exifData.Make,
+    exifData.Model,
+    exifData.LensModel,
+  ]
+    .filter(Boolean)
+    .join('|')
+    .trim();
+
+  return parts || null;
+}
 /**
  * Haversine distance calculation in SQL:
  * We'll inline the math in the query. This function just returns the snippet.
@@ -90,6 +103,7 @@ function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
  * POST /api/trashtalk/upload
  * Upload photos, parse EXIF, stash in R2 + tt_photo.
  */
+let cameraFingerprint = null;
 router.post(
   '/upload',
   upload.array('photos', 100),
@@ -119,6 +133,7 @@ router.post(
         const coords = extractLatLon(exifData);
         lat = coords.lat;
         lon = coords.lon;
+        cameraFingerprint = getCameraFingerprint(exifData);
         } catch (err) {
         console.warn('EXIF parse failed for', file.originalname, err.message);
         }
@@ -145,10 +160,11 @@ const insertQuery = `
     exif,
     lat,
     lon,
-    taken_at
+    taken_at, 
+    camera_fingerprint
   )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-  RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at;
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8  , $9)
+  RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
 `;
 
 const { rows } = await pool.query(insertQuery, [
@@ -160,6 +176,7 @@ const { rows } = await pool.query(insertQuery, [
   lat,
   lon,
   takenAt,
+  cameraFingerprint
 ]);
 
 
@@ -203,7 +220,7 @@ const sql = `
     original_filename,
     mime_type,
     created_at,
-    taken_at,          -- ← add this
+    taken_at,
     lat,
     lon,
     ${distanceExpr} AS distance_m
