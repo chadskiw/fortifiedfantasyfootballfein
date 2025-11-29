@@ -239,7 +239,7 @@ router.get('/debug/latest-object', async (req, res) => {
       `SELECT r2_key
          FROM tt_photo
         WHERE r2_key IS NOT NULL
-        ORDER BY created_at DESC
+        ORDER BY taken_at DESC
         LIMIT 1`
     );
 
