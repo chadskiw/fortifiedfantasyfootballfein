@@ -30,6 +30,8 @@ const hydrateEspn       = require('./routes/espn/hydrate');
 const imagesPresign     = require('./routes/images/presign-r2');       // if used elsewhere
 const createImagesRouter= require('./src/routes/images');              // if used elsewhere
 const pool              = require('./src/db/pool');
+// app.js / index.js
+const trashtalkRouter = require('./routes/trashtalk');
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
@@ -107,6 +109,9 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '5mb', strict: false }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+app.use('/api/trashtalk', trashtalkRouter);
+
 // === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
 function normalizeSwid(raw){
   try{
