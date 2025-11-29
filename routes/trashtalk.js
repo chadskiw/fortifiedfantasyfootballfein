@@ -39,6 +39,37 @@ function extractLatLon(exifData) {
 
   return { lat, lon };
 }
+function getImageTimestamp(exifData) {
+  if (!exifData) return Date.now();
+
+  // exifr usually gives these as Date objects if it can parse them
+  const candidates = [
+    exifData.CreateDate,
+    exifData.DateTimeOriginal,
+    exifData.DateCreated,
+    exifData.ModifyDate,
+  ];
+
+  for (const c of candidates) {
+    if (!c) continue;
+
+    // If it's already a Date object
+    if (c instanceof Date) {
+      const t = c.getTime();
+      if (!Number.isNaN(t)) return t;
+    }
+
+    // If it's a string like "2025:11:29 14:32:10"
+    if (typeof c === 'string') {
+      const d = new Date(c.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3'));
+      const t = d.getTime();
+      if (!Number.isNaN(t)) return t;
+    }
+  }
+
+  // Fallback if nothing usable
+  return Date.now();
+}
 
 /**
  * Haversine distance calculation in SQL:
@@ -84,17 +115,18 @@ router.post(
         let lon = null;
 
         try {
-          exifData = await exifr.parse(file.buffer);
-          const coords = extractLatLon(exifData);
-          lat = coords.lat;
-          lon = coords.lon;
+        exifData = await exifr.parse(file.buffer);
+        const coords = extractLatLon(exifData);
+        lat = coords.lat;
+        lon = coords.lon;
         } catch (err) {
-          console.warn('EXIF parse failed for', file.originalname, err.message);
+        console.warn('EXIF parse failed for', file.originalname, err.message);
         }
 
-        const timestamp = Date.now();
+        const timestamp = getImageTimestamp(exifData); // ← from metadata when possible
         const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
         const r2Key = `trashtalk/${memberId}/${timestamp}_${safeName}`;
+
 
         await uploadToR2({
           key: r2Key,
@@ -102,29 +134,34 @@ router.post(
           contentType: file.mimetype,
         });
 
-        const insertQuery = `
-          INSERT INTO tt_photo (
-            member_id,
-            r2_key,
-            original_filename,
-            mime_type,
-            exif,
-            lat,
-            lon
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          RETURNING photo_id, member_id, r2_key, created_at, lat, lon;
-        `;
+const takenAt = new Date(timestamp);
 
-        const { rows } = await pool.query(insertQuery, [
-          memberId,
-          r2Key,
-          file.originalname,
-          file.mimetype,
-          exifData ? JSON.stringify(exifData) : null,
-          lat,
-          lon,
-        ]);
+const insertQuery = `
+  INSERT INTO tt_photo (
+    member_id,
+    r2_key,
+    original_filename,
+    mime_type,
+    exif,
+    lat,
+    lon,
+    taken_at
+  )
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at;
+`;
+
+const { rows } = await pool.query(insertQuery, [
+  memberId,
+  r2Key,
+  file.originalname,
+  file.mimetype,
+  exifData ? JSON.stringify(exifData) : null,
+  lat,
+  lon,
+  takenAt,
+]);
+
 
         results.push(rows[0]);
       }
