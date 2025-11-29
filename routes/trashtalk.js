@@ -3,8 +3,11 @@ const express = require('express');
 const multer = require('multer');
 const exifr = require('exifr'); // make sure this is installed: npm i exifr
 const { uploadToR2 } = require('../services/r2Client');
+const { headR2 } = require('../services/r2Client'); // at top, next to uploadToR2
+
 const { pool } = require('../src/db');
 
+// ...
 const router = express.Router();
 
 const EARTH_RADIUS_M = 6371000; // meters
@@ -58,7 +61,7 @@ function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
  */
 router.post(
   '/upload',
-  upload.array('photos', 10),
+  upload.array('photos', 100),
   async (req, res) => {
     try {
       const memberId = (req.user && req.user.member_id) || req.body.member_id;
@@ -187,6 +190,47 @@ router.get('/nearby', async (req, res) => {
   } catch (err) {
     console.error('TrashTalk nearby error', err);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+router.get('/debug/latest-object', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT r2_key
+         FROM tt_photo
+        WHERE r2_key IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1`
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'No photos in DB yet' });
+    }
+
+    const key = rows[0].r2_key;
+
+    try {
+      const head = await headR2({ key });
+      return res.json({
+        ok: true,
+        key,
+        existsInR2: true,
+        contentLength: head.ContentLength,
+        contentType: head.ContentType,
+      });
+    } catch (err) {
+      console.error('[TrashTalk] headR2 error', err);
+      return res.status(500).json({
+        ok: false,
+        key,
+        existsInR2: false,
+        message: err.message,
+      });
+    }
+  } catch (err) {
+    console.error('[TrashTalk] debug latest-object error', err);
+    return res.status(500).json({ error: 'debug failed' });
   }
 });
 
