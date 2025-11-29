@@ -272,5 +272,65 @@ router.get('/debug/latest-object', async (req, res) => {
     return res.status(500).json({ error: 'debug failed' });
   }
 });
+// GET /api/trashtalk/map?minLat=&maxLat=&minLon=&maxLon=&zoom=
+router.get('/map', async (req, res) => {
+  try {
+    const minLat = parseFloat(req.query.minLat);
+    const maxLat = parseFloat(req.query.maxLat);
+    const minLon = parseFloat(req.query.minLon);
+    const maxLon = parseFloat(req.query.maxLon);
+    const zoom = parseInt(req.query.zoom, 10) || 4;
+
+    if (
+      !Number.isFinite(minLat) ||
+      !Number.isFinite(maxLat) ||
+      !Number.isFinite(minLon) ||
+      !Number.isFinite(maxLon)
+    ) {
+      return res.status(400).json({ error: 'minLat, maxLat, minLon, maxLon required' });
+    }
+
+    // Simple safety clamp: don’t blow up at world scale
+    const MAX_RETURN = zoom <= 3 ? 300 : zoom <= 6 ? 800 : 2000;
+
+    const sql = `
+      SELECT
+        photo_id,
+        member_id,
+        r2_key,
+        original_filename,
+        mime_type,
+        lat,
+        lon,
+        taken_at,
+        created_at
+      FROM tt_photo
+      WHERE
+        lat IS NOT NULL
+        AND lon IS NOT NULL
+        AND lat BETWEEN $1 AND $2
+        AND lon BETWEEN $3 AND $4
+      ORDER BY taken_at DESC NULLS LAST, created_at DESC
+      LIMIT $5;
+    `;
+
+    const { rows } = await pool.query(sql, [
+      minLat,
+      maxLat,
+      minLon,
+      maxLon,
+      MAX_RETURN,
+    ]);
+
+    return res.json({
+      zoom,
+      count: rows.length,
+      photos: rows,
+    });
+  } catch (err) {
+    console.error('TrashTalk map error', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 module.exports = router;
