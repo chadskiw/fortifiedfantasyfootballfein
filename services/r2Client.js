@@ -1,18 +1,24 @@
 // services/r2Client.js
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
+const R2_ENDPOINT =
+  process.env.R2_ENDPOINT ||
+  'https://ceed10c7e8a633e17423b703fd81fbf0.r2.cloudflarestorage.com';
+
+const R2_BUCKET = process.env.R2_BUCKET || 'tt-pics';
+
 const r2Client = new S3Client({
   region: 'auto',
-  endpoint: `https://${process.env.CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  endpoint: R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
   },
 });
 
-async function uploadToR2({ bucket, key, body, contentType }) {
+async function uploadToR2({ key, body, contentType }) {
   const command = new PutObjectCommand({
-    Bucket: bucket,
+    Bucket: R2_BUCKET,
     Key: key,
     Body: body,
     ContentType: contentType,
@@ -24,4 +30,6 @@ async function uploadToR2({ bucket, key, body, contentType }) {
 
 module.exports = {
   uploadToR2,
+  R2_BUCKET,
+  R2_ENDPOINT,
 };

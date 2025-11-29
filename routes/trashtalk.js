@@ -1,13 +1,12 @@
 // routes/trashtalk.js
 const express = require('express');
 const multer = require('multer');
-const exifr = require('exifr'); // if Node complains, we can swap libs
+const exifr = require('exifr'); // now installed
 const { uploadToR2 } = require('../services/r2Client');
-const { pool } = require('../db'); // your existing Postgres pool
+const { pool } = require('../db');
 
 const router = express.Router();
 
-// In-memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -30,7 +29,6 @@ router.post(
         return res.status(400).json({ error: 'No files uploaded' });
       }
 
-      const bucket = process.env.R2_BUCKET_TRASHTALK;
       const results = [];
 
       for (const file of req.files) {
@@ -48,7 +46,6 @@ router.post(
         const r2Key = `trashtalk/${memberId}/${timestamp}_${safeName}`;
 
         await uploadToR2({
-          bucket,
           key: r2Key,
           body: file.buffer,
           contentType: file.mimetype,
