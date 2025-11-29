@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const exifr = require('exifr'); // now installed
 const { uploadToR2 } = require('../services/r2Client');
-const { pool } = require('../db');
+const { pool } = require('../src/db');
 
 const router = express.Router();
 
