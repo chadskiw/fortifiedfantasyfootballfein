@@ -212,7 +212,7 @@ const sql = `
     lat IS NOT NULL
     AND lon IS NOT NULL
     AND ${distanceExpr} <= $3
-  ORDER BY created_at DESC
+  ORDER BY distance_m, taken_at DESC
   LIMIT 200;
 `;
 
