@@ -195,25 +195,27 @@ router.get('/nearby', async (req, res) => {
 
     const distanceExpr = haversineSql('$1', '$2');
 
-    const sql = `
-      SELECT
-        photo_id,
-        member_id,
-        r2_key,
-        original_filename,
-        mime_type,
-        created_at,
-        lat,
-        lon,
-        ${distanceExpr} AS distance_m
-      FROM tt_photo
-      WHERE
-        lat IS NOT NULL
-        AND lon IS NOT NULL
-        AND ${distanceExpr} <= $3
-      ORDER BY created_at DESC
-      LIMIT 200;
-    `;
+const sql = `
+  SELECT
+    photo_id,
+    member_id,
+    r2_key,
+    original_filename,
+    mime_type,
+    created_at,
+    taken_at,          -- ← add this
+    lat,
+    lon,
+    ${distanceExpr} AS distance_m
+  FROM tt_photo
+  WHERE
+    lat IS NOT NULL
+    AND lon IS NOT NULL
+    AND ${distanceExpr} <= $3
+  ORDER BY created_at DESC
+  LIMIT 200;
+`;
+
 
     const { rows } = await pool.query(sql, [lat, lon, radiusMeters]);
 
