@@ -1,11 +1,13 @@
 // routes/trashtalk.js
 const express = require('express');
 const multer = require('multer');
-const exifr = require('exifr'); // now installed
+const exifr = require('exifr'); // make sure this is installed: npm i exifr
 const { uploadToR2 } = require('../services/r2Client');
 const { pool } = require('../src/db');
 
 const router = express.Router();
+
+const EARTH_RADIUS_M = 6371000; // meters
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -14,6 +16,46 @@ const upload = multer({
   },
 });
 
+/**
+ * Helper: normalize EXIF GPS to decimal lat/lon if possible.
+ * exifr typically gives latitude/longitude as decimal numbers already.
+ */
+function extractLatLon(exifData) {
+  if (!exifData) return { lat: null, lon: null };
+
+  let lat = null;
+  let lon = null;
+
+  // Preferred: exifr's normalized values
+  if (typeof exifData.latitude === 'number') lat = exifData.latitude;
+  if (typeof exifData.longitude === 'number') lon = exifData.longitude;
+
+  // Fallbacks if needed – keep light, we can expand later if EXIF is weird
+  if (lat == null && typeof exifData.lat === 'number') lat = exifData.lat;
+  if (lon == null && typeof exifData.lon === 'number') lon = exifData.lon;
+
+  return { lat, lon };
+}
+
+/**
+ * Haversine distance calculation in SQL:
+ * We'll inline the math in the query. This function just returns the snippet.
+ */
+function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
+  // latParam / lonParam will be bind params like $1, $2
+  return `
+    ${EARTH_RADIUS_M} * acos(
+      cos(radians(${latParam})) * cos(radians(${latCol})) *
+      cos(radians(${lonCol}) - radians(${lonParam})) +
+      sin(radians(${latParam})) * sin(radians(${latCol}))
+    )
+  `;
+}
+
+/**
+ * POST /api/trashtalk/upload
+ * Upload photos, parse EXIF, stash in R2 + tt_photo.
+ */
 router.post(
   '/upload',
   upload.array('photos', 10),
@@ -35,8 +77,14 @@ router.post(
         if (!file.mimetype.startsWith('image/')) continue;
 
         let exifData = null;
+        let lat = null;
+        let lon = null;
+
         try {
           exifData = await exifr.parse(file.buffer);
+          const coords = extractLatLon(exifData);
+          lat = coords.lat;
+          lon = coords.lon;
         } catch (err) {
           console.warn('EXIF parse failed for', file.originalname, err.message);
         }
@@ -57,10 +105,12 @@ router.post(
             r2_key,
             original_filename,
             mime_type,
-            exif
+            exif,
+            lat,
+            lon
           )
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING photo_id, member_id, r2_key, created_at;
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          RETURNING photo_id, member_id, r2_key, created_at, lat, lon;
         `;
 
         const { rows } = await pool.query(insertQuery, [
@@ -69,6 +119,8 @@ router.post(
           file.originalname,
           file.mimetype,
           exifData ? JSON.stringify(exifData) : null,
+          lat,
+          lon,
         ]);
 
         results.push(rows[0]);
@@ -84,5 +136,58 @@ router.post(
     }
   }
 );
+
+/**
+ * GET /api/trashtalk/nearby?lat=..&lon=..&radiusMeters=..
+ *
+ * Returns photos whose GPS is within radiusMeters of the provided point,
+ * newest first.
+ */
+router.get('/nearby', async (req, res) => {
+  try {
+    const lat = parseFloat(req.query.lat);
+    const lon = parseFloat(req.query.lon);
+    const radiusMeters = parseFloat(req.query.radiusMeters) || 150; // default 150m
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: 'lat and lon query params required' });
+    }
+
+    const distanceExpr = haversineSql('$1', '$2');
+
+    const sql = `
+      SELECT
+        photo_id,
+        member_id,
+        r2_key,
+        original_filename,
+        mime_type,
+        created_at,
+        lat,
+        lon,
+        ${distanceExpr} AS distance_m
+      FROM tt_photo
+      WHERE
+        lat IS NOT NULL
+        AND lon IS NOT NULL
+        AND ${distanceExpr} <= $3
+      ORDER BY created_at DESC
+      LIMIT 200;
+    `;
+
+    const { rows } = await pool.query(sql, [lat, lon, radiusMeters]);
+
+    return res.json({
+      lat,
+      lon,
+      radiusMeters,
+      total: rows.length,
+      photos: rows,
+    });
+  } catch (err) {
+    console.error('TrashTalk nearby error', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 module.exports = router;
