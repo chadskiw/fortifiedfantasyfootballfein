@@ -20,6 +20,7 @@ const poolsPreview = require('./routes/pools');
 // server.js
 const playerh2h = require('./routes/playerh2h');
 const playerMeta = require('./routes/playerMeta'); // path to the file from the canvas
+const userLandingRoutes = require('./routes/userLanding');
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -111,6 +112,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 app.use('/api/trashtalk', trashtalkRouter);
+app.use(userLandingRoutes);
 
 // === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
 function normalizeSwid(raw){
