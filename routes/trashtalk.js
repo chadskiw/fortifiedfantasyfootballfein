@@ -151,34 +151,7 @@ router.post(
 
 const takenAt = new Date(timestamp);
 
-const insertQuery = `
-  INSERT INTO tt_photo (
-    member_id,
-    r2_key,
-    original_filename,
-    mime_type,
-    exif,
-    lat,
-    lon,
-    taken_at, 
-    camera_fingerprint
-  )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  ON CONFLICT (r2_key) DO UPDATE
-    SET
-      -- keep original_filename if already set, otherwise take new
-      original_filename   = COALESCE(tt_photo.original_filename, EXCLUDED.original_filename),
-      mime_type           = EXCLUDED.mime_type,
-      exif                = COALESCE(tt_photo.exif, EXCLUDED.exif),
-      lat                 = EXCLUDED.lat,
-      lon                 = EXCLUDED.lon,
-      taken_at            = COALESCE(tt_photo.taken_at, EXCLUDED.taken_at),
-      camera_fingerprint  = COALESCE(tt_photo.camera_fingerprint, EXCLUDED.camera_fingerprint)
-  RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
-`;
-
-
-const { rows } = await pool.query(insertQuery, [
+const upsertValues = [
   memberId,
   r2Key,
   file.originalname,
@@ -188,10 +161,63 @@ const { rows } = await pool.query(insertQuery, [
   lon,
   takenAt,
   cameraFingerprint
-]);
+];
 
+const existing = await pool.query(
+  `
+    SELECT photo_id
+      FROM tt_photo
+     WHERE member_id = $1
+       AND r2_key = $2
+     LIMIT 1;
+  `,
+  [memberId, r2Key]
+);
 
-        results.push(rows[0]);
+let row;
+if (existing.rows.length) {
+  const updateQuery = `
+    UPDATE tt_photo AS t
+       SET original_filename   = COALESCE(t.original_filename, $3),
+           mime_type           = $4,
+           exif                = COALESCE(t.exif, $5),
+           lat                 = $6,
+           lon                 = $7,
+           taken_at            = COALESCE(t.taken_at, $8),
+           camera_fingerprint  = COALESCE(t.camera_fingerprint, $9)
+     WHERE t.photo_id = $10
+       AND t.member_id = $1
+       AND t.r2_key = $2
+     RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
+  `;
+
+  const updateValues = [...upsertValues, existing.rows[0].photo_id];
+  const { rows } = await pool.query(updateQuery, updateValues);
+  row = rows[0];
+} else {
+  const insertQuery = `
+    INSERT INTO tt_photo (
+      member_id,
+      r2_key,
+      original_filename,
+      mime_type,
+      exif,
+      lat,
+      lon,
+      taken_at, 
+      camera_fingerprint
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
+  `;
+
+  const { rows } = await pool.query(insertQuery, upsertValues);
+  row = rows[0];
+}
+
+        if (row) {
+          results.push(row);
+        }
       }
 
       return res.status(201).json({
