@@ -20,18 +20,14 @@ router.get('/api/users/:memberId/overview', async (req, res) => {
 
 // HTML page: /u/:memberId
 router.get('/u/:memberId', (req, res) => {
-  // static HTML; memberId is read on the client from the URL
-  res.sendFile(path.join(__dirname, '..', 'public', 'u.html'));
+  res.sendFile(path.join(__dirname, '..', 'public', 'trashtalk', 'u.html'));
 });
 
-// Optional: /u -> current user's page if you have identity on req
+// Optional: /u -> current user's page
 router.get('/u', (req, res) => {
-  // If you have auth middleware that populates req.user:
   if (req.user && req.user.member_id) {
     return res.redirect(`/u/${encodeURIComponent(req.user.member_id)}`);
   }
-
-  // Otherwise kick them to home or login
   return res.redirect('/');
 });
 
