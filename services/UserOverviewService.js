@@ -1,13 +1,63 @@
 // src/services/UserOverviewService.js
 const { pool } = require('../src/db'); // adjust if your pool is elsewhere
 
+let ffMemberHasDisplayName = true;
+let ffMemberHasAvatarUrl = true;
+
+async function loadMemberProfile(memberId) {
+  const selectBits = ['member_id'];
+
+  selectBits.push(
+    ffMemberHasDisplayName
+      ? 'handle'
+      : "NULL::text AS handle"
+  );
+
+  selectBits.push(
+    ffMemberHasAvatarUrl
+      ? 'avatar_url'
+      : "NULL::text AS avatar_url"
+  );
+
+  const sql = `
+    SELECT ${selectBits.join(', ')}
+    FROM ff_member
+    WHERE member_id = $1
+    LIMIT 1
+  `;
+
+  try {
+    const { rows } = await pool.query(sql, [memberId]);
+    return rows[0] || null;
+  } catch (err) {
+    const msg = err?.message || '';
+    const lowered = msg.toLowerCase();
+    let retry = false;
+
+    if (ffMemberHasDisplayName && lowered.includes('handle')) {
+      ffMemberHasDisplayName = false;
+      retry = true;
+    } else if (ffMemberHasAvatarUrl && lowered.includes('avatar_url')) {
+      ffMemberHasAvatarUrl = false;
+      retry = true;
+    } else {
+      console.warn('UserOverview: ff_member lookup failed', msg);
+    }
+
+    if (retry) {
+      return loadMemberProfile(memberId);
+    }
+    return null;
+  }
+}
+
 class UserOverviewService {
   /**
    * Return high-level overview of a user's Trash Talk activity.
    * Shape:
    * {
    *   member_id,
-   *   display_name,
+   *   handle,
    *   avatar_url,
    *   photo_count,
    *   last_taken_at,
@@ -21,22 +71,7 @@ class UserOverviewService {
     }
 
     // Try to pull core member info from ff_member if it exists
-    let member = null;
-    try {
-      const { rows } = await pool.query(
-        `
-        SELECT member_id, display_name, avatar_url
-        FROM ff_member
-        WHERE member_id = $1
-        `,
-        [memberId]
-      );
-      if (rows.length) {
-        member = rows[0];
-      }
-    } catch (err) {
-      console.warn('UserOverview: ff_member lookup failed', err.message);
-    }
+    let member = await loadMemberProfile(memberId);
 
     // Geo stats from tt_photo
     const { rows: statRows } = await pool.query(
@@ -84,7 +119,7 @@ class UserOverviewService {
 
     return {
       member_id: memberId,
-      display_name: (member && member.display_name) || memberId,
+      handle: (member && member.handle) || memberId,
       avatar_url: member && member.avatar_url ? member.avatar_url : null,
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
