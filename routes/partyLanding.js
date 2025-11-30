@@ -8,8 +8,10 @@ router.get('/p/:partyId', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'trashtalk', 'p.html'));
 });
 
-// optional: /p -> maybe redirect to host's current party or home
 router.get('/p', (req, res) => {
+  if (req.query?.party_id) {
+    return res.sendFile(path.join(__dirname, '..', 'public', 'trashtalk', 'p.html'));
+  }
   return res.redirect('/');
 });
 
