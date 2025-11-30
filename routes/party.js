@@ -1,5 +1,6 @@
 // routes/party.js
 const express = require('express');
+const crypto = require('crypto');
 const pool = require('../src/db/pool');
 const { getCurrentIdentity } = require('../services/identity');
 
@@ -79,12 +80,14 @@ function serializeMembership(row) {
   if (!row) return null;
   return {
     party_id: row.party_id,
+    member_id: row.member_id || null,
     handle: row.handle,
     access_level: row.access_level,
     invited_by_handle: row.invited_by_handle,
     arrived_at: row.arrived_at,
     last_seen_at: row.last_seen_at,
     left_at: row.left_at,
+    invite_token: row.invite_token || null,
     hue: row.member_hue || row.hue || null,
   };
 }
@@ -265,7 +268,7 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
         DO UPDATE SET
           invited_by_handle = EXCLUDED.invited_by_handle,
           invited_by        = COALESCE(EXCLUDED.invited_by, tt_party_member.invited_by),
-          access_level      = 'card',
+          access_level      = COALESCE(tt_party_member.access_level, 'card'),
           member_id         = COALESCE(tt_party_member.member_id, EXCLUDED.member_id)
       `,
       [partyId, me.handle, invitees, hostMemberId]
@@ -297,6 +300,75 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
   }
 });
 
+router.post('/:partyId/rsvp', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const decisionRaw = (req.body?.decision || 'yes').toString().toLowerCase();
+  const decision = decisionRaw === 'no' ? 'no' : 'yes';
+
+  try {
+    const party = await fetchPartyById(partyId);
+    if (!party) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+    if (party.state === 'cut') {
+      return res.status(410).json({ ok: false, error: 'party_cut' });
+    }
+
+    const inviteToken = crypto.randomBytes(12).toString('hex');
+    const memberIdValue = me.memberId || me.member_id || me.handle;
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_party_member (
+          party_id,
+          member_id,
+          handle,
+          invite_token,
+          invited_by_handle,
+          access_level,
+          last_seen_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          NULL,
+          CASE WHEN $5 = 'no' THEN 'declined' ELSE 'card' END,
+          NOW()
+        )
+        ON CONFLICT (party_id, handle)
+        DO UPDATE SET
+          member_id = COALESCE(tt_party_member.member_id, EXCLUDED.member_id),
+          invite_token = EXCLUDED.invite_token,
+          access_level = CASE
+            WHEN $5 = 'no' THEN 'declined'
+            ELSE COALESCE(tt_party_member.access_level, 'card')
+          END,
+          last_seen_at = NOW()
+        RETURNING *,
+          (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = $3) AS member_hue
+      `,
+      [partyId, memberIdValue, me.handle, inviteToken, decision]
+    );
+
+    if (!rows.length) {
+      return res.status(500).json({ ok: false, error: 'party_rsvp_failed' });
+    }
+
+    return res.json({
+      ok: true,
+      membership: serializeMembership(rows[0]),
+    });
+  } catch (err) {
+    console.error('[party:rsvp]', err);
+    return res.status(500).json({ ok: false, error: 'party_rsvp_failed' });
+  }
+});
+
 router.get('/my', async (req, res) => {
   const me = await requireIdentity(req, res);
   if (!me) return;
@@ -307,12 +379,14 @@ router.get('/my', async (req, res) => {
         SELECT
           p.*,
           host_q.color_hex AS host_hue,
+          pm.member_id,
           pm.handle       AS member_handle,
           pm.access_level,
           pm.arrived_at,
           pm.left_at,
           pm.last_seen_at,
           pm.invited_by_handle,
+          pm.invite_token,
           mem_q.color_hex   AS member_hue
         FROM tt_party p
         LEFT JOIN tt_party_member pm
@@ -328,26 +402,56 @@ router.get('/my', async (req, res) => {
     );
 
     const byParty = new Map();
+    const meHandleLower = (me.handle || '').toLowerCase();
+    const hostPartyIds = new Set();
     rows.forEach((row) => {
       if (!byParty.has(row.party_id)) {
         byParty.set(row.party_id, {
           party: serializeParty(row),
           membership: null,
+          guests: [],
         });
+      }
+      if ((row.host_handle || '').toLowerCase() === meHandleLower) {
+        hostPartyIds.add(row.party_id);
       }
       if (row.member_handle) {
         byParty.get(row.party_id).membership = serializeMembership({
           party_id: row.party_id,
+          member_id: row.member_id,
           handle: row.member_handle,
           access_level: row.access_level,
           arrived_at: row.arrived_at,
           left_at: row.left_at,
           last_seen_at: row.last_seen_at,
           invited_by_handle: row.invited_by_handle,
+          invite_token: row.invite_token,
           member_hue: row.member_hue,
         });
       }
     });
+
+    if (hostPartyIds.size) {
+      const { rows: guestRows } = await pool.query(
+        `
+          SELECT
+            pm.*,
+            COALESCE(q.color_hex, q.color_hex) AS member_hue
+          FROM tt_party_member pm
+          LEFT JOIN ff_quickhitter q ON q.handle = pm.handle
+          WHERE pm.party_id = ANY($1::uuid[])
+        `,
+        [Array.from(hostPartyIds)]
+      );
+
+      guestRows.forEach((memberRow) => {
+        const entry = byParty.get(memberRow.party_id);
+        if (!entry) return;
+        const hostHandle = (entry.party?.host_handle || '').toLowerCase();
+        if ((memberRow.handle || '').toLowerCase() === hostHandle) return;
+        entry.guests.push(serializeMembership(memberRow));
+      });
+    }
 
     return res.json({
       ok: true,
