@@ -2,8 +2,8 @@
 const express = require('express');
 const multer = require('multer');
 const exifr = require('exifr'); // make sure this is installed: npm i exifr
-const { uploadToR2 } = require('../services/r2Client');
-const { headR2 } = require('../services/r2Client'); // at top, next to uploadToR2
+const { uploadToR2, headR2, deleteFromR2 } = require('../services/r2Client');
+const { getCurrentIdentity } = require('../services/identity');
 
 const { pool } = require('../src/db');
 
@@ -11,6 +11,8 @@ const { pool } = require('../src/db');
 const router = express.Router();
 
 const EARTH_RADIUS_M = 6371000; // meters
+const VALID_AUDIENCES = new Set(['private', 'public', 'party']);
+const DEFAULT_AUDIENCE = 'private';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -99,6 +101,54 @@ function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
   `;
 }
 
+async function ensurePartyUploadAccess(partyId, handle) {
+  if (!partyId) return { ok: true };
+
+  const { rows: partyRows } = await pool.query(
+    'SELECT party_id, state FROM tt_party WHERE party_id = $1 LIMIT 1',
+    [partyId]
+  );
+  if (!partyRows.length) {
+    return { ok: false, status: 404, error: 'party_not_found' };
+  }
+  if (partyRows[0].state === 'cut') {
+    return { ok: false, status: 410, error: 'party_cut' };
+  }
+
+  const { rows: membershipRows } = await pool.query(
+    `
+      SELECT access_level
+        FROM tt_party_member
+       WHERE party_id = $1
+         AND handle = $2
+       LIMIT 1
+    `,
+    [partyId, handle]
+  );
+
+  if (
+    !membershipRows.length ||
+    membershipRows[0].access_level !== 'live'
+  ) {
+    return { ok: false, status: 403, error: 'live_access_required' };
+  }
+
+  return {
+    ok: true,
+    party: partyRows[0],
+    membership: membershipRows[0],
+  };
+}
+
+function resolveAudience(requested, hasParty) {
+  if (hasParty) return 'party';
+  if (!requested) return DEFAULT_AUDIENCE;
+  const normalized = String(requested).toLowerCase();
+  if (normalized === 'party') return hasParty ? 'party' : DEFAULT_AUDIENCE;
+  if (VALID_AUDIENCES.has(normalized)) return normalized;
+  return DEFAULT_AUDIENCE;
+}
+
 /**
  * POST /api/trashtalk/upload
  * Upload photos, parse EXIF, stash in R2 + tt_photo.
@@ -109,15 +159,31 @@ router.post(
   upload.array('photos', 100),
   async (req, res) => {
     try {
-      const memberId = (req.user && req.user.member_id) || req.body.member_id;
-
-      if (!memberId) {
-        return res.status(400).json({ error: 'member_id required' });
+      const me = await getCurrentIdentity(req, pool);
+      if (!me || !me.handle) {
+        return res.status(401).json({ error: 'handle_required' });
       }
+      const ownerHandle = me.handle;
+
+      const rawParty = req.body?.partyId ?? req.body?.party_id ?? null;
+      const partyId =
+        rawParty && String(rawParty).trim() ? String(rawParty).trim() : null;
+      const requestedAudience = req.body?.audience;
+      const audience = resolveAudience(requestedAudience, Boolean(partyId));
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: 'No files uploaded' });
       }
+
+      if (partyId) {
+        const access = await ensurePartyUploadAccess(partyId, ownerHandle);
+        if (!access.ok) {
+          return res
+            .status(access.status || 400)
+            .json({ error: access.error || 'party_upload_not_allowed' });
+        }
+      }
+
 
       const results = [];
 
@@ -140,7 +206,7 @@ router.post(
 
         const timestamp = getImageTimestamp(exifData); // ← from metadata when possible
         const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
-        const r2Key = `trashtalk/${memberId}/${timestamp}_${safeName}`;
+        const r2Key = `trashtalk/${ownerHandle}/${timestamp}_${safeName}`;
 
 
         await uploadToR2({
@@ -152,7 +218,7 @@ router.post(
 const takenAt = new Date(timestamp);
 
 const upsertValues = [
-  memberId,
+  ownerHandle,
   r2Key,
   file.originalname,
   file.mimetype,
@@ -160,18 +226,20 @@ const upsertValues = [
   lat,
   lon,
   takenAt,
-  cameraFingerprint
+  cameraFingerprint,
+  partyId,
+  audience
 ];
 
 const existing = await pool.query(
   `
     SELECT photo_id
       FROM tt_photo
-     WHERE member_id = $1
+     WHERE handle = $1
        AND r2_key = $2
      LIMIT 1;
   `,
-  [memberId, r2Key]
+  [ownerHandle, r2Key]
 );
 
 let row;
@@ -184,18 +252,22 @@ if (existing.rows.length) {
            lat                 = $6,
            lon                 = $7,
            taken_at            = COALESCE(t.taken_at, $8),
-           camera_fingerprint  = COALESCE(t.camera_fingerprint, $9)
-     WHERE t.photo_id = $10
-       AND t.member_id = $1
+           camera_fingerprint  = COALESCE(t.camera_fingerprint, $9),
+           party_id            = COALESCE($10, t.party_id),
+           audience            = COALESCE($11, t.audience)
+     WHERE t.photo_id = $12
+       AND t.handle = $1
        AND t.r2_key = $2
      RETURNING photo_id,
-               member_id AS handle,
-               r2_key,
-               created_at,
-               lat,
-               lon,
-               taken_at,
-               camera_fingerprint;
+              handle,
+              r2_key,
+              created_at,
+              lat,
+              lon,
+              taken_at,
+              camera_fingerprint,
+              party_id,
+              audience;
   `;
 
   const updateValues = [...upsertValues, existing.rows[0].photo_id];
@@ -204,7 +276,7 @@ if (existing.rows.length) {
 } else {
   const insertQuery = `
     INSERT INTO tt_photo (
-      member_id,
+      handle,
       r2_key,
       original_filename,
       mime_type,
@@ -212,17 +284,21 @@ if (existing.rows.length) {
       lat,
       lon,
       taken_at, 
-      camera_fingerprint
+      camera_fingerprint,
+      party_id,
+      audience
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     RETURNING photo_id,
-              member_id AS handle,
+              handle,
               r2_key,
               created_at,
               lat,
               lon,
               taken_at,
-              camera_fingerprint;
+              camera_fingerprint,
+              party_id,
+              audience;
   `;
 
   const { rows } = await pool.query(insertQuery, upsertValues);
@@ -266,7 +342,7 @@ router.get('/nearby', async (req, res) => {
 const sql = `
   SELECT
     photo_id,
-    member_id AS handle,
+    handle,
     r2_key,
     original_filename,
     mime_type,
@@ -361,10 +437,10 @@ router.get('/map', async (req, res) => {
     // Simple safety clamp: don’t blow up at world scale
     const MAX_RETURN = zoom <= 3 ? 300 : zoom <= 6 ? 800 : 2000;
 
-    const sql = `
+  const sql = `
       SELECT
         photo_id,
-        member_id AS handle,
+        handle,
         r2_key,
         original_filename,
         mime_type,
@@ -408,12 +484,8 @@ router.delete('/photo/:photoId', async (req, res) => {
       return res.status(400).json({ error: 'Invalid photo id.' });
     }
 
-    const memberId =
-      (req.user && req.user.member_id) ||
-      (req.body && req.body.member_id) ||
-      null;
-
-    if (!memberId) {
+    const me = await getCurrentIdentity(req, pool);
+    if (!me || !me.handle) {
       return res.status(401).json({ error: 'Authentication required.' });
     }
 
@@ -421,17 +493,29 @@ router.delete('/photo/:photoId', async (req, res) => {
       `
         DELETE FROM tt_photo
         WHERE photo_id = $1
-          AND member_id = $2
+          AND handle = $2
         RETURNING photo_id, r2_key;
       `,
-      [photoId, memberId]
+      [photoId, me.handle]
     );
 
-    if (!rows.length) {
-      return res.status(404).json({ error: 'Photo not found.' });
-    }
+      if (!rows.length) {
+        return res.status(404).json({ error: 'Photo not found.' });
+      }
 
-    // TODO: optionally delete the object from R2 here if desired.
+      const r2Key = rows[0].r2_key;
+      if (r2Key) {
+        try {
+          await deleteFromR2({ key: r2Key });
+        } catch (r2Err) {
+          console.error('TrashTalk delete R2 object error', {
+            key: r2Key,
+            photoId,
+            handle: me.handle,
+            message: r2Err.message,
+          });
+        }
+      }
 
     return res.json({ deleted: true, photo_id: photoId });
   } catch (err) {

@@ -13,7 +13,6 @@ async function getCurrentMemberId(req){
   const m = String(req.cookies?.ff_member || '').trim();
   return m || null;
 }
-
 // GET /api/identity/handle/exists?u=foo
 router.get('/handle/exists', async (req, res) => {
   try{

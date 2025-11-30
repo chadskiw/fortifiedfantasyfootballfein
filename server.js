@@ -34,6 +34,7 @@ const createImagesRouter= require('./src/routes/images');              // if use
 const pool              = require('./src/db/pool');
 // app.js / index.js
 const trashtalkRouter = require('./routes/trashtalk');
+const partyRouter = require('./routes/party');
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
@@ -113,6 +114,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 app.use('/api/trashtalk', trashtalkRouter);
+app.use('/api/party', partyRouter);
 app.use(userLandingRoutes);
 app.use(trashtalkUserRoutes);
 
