@@ -6,14 +6,38 @@ async function fetchHue(handle, db) {
   const { rows } = await db.query(
     `
       SELECT handle,
-             COALESCE(hue_hex, color_hex) AS hue_hex
+             COALESCE(color_hex, color_hex) AS color_hex
         FROM ff_quickhitter
        WHERE handle = $1
        LIMIT 1
     `,
     [handle]
   );
-  return rows[0]?.hue_hex || null;
+  return rows[0]?.color_hex || null;
+}
+
+async function fetchIdentityByMemberId(memberId, db) {
+  if (!memberId) return null;
+  const normalized = String(memberId).trim();
+  if (!normalized) return null;
+
+  const { rows } = await db.query(
+    `
+      SELECT member_id,
+             handle,
+             COALESCE(color_hex, color_hex) AS color_hex
+        FROM ff_quickhitter
+       WHERE member_id = $1
+       LIMIT 1
+    `,
+    [normalized]
+  );
+
+  if (!rows[0]) return null;
+  return {
+    handle: rows[0].handle || normalized,
+    hue: rows[0].color_hex || null,
+  };
 }
 
 async function getCurrentIdentity(req, db = pool) {
@@ -25,6 +49,23 @@ async function getCurrentIdentity(req, db = pool) {
         ? req.identity.hue
         : await fetchHue(req.identity.handle, db);
     return { handle: req.identity.handle, hue };
+  }
+
+  const memberIdSource =
+    req.identity?.member_id ||
+    req.member?.member_id ||
+    req.cookies?.ff_member_id ||
+    req.cookies?.ff_member ||
+    req.headers['x-ff-member-id'] ||
+    '';
+  const memberId =
+    typeof memberIdSource === 'string' || typeof memberIdSource === 'number'
+      ? String(memberIdSource).trim()
+      : '';
+
+  if (memberId) {
+    const identity = await fetchIdentityByMemberId(memberId, db);
+    if (identity?.handle) return identity;
   }
 
   const raw =
