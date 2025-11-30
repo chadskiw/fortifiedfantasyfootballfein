@@ -35,6 +35,32 @@ async function fetchIdentityByMemberId(memberId, db) {
 
   if (!rows[0]) return null;
   return {
+    memberId: normalized,
+    handle: rows[0].handle || normalized,
+    hue: rows[0].color_hex || null,
+  };
+}
+
+async function fetchIdentityByHandle(handle, db) {
+  if (!handle) return null;
+  const normalized = String(handle).trim();
+  if (!normalized) return null;
+
+  const { rows } = await db.query(
+    `
+      SELECT member_id,
+             handle,
+             COALESCE(color_hex, color_hex) AS color_hex
+        FROM ff_quickhitter
+       WHERE LOWER(handle) = LOWER($1)
+       LIMIT 1
+    `,
+    [normalized]
+  );
+
+  if (!rows[0]) return null;
+  return {
+    memberId: rows[0].member_id || null,
     handle: rows[0].handle || normalized,
     hue: rows[0].color_hex || null,
   };
@@ -48,7 +74,9 @@ async function getCurrentIdentity(req, db = pool) {
       typeof req.identity.hue === 'string'
         ? req.identity.hue
         : await fetchHue(req.identity.handle, db);
-    return { handle: req.identity.handle, hue };
+    const memberId =
+      req.identity.memberId || req.identity.member_id || null;
+    return { memberId, handle: req.identity.handle, hue };
   }
 
   const memberIdSource =
@@ -78,8 +106,11 @@ async function getCurrentIdentity(req, db = pool) {
 
   if (!raw) return null;
 
+  const identityByHandle = await fetchIdentityByHandle(raw, db);
+  if (identityByHandle) return identityByHandle;
+
   const hue = await fetchHue(raw, db);
-  return { handle: raw, hue };
+  return { memberId: null, handle: raw, hue };
 }
 
 module.exports = {

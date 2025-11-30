@@ -564,5 +564,57 @@ router.get('/:partyId/feed', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'party_feed_failed' });
   }
 });
+// POST /api/party/:partyId/invite
+router.post('/:partyId/invite', async (req, res) => {
+  const me = await getCurrentIdentity(req, pool);
+  if (!me) return res.status(401).json({ error: 'Not logged in' });
 
+  const { partyId } = req.params;
+  const { invitees } = req.body || {};      // ["handle1","handle2",...]
+
+  if (!Array.isArray(invitees) || invitees.length === 0) {
+    return res.status(400).json({ error: 'No invitees provided' });
+  }
+
+  try {
+    // 1) Make sure caller is the host
+    const hostCheck = await pool.query(
+      `SELECT party_id
+         FROM tt_party
+        WHERE party_id = $1
+          AND host_handle = $2`,
+      [partyId, me.handle]
+    );
+
+    if (hostCheck.rowCount === 0) {
+      return res.status(403).json({ error: 'Only the host can invite' });
+    }
+
+    // 2) Insert / upsert party_member rows
+    const sql = `
+      INSERT INTO tt_party_member (
+        party_id, handle, invited_by_handle, access_level
+      )
+      VALUES ($1, $2, $3, 'card')
+      ON CONFLICT (party_id, handle)
+      DO UPDATE SET
+        invited_by_handle = EXCLUDED.invited_by_handle,
+        access_level      = 'card'
+      RETURNING party_id, handle, invited_by_handle, access_level, arrived_at, left_at;
+    `;
+
+    const invitedRows = [];
+    for (const h of invitees) {
+      const trimmed = String(h).trim();
+      if (!trimmed) continue;
+      const { rows } = await pool.query(sql, [partyId, trimmed, me.handle]);
+      invitedRows.push(rows[0]);
+    }
+
+    return res.json({ success: true, invited: invitedRows });
+  } catch (err) {
+    console.error('[party:invite] error:', err);
+    return res.status(500).json({ error: 'Failed to send invites' });
+  }
+});
 module.exports = router;

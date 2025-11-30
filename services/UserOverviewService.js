@@ -73,6 +73,14 @@ class UserOverviewService {
     // Try to pull core member info from ff_member if it exists
     let member = await loadMemberProfile(memberId);
 
+    const memberHandle = (member && member.handle) || null;
+    const identifierClause = memberHandle
+      ? '(member_id = $1 OR handle = $2)'
+      : 'member_id = $1';
+    const identifierParams = memberHandle
+      ? [memberId, memberHandle]
+      : [memberId];
+
     // Geo stats from tt_photo
     const { rows: statRows } = await pool.query(
       `
@@ -86,11 +94,11 @@ class UserOverviewService {
         AVG(lon)      AS center_lon,
         MAX(taken_at) AS last_taken_at
       FROM tt_photo
-      WHERE member_id = $1
+      WHERE ${identifierClause}
         AND lat IS NOT NULL
         AND lon IS NOT NULL
       `,
-      [memberId]
+      identifierParams
     );
 
     const stats = statRows[0] || {};
@@ -110,11 +118,11 @@ class UserOverviewService {
         taken_at,
         created_at
       FROM tt_photo
-      WHERE member_id = $1
+      WHERE ${identifierClause}
       ORDER BY taken_at DESC NULLS LAST, created_at DESC
       LIMIT 24
       `,
-      [memberId]
+      identifierParams
     );
 
     return {

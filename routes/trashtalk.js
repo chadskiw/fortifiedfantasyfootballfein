@@ -164,6 +164,7 @@ router.post(
         return res.status(401).json({ error: 'handle_required' });
       }
       const ownerHandle = me.handle;
+      const ownerMemberId = me.memberId || me.member_id || null;
 
       const rawParty = req.body?.partyId ?? req.body?.party_id ?? null;
       const partyId =
@@ -218,17 +219,18 @@ router.post(
 const takenAt = new Date(timestamp);
 
 const upsertValues = [
-  ownerHandle,
-  r2Key,
-  file.originalname,
-  file.mimetype,
-  exifData ? JSON.stringify(exifData) : null,
-  lat,
-  lon,
-  takenAt,
-  cameraFingerprint,
-  partyId,
-  audience
+  ownerHandle,           // $1
+  r2Key,                 // $2
+  ownerMemberId,         // $3
+  file.originalname,     // $4
+  file.mimetype,         // $5
+  exifData ? JSON.stringify(exifData) : null, // $6
+  lat,                   // $7
+  lon,                   // $8
+  takenAt,               // $9
+  cameraFingerprint,     // $10
+  partyId,               // $11
+  audience               // $12
 ];
 
 const existing = await pool.query(
@@ -246,16 +248,17 @@ let row;
 if (existing.rows.length) {
   const updateQuery = `
     UPDATE tt_photo AS t
-       SET original_filename   = COALESCE(t.original_filename, $3),
-           mime_type           = $4,
-           exif                = COALESCE(t.exif, $5),
-           lat                 = $6,
-           lon                 = $7,
-           taken_at            = COALESCE(t.taken_at, $8),
-           camera_fingerprint  = COALESCE(t.camera_fingerprint, $9),
-           party_id            = COALESCE($10, t.party_id),
-           audience            = COALESCE($11, t.audience)
-     WHERE t.photo_id = $12
+       SET member_id          = COALESCE(t.member_id, $3),
+           original_filename  = COALESCE(t.original_filename, $4),
+           mime_type          = $5,
+           exif               = COALESCE(t.exif, $6),
+           lat                = $7,
+           lon                = $8,
+           taken_at           = COALESCE(t.taken_at, $9),
+           camera_fingerprint = COALESCE(t.camera_fingerprint, $10),
+           party_id           = COALESCE($11, t.party_id),
+           audience           = COALESCE($12, t.audience)
+     WHERE t.photo_id = $13
        AND t.handle = $1
        AND t.r2_key = $2
      RETURNING photo_id,
@@ -278,6 +281,7 @@ if (existing.rows.length) {
     INSERT INTO tt_photo (
       handle,
       r2_key,
+      member_id,
       original_filename,
       mime_type,
       exif,
@@ -288,7 +292,7 @@ if (existing.rows.length) {
       party_id,
       audience
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     RETURNING photo_id,
               handle,
               r2_key,
