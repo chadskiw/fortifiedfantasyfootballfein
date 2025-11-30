@@ -125,7 +125,7 @@ const identifierParams = [memberId];
 
     return {
       member_id: memberId,
-      handle: (member && member.handle) || memberId,
+      handle:  memberId,
       avatar_url: member && member.avatar_url ? member.avatar_url : null,
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
