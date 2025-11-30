@@ -361,4 +361,43 @@ router.get('/map', async (req, res) => {
   }
 });
 
+router.delete('/photo/:photoId', async (req, res) => {
+  try {
+    const photoId = parseInt(req.params.photoId, 10);
+    if (!Number.isFinite(photoId)) {
+      return res.status(400).json({ error: 'Invalid photo id.' });
+    }
+
+    const memberId =
+      (req.user && req.user.member_id) ||
+      (req.body && req.body.member_id) ||
+      null;
+
+    if (!memberId) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+
+    const { rows } = await pool.query(
+      `
+        DELETE FROM tt_photo
+        WHERE photo_id = $1
+          AND member_id = $2
+        RETURNING photo_id, r2_key;
+      `,
+      [photoId, memberId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Photo not found.' });
+    }
+
+    // TODO: optionally delete the object from R2 here if desired.
+
+    return res.json({ deleted: true, photo_id: photoId });
+  } catch (err) {
+    console.error('TrashTalk delete photo error', err);
+    return res.status(500).json({ error: 'Failed to delete photo.' });
+  }
+});
+
 module.exports = router;
