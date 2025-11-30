@@ -142,7 +142,7 @@ function cleanHandleList(invitees = []) {
 }
 
 router.post('/', async (req, res) => {
-  const me = await getCurrentIdentity(req, db);
+  const me = await getCurrentIdentity(req, pool);
   if (!me) return res.status(401).json({ error: 'Not logged in' });
 
   const {
@@ -198,7 +198,7 @@ router.post('/', async (req, res) => {
       endsAt            // $9
     ];
 
-    const { rows } = await db.query(sql, params);
+    const { rows } = await pool.query(sql, params);
     return res.json(rows[0]);
   } catch (err) {
     console.error('[party:create] error:', err);
