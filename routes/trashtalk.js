@@ -188,7 +188,14 @@ if (existing.rows.length) {
      WHERE t.photo_id = $10
        AND t.member_id = $1
        AND t.r2_key = $2
-     RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
+     RETURNING photo_id,
+               member_id AS handle,
+               r2_key,
+               created_at,
+               lat,
+               lon,
+               taken_at,
+               camera_fingerprint;
   `;
 
   const updateValues = [...upsertValues, existing.rows[0].photo_id];
@@ -208,7 +215,14 @@ if (existing.rows.length) {
       camera_fingerprint
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
+    RETURNING photo_id,
+              member_id AS handle,
+              r2_key,
+              created_at,
+              lat,
+              lon,
+              taken_at,
+              camera_fingerprint;
   `;
 
   const { rows } = await pool.query(insertQuery, upsertValues);
@@ -252,7 +266,7 @@ router.get('/nearby', async (req, res) => {
 const sql = `
   SELECT
     photo_id,
-    member_id,
+    member_id AS handle,
     r2_key,
     original_filename,
     mime_type,
@@ -350,7 +364,7 @@ router.get('/map', async (req, res) => {
     const sql = `
       SELECT
         photo_id,
-        member_id,
+        member_id AS handle,
         r2_key,
         original_filename,
         mime_type,
