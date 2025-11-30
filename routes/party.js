@@ -228,17 +228,47 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
       return res.status(403).json({ ok: false, error: 'not_party_host' });
     }
 
+    const hostMemberId = me.memberId || me.member_id || me.handle || null;
+
     await client.query(
       `
-        INSERT INTO tt_party_member (party_id, handle, invited_by_handle, access_level)
-        SELECT $1, h, $2, 'card'
-          FROM UNNEST($3::text[]) AS h
+        WITH incoming AS (
+          SELECT DISTINCT ON (LOWER(h)) h AS raw_handle, LOWER(h) AS norm_handle
+            FROM UNNEST($3::text[]) AS h
+        ),
+        resolved AS (
+          SELECT
+            $1::uuid AS party_id,
+            COALESCE(q.member_id, incoming.raw_handle) AS member_id,
+            COALESCE(q.handle, incoming.raw_handle)    AS handle
+          FROM incoming
+          LEFT JOIN ff_quickhitter q
+            ON LOWER(q.handle) = incoming.norm_handle
+        )
+        INSERT INTO tt_party_member (
+          party_id,
+          member_id,
+          handle,
+          invited_by,
+          invited_by_handle,
+          access_level
+        )
+        SELECT
+          party_id,
+          member_id,
+          handle,
+          $4,
+          $2,
+          'card'
+        FROM resolved
         ON CONFLICT (party_id, handle)
         DO UPDATE SET
           invited_by_handle = EXCLUDED.invited_by_handle,
-          access_level      = 'card'
+          invited_by        = COALESCE(EXCLUDED.invited_by, tt_party_member.invited_by),
+          access_level      = 'card',
+          member_id         = COALESCE(tt_party_member.member_id, EXCLUDED.member_id)
       `,
-      [partyId, me.handle, invitees]
+      [partyId, me.handle, invitees, hostMemberId]
     );
 
     const { rows } = await client.query(
