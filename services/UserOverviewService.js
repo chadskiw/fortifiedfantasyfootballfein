@@ -71,15 +71,13 @@ class UserOverviewService {
     }
 
     // Try to pull core member info from ff_member if it exists
-    let member = await loadMemberProfile(memberId);
+let member = await loadMemberProfile(memberId);
 
-    const memberHandle = (member && member.handle) || null;
-    const identifierClause = memberHandle
-      ? '(member_id = $1 OR handle = $2)'
-      : 'member_id = $1';
-    const identifierParams = memberHandle
-      ? [memberId, memberHandle]
-      : [memberId];
+// For now, only filter tt_photo by member_id.
+// tt_photo does NOT have a handle column.
+const identifierClause = 'member_id = $1';
+const identifierParams = [memberId];
+
 
     // Geo stats from tt_photo
     const { rows: statRows } = await pool.query(
