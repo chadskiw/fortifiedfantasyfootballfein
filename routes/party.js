@@ -141,9 +141,9 @@ function cleanHandleList(invitees = []) {
   return result;
 }
 
-router.post('/', jsonParser, async (req, res) => {
-  const me = await requireIdentity(req, res);
-  if (!me) return;
+router.post('/', async (req, res) => {
+  const me = await getCurrentIdentity(req, db);
+  if (!me) return res.status(401).json({ error: 'Not logged in' });
 
   const {
     name,
@@ -152,49 +152,57 @@ router.post('/', jsonParser, async (req, res) => {
     centerLon,
     radiusM,
     startsAt,
-    endsAt,
+    endsAt
   } = req.body || {};
 
-  if (!name || !name.trim()) {
-    return res.status(422).json({ ok: false, error: 'party_name_required' });
-  }
-
   try {
-    const { rows } = await pool.query(
-      `
-        INSERT INTO tt_party (
-          host_handle,
-          name,
-          description,
-          center_lat,
-          center_lon,
-          radius_m,
-          starts_at,
-          ends_at,
-          visibility_mode,
-          state
-        ) VALUES (
-          $1,$2,$3,$4,$5,COALESCE($6,75),$7,$8,'private_party','live'
-        )
-        RETURNING *
-      `,
-      [
-        me.handle,
-        name.trim(),
-        description ? description.trim() : null,
-        toNullableNumber(centerLat),
-        toNullableNumber(centerLon),
-        toNullableNumber(radiusM),
-        toNullableDate(startsAt),
-        toNullableDate(endsAt),
-      ]
-    );
-    const party = rows[0];
-    party.host_hue = me.hue || null;
-    return res.status(201).json({ ok: true, party: serializeParty(party) });
+    const sql = `
+      INSERT INTO tt_party (
+        host_member_id,     -- keep for legacy
+        host_handle,        -- new hotness
+        name,
+        description,
+        center_lat,
+        center_lon,
+        radius_m,
+        starts_at,
+        ends_at,
+        visibility_mode,
+        state
+      )
+      VALUES (
+        $1,  -- host_member_id
+        $2,  -- host_handle
+        $3,  -- name
+        $4,  -- description
+        $5,  -- center_lat
+        $6,  -- center_lon
+        COALESCE($7, 75),  -- radius_m
+        $8,  -- starts_at
+        $9,  -- ends_at
+        'private_party',
+        'live'
+      )
+      RETURNING *;
+    `;
+
+    const params = [
+      me.memberId,      // $1
+      me.handle,        // $2
+      name,             // $3
+      description,      // $4
+      centerLat,        // $5
+      centerLon,        // $6
+      radiusM,          // $7
+      startsAt,         // $8
+      endsAt            // $9
+    ];
+
+    const { rows } = await db.query(sql, params);
+    return res.json(rows[0]);
   } catch (err) {
-    console.error('[party:create]', err);
-    return res.status(500).json({ ok: false, error: 'party_create_failed' });
+    console.error('[party:create] error:', err);
+    return res.status(500).json({ error: 'Failed to create party' });
   }
 });
 
