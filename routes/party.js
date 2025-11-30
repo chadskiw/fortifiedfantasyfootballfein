@@ -14,10 +14,7 @@ function cleanHandle(value) {
 
 async function requireIdentity(req, res) {
   const me = await getCurrentIdentity(req, pool);
-  if (!me || !me.handle) {
-    res.status(401).json({ ok: false, error: 'unauthorized' });
-    return null;
-  }
+if (!me) return res.status(401).json({ error: 'Not logged in' });
   return me;
 }
 
@@ -26,7 +23,7 @@ async function fetchPartyById(partyId) {
   const { rows } = await pool.query(
     `
       SELECT p.*,
-             COALESCE(hq.hue_hex, hq.color_hex) AS host_hue
+             COALESCE(hq.color_hex, hq.color_hex) AS host_hue
         FROM tt_party p
         LEFT JOIN ff_quickhitter hq ON hq.handle = p.host_handle
        WHERE p.party_id = $1
@@ -42,7 +39,7 @@ async function fetchMembership(partyId, handle) {
   const { rows } = await pool.query(
     `
       SELECT pm.*,
-             COALESCE(q.hue_hex, q.color_hex) AS member_hue
+             COALESCE(q.color_hex, q.color_hex) AS member_hue
         FROM tt_party_member pm
         LEFT JOIN ff_quickhitter q
           ON q.handle = pm.handle
@@ -239,7 +236,7 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
     const { rows } = await client.query(
       `
         SELECT pm.*,
-               COALESCE(q.hue_hex, q.color_hex) AS member_hue
+               COALESCE(q.color_hex, q.color_hex) AS member_hue
           FROM tt_party_member pm
           LEFT JOIN ff_quickhitter q ON q.handle = pm.handle
          WHERE pm.party_id = $1
@@ -271,14 +268,14 @@ router.get('/my', async (req, res) => {
       `
         SELECT
           p.*,
-          host_q.hue_hex AS host_hue,
+          host_q.color_hex AS host_hue,
           pm.handle       AS member_handle,
           pm.access_level,
           pm.arrived_at,
           pm.left_at,
           pm.last_seen_at,
           pm.invited_by_handle,
-          mem_q.hue_hex   AS member_hue
+          mem_q.color_hex   AS member_hue
         FROM tt_party p
         LEFT JOIN tt_party_member pm
           ON pm.party_id = p.party_id
@@ -383,7 +380,7 @@ router.post('/:partyId/checkin', jsonParser, async (req, res) => {
           arrived_at   = COALESCE(tt_party_member.arrived_at, EXCLUDED.arrived_at),
           last_seen_at = EXCLUDED.last_seen_at
         RETURNING *,
-          (SELECT COALESCE(hue_hex, color_hex) FROM ff_quickhitter WHERE handle = $2) AS member_hue
+          (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = $2) AS member_hue
       `,
       [partyId, me.handle]
     );
@@ -414,7 +411,7 @@ router.post('/:partyId/checkout', async (req, res) => {
          WHERE party_id = $1
            AND handle   = $2
          RETURNING *,
-           (SELECT COALESCE(hue_hex, color_hex) FROM ff_quickhitter WHERE handle = $2) AS member_hue
+           (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = $2) AS member_hue
       `,
       [partyId, me.handle]
     );
@@ -449,7 +446,7 @@ router.post('/:partyId/cut', async (req, res) => {
          WHERE party_id = $1
            AND host_handle = $2
          RETURNING *,
-           (SELECT COALESCE(hue_hex, color_hex) FROM ff_quickhitter WHERE handle = host_handle) AS host_hue
+           (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = host_handle) AS host_hue
       `,
       [partyId, me.handle]
     );
@@ -523,7 +520,7 @@ router.get('/:partyId/feed', async (req, res) => {
     const { rows: photoRows } = await pool.query(
       `
         SELECT t.*,
-               COALESCE(q.hue_hex, q.color_hex) AS owner_hue
+               COALESCE(q.color_hex, q.color_hex) AS owner_hue
           FROM tt_photo t
           LEFT JOIN ff_quickhitter q ON q.handle = t.handle
          WHERE t.party_id = $1

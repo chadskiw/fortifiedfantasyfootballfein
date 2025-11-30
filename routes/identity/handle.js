@@ -13,6 +13,35 @@ async function getCurrentMemberId(req){
   const m = String(req.cookies?.ff_member || '').trim();
   return m || null;
 }
+async function getCurrentIdentity(req, db) {
+  // If you already have identity with handle, use it
+  if (req.identity?.handle) return req.identity;
+
+  // Fallback: use ff_member_id cookie as the base identity
+  const memberId =
+    req.member?.member_id ||
+    req.cookies?.ff_member_id ||
+    null;
+
+  if (!memberId) return null;
+
+  // OPTIONAL: if you have ff_quickhitter with real handles and hues:
+  try {
+    const { rows } = await db.query(
+      'SELECT handle, color_hex FROM ff_quickhitter WHERE member_id = $1',
+      [memberId]
+    );
+    if (rows[0]) {
+      return { handle: rows[0].handle, hue: rows[0].color_hex };
+    }
+  } catch (e) {
+    console.error('getCurrentIdentity lookup error', e);
+  }
+
+  // Fallback: just use memberId as handle, no hue yet
+  return { handle: memberId, hue: null };
+}
+
 // GET /api/identity/handle/exists?u=foo
 router.get('/handle/exists', async (req, res) => {
   try{
