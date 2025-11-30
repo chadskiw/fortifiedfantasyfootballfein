@@ -13,11 +13,12 @@ async function getCurrentMemberId(req){
   const m = String(req.cookies?.ff_member || '').trim();
   return m || null;
 }
+// utils/identity.js (for example)
 async function getCurrentIdentity(req, db) {
-  // If you already have identity with handle, use it
+  // If some middleware already set identity with a handle, use it
   if (req.identity?.handle) return req.identity;
 
-  // Fallback: use ff_member_id cookie as the base identity
+  // Our real cookie is ff_member_id (see your screenshot)
   const memberId =
     req.member?.member_id ||
     req.cookies?.ff_member_id ||
@@ -25,20 +26,26 @@ async function getCurrentIdentity(req, db) {
 
   if (!memberId) return null;
 
-  // OPTIONAL: if you have ff_quickhitter with real handles and hues:
+  // If you have a quickhitter table that maps member_id -> handle + hue, use it
   try {
     const { rows } = await db.query(
-      'SELECT handle, color_hex FROM ff_quickhitter WHERE member_id = $1',
+      `SELECT handle, hue_hex
+         FROM ff_quickhitter
+        WHERE member_id = $1`,
       [memberId]
     );
+
     if (rows[0]) {
-      return { handle: rows[0].handle, hue: rows[0].color_hex };
+      return {
+        handle: rows[0].handle,     // pretty handle
+        hue: rows[0].hue_hex || null
+      };
     }
-  } catch (e) {
-    console.error('getCurrentIdentity lookup error', e);
+  } catch (err) {
+    console.error('getCurrentIdentity lookup error', err);
   }
 
-  // Fallback: just use memberId as handle, no hue yet
+  // Fallback: just use memberId as the handle for now
   return { handle: memberId, hue: null };
 }
 

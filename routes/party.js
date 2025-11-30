@@ -1,7 +1,7 @@
 // routes/party.js
 const express = require('express');
 const pool = require('../src/db/pool');
-const { getCurrentIdentity } = require('../services/identity');
+const { getCurrentIdentity } = require('../services/identity/handle');
 
 const router = express.Router();
 const jsonParser = express.json({ limit: '512kb' });
