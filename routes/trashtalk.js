@@ -163,9 +163,20 @@ const insertQuery = `
     taken_at, 
     camera_fingerprint
   )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8  , $9)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  ON CONFLICT (r2_key) DO UPDATE
+    SET
+      -- keep original_filename if already set, otherwise take new
+      original_filename   = COALESCE(tt_photo.original_filename, EXCLUDED.original_filename),
+      mime_type           = EXCLUDED.mime_type,
+      exif                = COALESCE(tt_photo.exif, EXCLUDED.exif),
+      lat                 = EXCLUDED.lat,
+      lon                 = EXCLUDED.lon,
+      taken_at            = COALESCE(tt_photo.taken_at, EXCLUDED.taken_at),
+      camera_fingerprint  = COALESCE(tt_photo.camera_fingerprint, EXCLUDED.camera_fingerprint)
   RETURNING photo_id, member_id, r2_key, created_at, lat, lon, taken_at, camera_fingerprint;
 `;
+
 
 const { rows } = await pool.query(insertQuery, [
   memberId,
