@@ -53,6 +53,65 @@ async function fetchMembership(partyId, handle) {
   return rows[0] || null;
 }
 
+async function requirePartyAccess(req, res, next) {
+  try {
+    const me = await getCurrentIdentity(req, pool);
+    if (!me) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const { partyId } = req.params;
+    if (!partyId) {
+      return res.status(400).json({ error: 'party_id_required' });
+    }
+    const party = await fetchPartyById(partyId);
+    if (!party) {
+      return res.status(404).json({ error: 'party_not_found' });
+    }
+    if ((party.state || '').toLowerCase() === 'cut') {
+      return res.status(410).json({ error: 'party_cut' });
+    }
+
+    const hostHandle = (party.host_handle || '').toLowerCase();
+    const myHandle = (me.handle || '').toLowerCase();
+    const isHost = hostHandle && myHandle && hostHandle === myHandle;
+
+    let membership = null;
+    if (!isHost) {
+      membership = await fetchMembership(partyId, me.handle);
+      if (!membership) {
+        return res.status(403).json({ error: 'not_invited' });
+      }
+      const accessLevel = (membership.access_level || '').toLowerCase();
+      if (accessLevel === 'declined') {
+        return res.status(403).json({ error: 'party_declined' });
+      }
+      if (accessLevel === 'card') {
+        return res.status(403).json({ error: 'not_checked_in' });
+      }
+    } else {
+      membership = {
+        party_id: party.party_id,
+        member_id: me.memberId || me.member_id || null,
+        handle: me.handle,
+        access_level: 'host',
+      };
+    }
+
+    req.me = me;
+    req.party = party;
+    req.membership = membership;
+    req.member = {
+      member_id: membership?.member_id || me.memberId || me.member_id || null,
+      handle: me.handle,
+      access_level: membership?.access_level || (isHost ? 'host' : 'guest'),
+    };
+    req.isPartyHost = isHost;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 function serializeParty(row) {
   if (!row) return null;
   return {
