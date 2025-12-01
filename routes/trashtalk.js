@@ -105,14 +105,25 @@ async function ensurePartyUploadAccess(partyId, handle) {
   if (!partyId) return { ok: true };
 
   const { rows: partyRows } = await pool.query(
-    'SELECT party_id, state FROM tt_party WHERE party_id = $1 LIMIT 1',
+    'SELECT party_id, state, host_handle FROM tt_party WHERE party_id = $1 LIMIT 1',
     [partyId]
   );
   if (!partyRows.length) {
     return { ok: false, status: 404, error: 'party_not_found' };
   }
-  if (partyRows[0].state === 'cut') {
+  const partyRow = partyRows[0];
+  if (partyRow.state === 'cut') {
     return { ok: false, status: 410, error: 'party_cut' };
+  }
+
+  const hostHandle = (partyRow.host_handle || '').toLowerCase();
+  const requester = (handle || '').toLowerCase();
+  if (hostHandle && requester && hostHandle === requester) {
+    return {
+      ok: true,
+      party: partyRow,
+      membership: { access_level: 'host' },
+    };
   }
 
   const { rows: membershipRows } = await pool.query(
