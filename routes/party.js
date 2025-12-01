@@ -3,7 +3,8 @@ const express = require('express');
 const crypto = require('crypto');
 const pool = require('../src/db/pool');
 const { getCurrentIdentity } = require('../services/identity');
-
+const url = require('url');
+const querystring = require('querystring');
 const router = express.Router();
 const jsonParser = express.json({ limit: '512kb' });
 const HANDLE_RE = /^[a-z0-9_.-]{3,32}$/i;
@@ -144,6 +145,30 @@ function cleanInviteToken(value) {
 function cleanMemberId(value) {
   if (value == null) return '';
   return String(value).trim();
+}
+
+function toNullableInteger(value) {
+  if (value == null || value === '') return null;
+  const num = Number(value);
+  if (Number.isInteger(num)) return num;
+  return null;
+}
+
+function parseTicketUrl(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    return new URL(rawUrl, 'https://fortifiedfantasy.com');
+  } catch (err) {
+    return null;
+  }
+}
+
+const GATE_ACCESS_LEVELS = new Set(['host', 'security', 'party_patrol']);
+
+function isGateOperator(req) {
+  if (req.isPartyHost) return true;
+  const level = String(req.membership?.access_level || '').trim().toLowerCase();
+  return GATE_ACCESS_LEVELS.has(level);
 }
 
 async function fetchReactionSnapshots(client, entityKeys, userId) {
@@ -1486,6 +1511,32 @@ router.get('/my', async (req, res) => {
   }
 });
 
+router.get('/:partyId/summary', async (req, res) => {
+  const { partyId } = req.params;
+  if (!partyId) {
+    return res.status(400).json({ error: 'party_id_required' });
+  }
+  try {
+    const party = await fetchPartyById(partyId);
+    if (!party) {
+      return res.status(404).json({ error: 'party_not_found' });
+    }
+    const summary = {
+      party_id: party.party_id,
+      name: party.name,
+      host_handle: party.host_handle,
+      starts_at: party.starts_at,
+      ends_at: party.ends_at,
+      party_type: party.party_type,
+      state: party.state,
+    };
+    return res.json({ ok: true, party: summary });
+  } catch (err) {
+    console.error('[party:summary]', err);
+    return res.status(500).json({ error: 'party_summary_failed' });
+  }
+});
+
 router.get('/:partyId/items', async (req, res) => {
   const me = await requireIdentity(req, res);
   if (!me) return;
@@ -1985,33 +2036,241 @@ router.patch('/:partyId/vibe', jsonParser, async (req, res) => {
   }
 });
 
+router.post('/:partyId/share-ticket', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const ticketUrl = cleanText(req.body?.ticketUrl || req.body?.ticket_url || '', 2048);
+  const memberId = cleanMemberId(me.memberId ?? me.member_id ?? '');
+
+  if (!partyId) {
+    return res.status(400).json({ error: 'party_id_required' });
+  }
+  if (!ticketUrl) {
+    return res.status(422).json({ error: 'ticket_url_required' });
+  }
+  if (!memberId) {
+    return res.status(403).json({ error: 'member_id_required' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT member_id,
+               handle
+          FROM tt_party_member
+         WHERE party_id = $1
+           AND member_id = $2
+         LIMIT 1
+      `,
+      [partyId, memberId]
+    );
+    if (!rows.length) {
+      return res.status(403).json({ error: 'not_invited' });
+    }
+
+    const membership = rows[0];
+    const displayName =
+      cleanText(req.body?.displayName || req.body?.display_name || '', 128) ||
+      membership.handle ||
+      memberId;
+
+    const insertRes = await pool.query(
+      `
+        INSERT INTO tt_party_ticket_share (
+          party_id,
+          guest_member_id,
+          ticket_url,
+          display_name,
+          status,
+          created_by_member_id,
+          created_at
+        )
+        VALUES ($1,$2,$3,$4,'pending',$5,NOW())
+        RETURNING share_id, status, created_at
+      `,
+      [partyId, membership.member_id || memberId, ticketUrl, displayName, memberId]
+    );
+    return res.json({ ok: true, share: insertRes.rows[0] });
+  } catch (err) {
+    console.error('[party:shareTicket]', err);
+    return res.status(500).json({ error: 'ticket_share_failed' });
+  }
+});
+
+router.get('/:partyId/shared-tickets', requirePartyAccess, async (req, res) => {
+  if (!isGateOperator(req)) {
+    return res.status(403).json({ error: 'not_gate_operator' });
+  }
+  const { partyId } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT s.share_id,
+               s.party_id,
+               s.guest_member_id,
+               s.ticket_url,
+               s.display_name,
+               s.status,
+               s.created_at,
+               s.handled_at,
+               s.handled_by_member_id,
+               q.handle AS guest_handle
+          FROM tt_party_ticket_share s
+          LEFT JOIN ff_quickhitter q
+            ON q.member_id = s.guest_member_id
+         WHERE s.party_id = $1
+         ORDER BY s.created_at DESC
+         LIMIT 200
+      `,
+      [partyId]
+    );
+    return res.json({
+      ok: true,
+      tickets: rows.map((row) => ({
+        share_id: row.share_id,
+        party_id: row.party_id,
+        guest_member_id: row.guest_member_id,
+        ticket_url: row.ticket_url,
+        display_name: row.display_name || row.guest_handle || row.guest_member_id,
+        guest_handle: row.guest_handle || null,
+        status: row.status,
+        created_at: row.created_at,
+        handled_at: row.handled_at,
+        handled_by_member_id: row.handled_by_member_id,
+      })),
+    });
+  } catch (err) {
+    console.error('[party:sharedTickets:list]', err);
+    return res.status(500).json({ error: 'shared_tickets_failed' });
+  }
+});
+
+router.post(
+  '/:partyId/shared-tickets/:shareId/deny',
+  jsonParser,
+  requirePartyAccess,
+  async (req, res) => {
+    if (!isGateOperator(req)) {
+      return res.status(403).json({ error: 'not_gate_operator' });
+    }
+    const { partyId, shareId } = req.params;
+    const normalizedShareId = toNullableInteger(shareId);
+    if (normalizedShareId == null) {
+      return res.status(400).json({ error: 'share_id_required' });
+    }
+    const actorMemberId = cleanMemberId(
+      req.me?.member_id ?? req.me?.memberId ?? req.member?.member_id ?? ''
+    );
+
+    try {
+      const { rowCount } = await pool.query(
+        `
+          UPDATE tt_party_ticket_share
+             SET status = 'denied',
+                 handled_at = NOW(),
+                 handled_by_member_id = COALESCE($3, handled_by_member_id)
+           WHERE share_id = $1
+             AND party_id = $2
+             AND status = 'pending'
+        `,
+        [normalizedShareId, partyId, actorMemberId || null]
+      );
+      if (!rowCount) {
+        return res.status(404).json({ error: 'ticket_share_not_pending' });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error('[party:sharedTickets:deny]', err);
+      return res.status(500).json({ error: 'shared_ticket_deny_failed' });
+    }
+  }
+);
+
 router.post('/:partyId/redeem', jsonParser, async (req, res) => {
   const me = await requireIdentity(req, res);
   if (!me) return;
 
   const { partyId } = req.params;
-  const inviteToken = cleanInviteToken(
+  let inviteToken = cleanInviteToken(
     req.body?.inviteToken ?? req.body?.invite_token
   );
-  const guestMemberId = cleanMemberId(
+  let guestMemberId = cleanMemberId(
     req.body?.guestMemberId ?? req.body?.guest_member_id ?? ''
   );
   const authMemberId = cleanMemberId(me.memberId ?? me.member_id ?? '');
-  const targetMemberId = guestMemberId || authMemberId;
+  let targetMemberId = guestMemberId || authMemberId;
+  const shareId = toNullableInteger(
+    req.body?.shareId ?? req.body?.share_id ?? null
+  );
 
   if (!partyId) {
     return res.status(400).json({ error: 'party_id_required' });
   }
-  if (!inviteToken) {
-    return res.status(422).json({ error: 'invite_token_required' });
-  }
-  if (!targetMemberId) {
-    return res.status(422).json({ error: 'member_id_required' });
-  }
 
   const client = await pool.connect();
+  let shareRecord = null;
   try {
     await client.query('BEGIN');
+
+    if (shareId != null) {
+      const shareRes = await client.query(
+        `
+          SELECT share_id,
+                 party_id,
+                 guest_member_id,
+                 ticket_url,
+                 status
+            FROM tt_party_ticket_share
+           WHERE share_id = $1
+             AND party_id = $2
+           LIMIT 1
+        `,
+        [shareId, partyId]
+      );
+      if (!shareRes.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'ticket_share_not_found' });
+      }
+      shareRecord = shareRes.rows[0];
+      if ((shareRecord.status || '').toLowerCase() !== 'pending') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'ticket_share_not_pending' });
+      }
+      const parsedUrl = parseTicketUrl(shareRecord.ticket_url);
+      if (parsedUrl) {
+        const params = parsedUrl.searchParams;
+        const derivedPartyId = params.get('party');
+        const derivedInvite = cleanInviteToken(params.get('invite'));
+        const derivedGuest = cleanMemberId(params.get('guest') || shareRecord.guest_member_id);
+        if (derivedPartyId && derivedPartyId !== partyId) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'ticket_party_mismatch' });
+        }
+        if (!inviteToken && derivedInvite) {
+          inviteToken = derivedInvite;
+        }
+        if (!guestMemberId && derivedGuest) {
+          guestMemberId = derivedGuest;
+          targetMemberId = derivedGuest;
+        }
+      }
+      if (!guestMemberId && shareRecord.guest_member_id) {
+        guestMemberId = cleanMemberId(shareRecord.guest_member_id);
+        targetMemberId = guestMemberId;
+      }
+    }
+
+    if (!inviteToken) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'invite_token_required' });
+    }
+    if (!targetMemberId) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'member_id_required' });
+    }
+
     const partyResult = await client.query(
       `
         SELECT party_id,
@@ -2085,6 +2344,19 @@ router.post('/:partyId/redeem', jsonParser, async (req, res) => {
       `,
       [partyId, targetMemberId]
     );
+
+    if (shareRecord) {
+      await client.query(
+        `
+          UPDATE tt_party_ticket_share
+             SET status = 'approved',
+                 handled_at = NOW(),
+                 handled_by_member_id = COALESCE($2, handled_by_member_id)
+           WHERE share_id = $1
+        `,
+        [shareRecord.share_id, authMemberId || null]
+      );
+    }
 
     await client.query('COMMIT');
     return res.json({
@@ -2575,92 +2847,212 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
     return res.status(500).json({ ok: false, error: 'party_message_failed' });
   }
 });
-router.post('/api/party/:partyId/redeem', requirePartyAccess, async (req, res) => {
-  const partyId = req.params.partyId;
-  const authMemberId = req.user.member_id; // from session
-  const { inviteToken, guestMemberId } = req.body || {};
+/**
+ * Core redeem logic.
+ *
+ * Options:
+ *   - inviteToken: string | null
+ *   - guestMemberId: string | null
+ *   - shareId: number | null   (optional; from tt_party_ticket_share)
+ *   - actorMemberId: string    (who is performing the redeem; gate/guest)
+ */
+async function redeemTicketAndCheckin(db, partyId, opts) {
+  const {
+    inviteToken: rawInviteToken,
+    guestMemberId: rawGuestMemberId,
+    shareId,
+    actorMemberId,
+  } = opts;
 
-  if (!inviteToken) {
-    return res.status(400).json({ error: 'Missing inviteToken' });
-  }
+  let inviteToken = rawInviteToken || null;
+  let targetMemberId = rawGuestMemberId || null;
 
-  // target member for this invite:
-  const targetMemberId = guestMemberId || authMemberId;
-
-  try {
-    // 1) load party (to enforce rules later if needed)
-    const party = await req.db.oneOrNone(
+  // 1) If shareId is provided, load ticket share row and fill in missing info
+  let shareRow = null;
+  if (shareId) {
+    shareRow = await db.oneOrNone(
       `
-      SELECT party_id, state, party_type, no_late_entry, no_reentry, starts_at, late_entry_grace_minutes
-        FROM tt_party
-       WHERE party_id = $1
+        SELECT share_id, party_id, guest_member_id, ticket_url,
+               status, handled_at, handled_by
+          FROM tt_party_ticket_share
+         WHERE share_id = $1
       `,
-      [partyId]
-    );
-    if (!party) {
-      return res.status(404).json({ error: 'Party not found' });
-    }
-
-    // 2) find matching invite row
-    const inviteRow = await req.db.oneOrNone(
-      `
-      SELECT party_id, member_id, invite_token, access_level,
-             arrived_at, left_at
-        FROM tt_party_member
-       WHERE party_id = $1
-         AND member_id = $2
-         AND invite_token = $3
-      `,
-      [partyId, targetMemberId, inviteToken]
+      [shareId]
     );
 
-    if (!inviteRow) {
-      return res.status(404).json({ error: 'Invite not found or already used' });
+    if (!shareRow) {
+      const err = new Error('Ticket share not found');
+      err.statusCode = 404;
+      throw err;
     }
 
-    // 3) enforce basic no_reentry / no_late_entry here if you want invites to respect those
-    const now = new Date();
-
-    if (party.no_reentry && inviteRow.left_at) {
-      return res.status(403).json({ error: 'No re-entry allowed for this party' });
+    if (shareRow.party_id !== partyId) {
+      const err = new Error('Ticket share party mismatch');
+      err.statusCode = 400;
+      throw err;
     }
 
-    if (party.no_late_entry) {
-      const cutoff = new Date(
-        new Date(party.starts_at).getTime() +
-        (party.late_entry_grace_minutes || 0) * 60 * 1000
-      );
-      if (now > cutoff && !inviteRow.arrived_at) {
-        return res.status(403).json({ error: 'Late entry is not allowed for this party' });
+    if (shareRow.status !== 'pending') {
+      const err = new Error('Ticket already handled');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // Default target member from share row if not provided
+    if (!targetMemberId && shareRow.guest_member_id) {
+      targetMemberId = shareRow.guest_member_id;
+    }
+
+    // If inviteToken missing, parse from ticket_url
+    if (!inviteToken && shareRow.ticket_url) {
+      try {
+        const parsed = url.parse(shareRow.ticket_url);
+        const qs = querystring.parse(parsed.query || '');
+        inviteToken = qs.invite || qs.token || null;
+        // guest override from URL if present
+        if (!targetMemberId && qs.guest) {
+          targetMemberId = String(qs.guest);
+        }
+      } catch (_) {
+        // ignore parse errors; we'll error later if no inviteToken
       }
     }
+  }
 
-    // 4) mark invite as redeemed / member as arrived
-    const updated = await req.db.one(
-      `
+  // 2) Fallback target member: if still missing, use actor
+  const finalMemberId = targetMemberId || actorMemberId;
+
+  if (!inviteToken) {
+    const err = new Error('Missing invite token');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // 3) Load party for rules
+  const party = await db.oneOrNone(
+    `
+      SELECT party_id, state, party_type,
+             no_late_entry, no_reentry,
+             starts_at, late_entry_grace_minutes
+        FROM tt_party
+       WHERE party_id = $1
+    `,
+    [partyId]
+  );
+  if (!party) {
+    const err = new Error('Party not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (party.state === 'ended') {
+    const err = new Error('Party has ended');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  // 4) Find invite row on tt_party_member
+  const inviteRow = await db.oneOrNone(
+    `
+      SELECT party_id, member_id, invite_token,
+             access_level, arrived_at, left_at
+        FROM tt_party_member
+       WHERE party_id    = $1
+         AND member_id   = $2
+         AND invite_token = $3
+    `,
+    [partyId, finalMemberId, inviteToken]
+  );
+
+  if (!inviteRow) {
+    const err = new Error('Invite not found or already used');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const now = new Date();
+
+  // 5) Enforce no_reentry
+  if (party.no_reentry && inviteRow.left_at) {
+    const err = new Error('No re-entry allowed for this party');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  // 6) Enforce no_late_entry
+  if (party.no_late_entry) {
+    const graceMinutes = party.late_entry_grace_minutes || 0;
+    const startsAt = new Date(party.starts_at);
+    const cutoff = new Date(startsAt.getTime() + graceMinutes * 60 * 1000);
+
+    if (!inviteRow.arrived_at && now > cutoff) {
+      const err = new Error('Late entry is not allowed for this party');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  // 7) Mark invite as redeemed / checked-in
+  const updated = await db.one(
+    `
       UPDATE tt_party_member
          SET access_level = COALESCE(access_level, 'guest'),
              arrived_at   = COALESCE(arrived_at, now()),
              last_seen_at = now()
-       WHERE party_id = $1
-         AND member_id = $2
+       WHERE party_id    = $1
+         AND member_id   = $2
          AND invite_token = $3
        RETURNING party_id, member_id, access_level, arrived_at, last_seen_at
-      `,
-      [partyId, targetMemberId, inviteToken]
-    );
+    `,
+    [partyId, finalMemberId, inviteToken]
+  );
 
-    // 5) respond
+  // 8) If this came from a ticket share, mark it approved
+  if (shareRow) {
+    await db.none(
+      `
+        UPDATE tt_party_ticket_share
+           SET status      = 'approved',
+               handled_at  = now(),
+               handled_by  = $2
+         WHERE share_id    = $1
+           AND status      = 'pending'
+      `,
+      [shareRow.share_id, actorMemberId]
+    );
+  }
+
+  return {
+    party_id: updated.party_id,
+    member_id: updated.member_id,
+    access_level: updated.access_level,
+    arrived_at: updated.arrived_at,
+  };
+}
+router.post('/api/party/:partyId/redeem', requireAuth, async (req, res) => {
+  const partyId = req.params.partyId;
+  const actorMemberId = req.user.member_id; // who is calling this endpoint
+  const { inviteToken, guestMemberId, shareId } = req.body || {};
+
+  try {
+    const result = await redeemTicketAndCheckin(req.db, partyId, {
+      inviteToken: inviteToken || null,
+      guestMemberId: guestMemberId || null,
+      shareId: shareId || null,
+      actorMemberId,
+    });
+
     return res.json({
       ok: true,
-      party_id: partyId,
-      member_id: updated.member_id,
-      access_level: updated.access_level,
-      arrived_at: updated.arrived_at
+      ...result,
     });
   } catch (err) {
     console.error('[party:redeem] error:', err);
-    return res.status(500).json({ error: 'Internal error redeeming invite' });
+
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      error: err.message || 'Unable to redeem ticket',
+    });
   }
 });
 
