@@ -7,6 +7,249 @@ const { getCurrentIdentity } = require('../services/identity');
 const router = express.Router();
 const jsonParser = express.json({ limit: '512kb' });
 const HANDLE_RE = /^[a-z0-9_.-]{3,32}$/i;
+const REACTION_TYPES = new Set(['heart', 'fire']);
+const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
+
+function createReactionSnapshot() {
+  return {
+    heart: { total: 0, self: false },
+    fire: { total: 0, self: false },
+  };
+}
+
+function cloneReactionSnapshot(snapshot) {
+  const base = createReactionSnapshot();
+  if (!snapshot) return base;
+  REACTION_TYPES.forEach((type) => {
+    if (snapshot[type]) {
+      base[type] = {
+        total: Number.isFinite(snapshot[type].total) ? snapshot[type].total : 0,
+        self: Boolean(snapshot[type].self),
+      };
+    }
+  });
+  return base;
+}
+
+function buildPartyEntityKey(kind, id) {
+  const safeKind = String(kind || '').toLowerCase();
+  const safeId =
+    id === null || id === undefined ? '' : String(id).trim();
+  if (safeKind === 'photo') return `ttphoto:${safeId}`;
+  if (safeKind === 'message') return `ttmsg:${safeId}`;
+  if (safeKind === 'party') return `ttparty:${safeId}`;
+  return `${safeKind}:${safeId}`;
+}
+
+function normalizeReactionType(value) {
+  const type = String(value || '').toLowerCase();
+  if (REACTION_TYPES.has(type)) return type;
+  return null;
+}
+
+function isReactableKind(kind) {
+  return REACTION_ENTITY_KINDS.has(String(kind || '').toLowerCase());
+}
+
+async function fetchReactionSnapshots(client, entityKeys, userId) {
+  const uniqueKeys = Array.from(
+    new Set((entityKeys || []).filter((key) => typeof key === 'string' && key))
+  );
+  const map = new Map();
+  if (!uniqueKeys.length) {
+    return map;
+  }
+
+  const { rows: totalRows } = await client.query(
+    `
+      SELECT entity_key, type, total
+        FROM tt_reaction_totals
+       WHERE entity_key = ANY($1::text[])
+    `,
+    [uniqueKeys]
+  );
+
+  totalRows.forEach((row) => {
+    const type = normalizeReactionType(row.type);
+    if (!type) return;
+    if (!map.has(row.entity_key)) {
+      map.set(row.entity_key, createReactionSnapshot());
+    }
+    map.get(row.entity_key)[type].total = Number(row.total) || 0;
+  });
+
+  if (userId) {
+    const { rows: userRows } = await client.query(
+      `
+        SELECT entity_key, type, qty
+          FROM tt_reaction_user
+         WHERE entity_key = ANY($1::text[])
+           AND user_id = $2
+      `,
+      [uniqueKeys, String(userId)]
+    );
+
+    userRows.forEach((row) => {
+      const type = normalizeReactionType(row.type);
+      if (!type) return;
+      if (!map.has(row.entity_key)) {
+        map.set(row.entity_key, createReactionSnapshot());
+      }
+      map.get(row.entity_key)[type].self = Number(row.qty) > 0;
+    });
+  }
+
+  uniqueKeys.forEach((key) => {
+    if (!map.has(key)) {
+      map.set(key, createReactionSnapshot());
+    }
+  });
+
+  return map;
+}
+
+async function resolvePartyReactionTarget(client, partyId, targetKindRaw, targetId) {
+  const kind = String(targetKindRaw || '').toLowerCase();
+  if (!isReactableKind(kind)) return null;
+  if (!targetId) return null;
+
+  if (kind === 'photo') {
+    const { rows } = await client.query(
+      `
+        SELECT photo_id, party_id, audience
+          FROM tt_photo
+         WHERE photo_id::text = $1::text
+           AND party_id = $2
+         LIMIT 1
+      `,
+      [String(targetId), partyId]
+    );
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      entityKey: buildPartyEntityKey('photo', row.photo_id),
+      kind: 'photo',
+      partyId: row.party_id,
+      audience: row.audience || 'party',
+      targetId: row.photo_id,
+    };
+  }
+
+  if (kind === 'message') {
+    const { rows } = await client.query(
+      `
+        SELECT message_id, party_id
+          FROM tt_party_message
+         WHERE message_id::text = $1::text
+           AND party_id = $2
+         LIMIT 1
+      `,
+      [String(targetId), partyId]
+    );
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      entityKey: buildPartyEntityKey('message', row.message_id),
+      kind: 'message',
+      partyId: row.party_id,
+      audience: 'party',
+      targetId: row.message_id,
+    };
+  }
+
+  return null;
+}
+
+async function applyReactionDelta(client, payload) {
+  const {
+    entityKey,
+    kind,
+    reactionType,
+    userId,
+    partyId,
+    audience,
+  } = payload;
+
+  const normalizedType = normalizeReactionType(reactionType);
+  if (!normalizedType) {
+    throw new Error('invalid_reaction');
+  }
+  const userKey = String(userId || '').trim();
+  if (!userKey) {
+    throw new Error('user_required');
+  }
+
+  const existing = await client.query(
+    `
+      SELECT qty
+        FROM tt_reaction_user
+       WHERE entity_key = $1
+         AND kind = $2
+         AND user_id = $3
+         AND type = $4
+       LIMIT 1
+    `,
+    [entityKey, kind, userKey, normalizedType]
+  );
+
+  let delta = 1;
+  if (existing.rows.length && Number(existing.rows[0].qty) > 0) {
+    delta = -1;
+    await client.query(
+      `
+        UPDATE tt_reaction_user
+           SET qty = 0,
+               updated_at = NOW()
+         WHERE entity_key = $1
+           AND kind = $2
+           AND user_id = $3
+           AND type = $4
+      `,
+      [entityKey, kind, userKey, normalizedType]
+    );
+  } else {
+    await client.query(
+      `
+        INSERT INTO tt_reaction_user (
+          entity_key,
+          kind,
+          party_id,
+          audience,
+          user_id,
+          type,
+          qty
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 1)
+        ON CONFLICT (kind, entity_key, user_id, type)
+        DO UPDATE SET
+          qty = 1,
+          updated_at = NOW()
+      `,
+      [entityKey, kind, partyId, audience, userKey, normalizedType]
+    );
+  }
+
+  await client.query(
+    `
+      INSERT INTO tt_reaction_totals (
+        entity_key,
+        kind,
+        party_id,
+        audience,
+        type,
+        total
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (kind, entity_key, type)
+      DO UPDATE SET
+        total = GREATEST(tt_reaction_totals.total + $6, 0),
+        updated_at = NOW()
+    `,
+    [entityKey, kind, partyId, audience, normalizedType, delta]
+  );
+
+  return delta;
+}
 
 function cleanHandle(value) {
   if (!value && value !== 0) return '';
@@ -354,6 +597,72 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
     await client.query('ROLLBACK');
     console.error('[party:invite]', err);
     return res.status(500).json({ ok: false, error: 'party_invite_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:partyId/reactions', jsonParser, requirePartyAccess, async (req, res) => {
+  const { partyId } = req.params;
+  const targetKind = String(req.body?.targetKind || '').toLowerCase();
+  const targetId = req.body?.targetId;
+  const reactionType = normalizeReactionType(req.body?.reaction);
+
+  if (!isReactableKind(targetKind)) {
+    return res.status(422).json({ ok: false, error: 'unsupported_entity_kind' });
+  }
+  if (!targetId) {
+    return res.status(422).json({ ok: false, error: 'target_required' });
+  }
+  if (!reactionType) {
+    return res.status(422).json({ ok: false, error: 'invalid_reaction' });
+  }
+
+  const userId =
+    req.member?.member_id ||
+    req.me?.memberId ||
+    req.me?.member_id ||
+    null;
+  if (!userId) {
+    return res.status(401).json({ ok: false, error: 'not_logged_in' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const target = await resolvePartyReactionTarget(
+      client,
+      partyId,
+      targetKind,
+      targetId
+    );
+    if (!target) {
+      return res.status(404).json({ ok: false, error: 'target_not_found' });
+    }
+
+    await client.query('BEGIN');
+    await applyReactionDelta(client, {
+      entityKey: target.entityKey,
+      kind: target.kind,
+      reactionType,
+      userId,
+      partyId: target.partyId || partyId,
+      audience: target.audience || 'party',
+    });
+    const snapshots = await fetchReactionSnapshots(
+      client,
+      [target.entityKey],
+      userId
+    );
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      entityKey: target.entityKey,
+      reactions: snapshots.get(target.entityKey) || createReactionSnapshot(),
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[party:reaction]', err);
+    return res.status(500).json({ ok: false, error: 'reaction_failed' });
   } finally {
     client.release();
   }
@@ -758,6 +1067,25 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
       ORDER BY event_time ASC
       LIMIT 512;
     `, [partyId]);
+
+    const reactionKeys = [];
+    posts.forEach((row) => {
+      if (!isReactableKind(row.kind)) return;
+      row.entity_key = buildPartyEntityKey(row.kind, row.id);
+      reactionKeys.push(row.entity_key);
+    });
+
+    const reactionSnapshots = await fetchReactionSnapshots(
+      client,
+      reactionKeys,
+      memberId
+    );
+    posts.forEach((row) => {
+      if (row.entity_key) {
+        row.reactions =
+          reactionSnapshots.get(row.entity_key) || createReactionSnapshot();
+      }
+    });
 
     // 3) Break into hype / live / recap, but only host gets to seed Hypefest
     const hype = posts.filter(p =>
