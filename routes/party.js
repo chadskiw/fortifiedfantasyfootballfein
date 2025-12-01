@@ -17,6 +17,31 @@ const DEFAULT_VIBE = Object.freeze({
 });
 const REACTION_TYPES = new Set(['heart', 'fire']);
 const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
+const PARTY_TYPES = new Set(['public', 'private', 'arrival', 'ticket']);
+const LOCATION_REQUIRED_PARTY_TYPES = new Set(['arrival', 'ticket']);
+const CHECKIN_VIA_VALUES = new Set([
+  'manual',
+  'auto',
+  'nfc',
+  'qr',
+  'ticket',
+  'ticket_scanned',
+]);
+const DEFAULT_CHECKIN_VIA = 'manual';
+const LOCATION_TOLERANCE_MULTIPLIER = 1.5;
+const TICKET_OPEN_STATUSES = new Set(['issued', 'assigned', 'pending']);
+const TICKET_REDEEMED_STATUS = 'redeemed';
+const TICKET_VOID_STATUS = 'void';
+const LATE_ENTRY_DEFAULT_GRACE_MINUTES = 0;
+
+class PartyCheckinError extends Error {
+  constructor(status, code, meta = null) {
+    super(code);
+    this.status = status;
+    this.code = code;
+    this.meta = meta;
+  }
+}
 
 function createReactionSnapshot() {
   return {
@@ -57,6 +82,58 @@ function normalizeReactionType(value) {
 
 function isReactableKind(kind) {
   return REACTION_ENTITY_KINDS.has(String(kind || '').toLowerCase());
+}
+
+function sanitizeCheckinVia(value) {
+  const via = String(value || '').trim().toLowerCase();
+  if (CHECKIN_VIA_VALUES.has(via)) {
+    return via;
+  }
+  return DEFAULT_CHECKIN_VIA;
+}
+
+function normalizePartyType(party) {
+  const value = String(party?.party_type || '').trim().toLowerCase();
+  if (PARTY_TYPES.has(value)) {
+    return value;
+  }
+  return 'private';
+}
+
+function requiresLocationForParty(party) {
+  const type = normalizePartyType(party);
+  return LOCATION_REQUIRED_PARTY_TYPES.has(type);
+}
+
+function computeLateEntryCutoffMs(party) {
+  if (!party?.starts_at) return null;
+  const startMs = Date.parse(party.starts_at);
+  if (Number.isNaN(startMs)) return null;
+  const minutes = Number.isFinite(Number(party.late_entry_grace_minutes))
+    ? Number(party.late_entry_grace_minutes)
+    : LATE_ENTRY_DEFAULT_GRACE_MINUTES;
+  const graceMs = minutes > 0 ? minutes * 60 * 1000 : 0;
+  return startMs + graceMs;
+}
+
+function hasMemberDeparted(membership) {
+  if (!membership) return false;
+  return Boolean(membership.left_at);
+}
+
+function getMemberIdentifiers(subject = {}) {
+  return {
+    memberId:
+      subject.memberId ??
+      subject.member_id ??
+      null,
+    handle: subject.handle || null,
+  };
+}
+
+function cleanTicketToken(value) {
+  if (value == null) return '';
+  return String(value).trim();
 }
 
 async function fetchReactionSnapshots(client, entityKeys, userId) {
@@ -390,6 +467,7 @@ function serializeParty(row) {
   return {
     party_id: row.party_id,
     host_handle: row.host_handle,
+    host_member_id: row.host_member_id || null,
     host: row.host_handle
       ? { handle: row.host_handle, hue: row.host_hue || null }
       : null,
@@ -408,6 +486,10 @@ function serializeParty(row) {
     vibe_hue: toNullableNumber(row.vibe_hue),
     vibe_saturation: toNullableNumber(row.vibe_saturation),
     vibe_brightness: toNullableNumber(row.vibe_brightness),
+    party_type: normalizePartyType(row),
+    no_late_entry: Boolean(row.no_late_entry),
+    no_reentry: Boolean(row.no_reentry),
+    late_entry_grace_minutes: toNullableNumber(row.late_entry_grace_minutes),
   };
 }
 
@@ -490,11 +572,201 @@ function distanceMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+const TicketService = {
+  async findTicketByToken(partyId, token) {
+    if (!partyId || !token) return null;
+    const { rows } = await pool.query(
+      `
+        SELECT *
+          FROM tt_party_ticket
+         WHERE party_id = $1
+           AND ticket_token = $2
+         LIMIT 1
+      `,
+      [partyId, token]
+    );
+    return rows[0] || null;
+  },
+
+  async findTicketForMember(partyId, identifiers) {
+    if (!partyId) return null;
+    const memberId = toNullableNumber(
+      identifiers?.memberId ?? identifiers?.member_id
+    );
+    const handleLower = (identifiers?.handle || '')
+      .trim()
+      .toLowerCase();
+    if (memberId == null && !handleLower) {
+      return null;
+    }
+    const { rows } = await pool.query(
+      `
+        SELECT *
+          FROM tt_party_ticket
+         WHERE party_id = $1
+           AND status NOT IN ($4, $5)
+           AND (
+             ($2::bigint IS NOT NULL AND assigned_member_id = $2)
+             OR ($3::text IS NOT NULL AND LOWER(assigned_handle) = $3)
+           )
+         ORDER BY updated_at DESC NULLS LAST
+         LIMIT 1
+      `,
+      [
+        partyId,
+        memberId,
+        handleLower || null,
+        TICKET_REDEEMED_STATUS,
+        TICKET_VOID_STATUS,
+      ]
+    );
+    return rows[0] || null;
+  },
+
+  async memberHasRedeemedTicket(partyId, identifiers) {
+    if (!partyId) return false;
+    const memberId = toNullableNumber(
+      identifiers?.memberId ?? identifiers?.member_id
+    );
+    const handleLower = (identifiers?.handle || '')
+      .trim()
+      .toLowerCase();
+    if (memberId == null && !handleLower) {
+      return false;
+    }
+    const { rows } = await pool.query(
+      `
+        SELECT ticket_id
+          FROM tt_party_ticket
+         WHERE party_id = $1
+           AND status = $2
+           AND (
+             ($3::bigint IS NOT NULL AND (assigned_member_id = $3 OR redeemed_by_member_id = $3))
+             OR ($4::text  IS NOT NULL AND (LOWER(assigned_handle) = $4 OR LOWER(redeemed_by_handle) = $4))
+           )
+         LIMIT 1
+      `,
+      [
+        partyId,
+        TICKET_REDEEMED_STATUS,
+        memberId,
+        handleLower || null,
+      ]
+    );
+    return rows.length > 0;
+  },
+
+  canUseTicket(party, ticket, identifiers) {
+    if (!ticket) {
+      return { ok: false, status: 404, error: 'ticket_not_found' };
+    }
+    const status = String(ticket.status || '').toLowerCase();
+    if (status === TICKET_VOID_STATUS) {
+      return { ok: false, status: 410, error: 'ticket_void' };
+    }
+    if (status === TICKET_REDEEMED_STATUS) {
+      return { ok: false, status: 409, error: 'ticket_already_redeemed' };
+    }
+
+    const memberId = toNullableNumber(
+      identifiers?.memberId ?? identifiers?.member_id
+    );
+    const handleLower = (identifiers?.handle || '')
+      .trim()
+      .toLowerCase();
+
+    const assignedMemberId = toNullableNumber(ticket.assigned_member_id);
+    const assignedHandle = (ticket.assigned_handle || '').trim().toLowerCase();
+
+    if (assignedMemberId != null && memberId != null && assignedMemberId !== memberId) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'ticket_assigned_to_other',
+      };
+    }
+    if (assignedHandle && handleLower && assignedHandle !== handleLower) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'ticket_assigned_to_other',
+      };
+    }
+    return { ok: true };
+  },
+
+  async redeemTicket({
+    party,
+    ticket,
+    ticketToken,
+    member,
+    membership,
+    actorHandle,
+    via = 'ticket',
+  }) {
+    let targetTicket = ticket;
+    if (!targetTicket && ticketToken) {
+      targetTicket = await TicketService.findTicketByToken(
+        party.party_id,
+        ticketToken
+      );
+    }
+    if (!targetTicket) {
+      throw new PartyCheckinError(404, 'ticket_not_found');
+    }
+
+    if (party?.no_reentry && hasMemberDeparted(membership)) {
+      throw new PartyCheckinError(403, 'no_reentry');
+    }
+
+    const canUse = TicketService.canUseTicket(party, targetTicket, member);
+    if (!canUse.ok) {
+      throw new PartyCheckinError(canUse.status, canUse.error, canUse.meta);
+    }
+
+    const memberId = toNullableNumber(member?.memberId ?? member?.member_id);
+    const handleValue = (member?.handle || '').trim() || null;
+
+    const { rows } = await pool.query(
+      `
+        UPDATE tt_party_ticket
+           SET status = $3,
+               redeemed_by_member_id = COALESCE($4, redeemed_by_member_id),
+               redeemed_by_handle    = COALESCE($5, redeemed_by_handle),
+               redeemed_at           = NOW(),
+               assigned_member_id    = COALESCE(assigned_member_id, $4),
+               assigned_handle       = COALESCE(assigned_handle, $5),
+               updated_at            = NOW()
+         WHERE ticket_id = $1
+           AND party_id = $2
+           AND status NOT IN ($6, $7)
+         RETURNING *
+      `,
+      [
+        targetTicket.ticket_id,
+        party.party_id,
+        TICKET_REDEEMED_STATUS,
+        memberId,
+        handleValue,
+        TICKET_REDEEMED_STATUS,
+        TICKET_VOID_STATUS,
+      ]
+    );
+
+    if (!rows.length) {
+      throw new PartyCheckinError(409, 'ticket_redemption_conflict');
+    }
+    return rows[0];
+  },
+};
+
 function cleanHandleList(invitees = []) {
   const seen = new Set();
   const result = [];
   invitees.forEach((raw) => {
-    const cleaned = cleanHandle(raw);
+    const rawValue = cleanHandle(raw);
+    if (!rawValue) return;
+    const cleaned = rawValue.replace(/^@+/, '');
     if (!cleaned) return;
     if (!HANDLE_RE.test(cleaned)) return;
     const normalized = cleaned.toLowerCase();
@@ -585,6 +857,151 @@ async function resolvePartyAccess(partyId, me) {
   }
 
   return { ok: true, party, membership, isHost: false };
+}
+
+async function performPartyCheckin({
+  party,
+  subjectHandle,
+  subjectMemberId,
+  lat,
+  lon,
+  via = DEFAULT_CHECKIN_VIA,
+  membership,
+  ticketVerified = false,
+  locationOverride = false,
+}) {
+  if (!party?.party_id) {
+    throw new PartyCheckinError(404, 'party_not_found');
+  }
+  const handle = cleanHandle(subjectHandle);
+  if (!handle) {
+    throw new PartyCheckinError(400, 'handle_required');
+  }
+
+  const partyId = party.party_id;
+  const partyType = normalizePartyType(party);
+  const isHostSubject = equalsIgnoreCase(party.host_handle, handle);
+  const identifiers = getMemberIdentifiers({
+    memberId: subjectMemberId,
+    handle,
+  });
+
+  const requiresLocation = requiresLocationForParty(party);
+  let memberRecord = membership;
+  if (!memberRecord) {
+    memberRecord = await fetchMembership(partyId, handle);
+  }
+  const alreadyArrived = Boolean(memberRecord?.arrived_at);
+
+  if (party.no_reentry && hasMemberDeparted(memberRecord) && !alreadyArrived && !isHostSubject) {
+    throw new PartyCheckinError(403, 'no_reentry');
+  }
+
+  if (party.no_late_entry && !alreadyArrived && !isHostSubject) {
+    const cutoffMs = computeLateEntryCutoffMs(party);
+    if (cutoffMs && Date.now() > cutoffMs) {
+      throw new PartyCheckinError(403, 'late_entry_closed', {
+        cutoff_at: new Date(cutoffMs).toISOString(),
+      });
+    }
+  }
+
+  let coords = null;
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    coords = { lat, lon };
+  }
+  const hasCoords = coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lon);
+  if (requiresLocation && !locationOverride && !isHostSubject) {
+    if (!hasCoords) {
+      throw new PartyCheckinError(422, 'location_required');
+    }
+    if (
+      !Number.isFinite(party.center_lat) ||
+      !Number.isFinite(party.center_lon) ||
+      !Number.isFinite(party.radius_m)
+    ) {
+      throw new PartyCheckinError(500, 'party_radius_missing');
+    }
+    const distance = distanceMeters(
+      party.center_lat,
+      party.center_lon,
+      coords.lat,
+      coords.lon
+    );
+    if (distance == null || distance > Number(party.radius_m)) {
+      throw new PartyCheckinError(403, 'outside_radius', {
+        distance_m: distance,
+        radius_m: party.radius_m,
+      });
+    }
+  } else if (
+    hasCoords &&
+    Number.isFinite(party.center_lat) &&
+    Number.isFinite(party.center_lon) &&
+    Number.isFinite(party.radius_m)
+  ) {
+    const distance = distanceMeters(
+      party.center_lat,
+      party.center_lon,
+      coords.lat,
+      coords.lon
+    );
+    if (distance != null && distance > party.radius_m * LOCATION_TOLERANCE_MULTIPLIER) {
+      throw new PartyCheckinError(403, 'out_of_range', {
+        distance_m: distance,
+        radius_m: party.radius_m,
+      });
+    }
+  }
+
+  if (partyType === 'ticket' && !isHostSubject) {
+    const hasTicket =
+      ticketVerified ||
+      (await TicketService.memberHasRedeemedTicket(partyId, identifiers));
+    if (!hasTicket) {
+      throw new PartyCheckinError(403, 'ticket_required');
+    }
+  }
+
+  const memberIdValue = toNullableNumber(identifiers.memberId);
+
+  const { rows } = await pool.query(
+    `
+      INSERT INTO tt_party_member (
+        party_id,
+        member_id,
+        handle,
+        invited_by_handle,
+        access_level,
+        arrived_at,
+        last_seen_at
+      ) VALUES (
+        $1,
+        $2,
+        $3,
+        NULL,
+        'live',
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (party_id, handle)
+      DO UPDATE SET
+        member_id   = COALESCE(tt_party_member.member_id, EXCLUDED.member_id),
+        access_level = 'live',
+        arrived_at   = COALESCE(tt_party_member.arrived_at, EXCLUDED.arrived_at),
+        last_seen_at = EXCLUDED.last_seen_at,
+        left_at      = NULL
+      RETURNING *,
+        (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = $3) AS member_hue
+    `,
+    [partyId, memberIdValue, handle]
+  );
+
+  if (!rows.length) {
+    throw new PartyCheckinError(500, 'checkin_failed');
+  }
+
+  return serializeMembership(rows[0]);
 }
 
 async function fetchClaimsForItemIds(itemIds = []) {
@@ -1535,71 +1952,233 @@ router.post('/:partyId/checkin', jsonParser, async (req, res) => {
   const { partyId } = req.params;
   const lat = toNullableNumber(req.body?.lat);
   const lon = toNullableNumber(req.body?.lon);
+  const via = sanitizeCheckinVia(req.body?.via);
+  const ticketToken = cleanTicketToken(
+    req.body?.ticketToken ?? req.body?.ticket_token
+  );
 
   try {
     const party = await fetchPartyById(partyId);
     if (!party) return res.status(404).json({ ok: false, error: 'party_not_found' });
     if (party.state === 'cut') return res.status(410).json({ ok: false, error: 'party_cut' });
+    const subjectHandle = me.handle;
+    const subjectMemberId = me.memberId || me.member_id || null;
+    let membership = await fetchMembership(partyId, subjectHandle);
+    const isHost = equalsIgnoreCase(party.host_handle, subjectHandle);
+    let ticketVerified = false;
 
-    if (
-      Number.isFinite(lat) &&
-      Number.isFinite(lon) &&
-      Number.isFinite(party.center_lat) &&
-      Number.isFinite(party.center_lon) &&
-      Number.isFinite(party.radius_m)
-    ) {
-      const distance = distanceMeters(
-        party.center_lat,
-        party.center_lon,
-        lat,
-        lon
-      );
-      if (distance != null && distance > party.radius_m * 1.5) {
-        return res.status(403).json({
-          ok: false,
-          error: 'out_of_range',
-          distance_m: distance,
-          radius_m: party.radius_m,
-        });
-      }
+    if (normalizePartyType(party) === 'ticket' && ticketToken) {
+      await TicketService.redeemTicket({
+        party,
+        ticketToken,
+        member: { memberId: subjectMemberId, handle: subjectHandle },
+        membership,
+        actorHandle: me.handle,
+        via,
+      });
+      ticketVerified = true;
     }
 
-    const { rows } = await pool.query(
-      `
-        INSERT INTO tt_party_member (
-          party_id,
-          handle,
-          invited_by_handle,
-          access_level,
-          arrived_at,
-          last_seen_at
-        ) VALUES (
-          $1,
-          $2,
-          NULL,
-          'live',
-          NOW(),
-          NOW()
-        )
-        ON CONFLICT (party_id, handle)
-        DO UPDATE SET
-          access_level = 'live',
-          arrived_at   = COALESCE(tt_party_member.arrived_at, EXCLUDED.arrived_at),
-          last_seen_at = EXCLUDED.last_seen_at
-        RETURNING *,
-          (SELECT COALESCE(color_hex, color_hex) FROM ff_quickhitter WHERE handle = $2) AS member_hue
-      `,
-      [partyId, me.handle]
-    );
+    const membershipRecord = await performPartyCheckin({
+      party,
+      subjectHandle,
+      subjectMemberId,
+      lat,
+      lon,
+      via,
+      membership,
+      ticketVerified,
+      locationOverride: isHost,
+    });
 
     return res.json({
       ok: true,
       party: serializeParty(party),
-      membership: serializeMembership(rows[0]),
+      membership: membershipRecord,
     });
   } catch (err) {
+    if (err instanceof PartyCheckinError) {
+      return res
+        .status(err.status || 400)
+        .json({ ok: false, error: err.code, ...(err.meta || {}) });
+    }
     console.error('[party:checkin]', err);
     return res.status(500).json({ ok: false, error: 'party_checkin_failed' });
+  }
+});
+
+router.post('/:partyId/tickets/redeem', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const lat = toNullableNumber(req.body?.lat);
+  const lon = toNullableNumber(req.body?.lon);
+  const via = sanitizeCheckinVia(req.body?.via || 'ticket');
+  const ticketToken = cleanTicketToken(
+    req.body?.ticketToken ?? req.body?.ticket_token
+  );
+  const useAssigned =
+    req.body?.useAssigned === true || req.body?.use_assigned === true;
+
+  try {
+    const party = await fetchPartyById(partyId);
+    if (!party) return res.status(404).json({ ok: false, error: 'party_not_found' });
+    if (party.state === 'cut') return res.status(410).json({ ok: false, error: 'party_cut' });
+    if (normalizePartyType(party) !== 'ticket') {
+      return res.status(400).json({ ok: false, error: 'not_ticket_party' });
+    }
+
+    const subjectHandle = me.handle;
+    const subjectMemberId = me.memberId || me.member_id || null;
+    let membership = await fetchMembership(partyId, subjectHandle);
+    const identifiers = {
+      memberId: subjectMemberId,
+      handle: subjectHandle,
+    };
+
+    let ticketRecord = null;
+    if (ticketToken) {
+      ticketRecord = await TicketService.findTicketByToken(partyId, ticketToken);
+    } else if (useAssigned) {
+      ticketRecord = await TicketService.findTicketForMember(partyId, identifiers);
+    }
+    if (!ticketRecord) {
+      throw new PartyCheckinError(404, 'ticket_not_found');
+    }
+
+    await TicketService.redeemTicket({
+      party,
+      ticket: ticketRecord,
+      member: identifiers,
+      membership,
+      actorHandle: me.handle,
+      via,
+    });
+
+    const membershipRecord = await performPartyCheckin({
+      party,
+      subjectHandle,
+      subjectMemberId,
+      lat,
+      lon,
+      via,
+      membership,
+      ticketVerified: true,
+      locationOverride: equalsIgnoreCase(party.host_handle, subjectHandle),
+    });
+
+    return res.json({
+      ok: true,
+      party: serializeParty(party),
+      membership: membershipRecord,
+    });
+  } catch (err) {
+    if (err instanceof PartyCheckinError) {
+      return res
+        .status(err.status || 400)
+        .json({ ok: false, error: err.code, ...(err.meta || {}) });
+    }
+    console.error('[party:tickets:redeem]', err);
+    return res.status(500).json({ ok: false, error: 'ticket_redeem_failed' });
+  }
+});
+
+router.post('/:partyId/tickets/take', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const lat = toNullableNumber(req.body?.lat);
+  const lon = toNullableNumber(req.body?.lon);
+  const via = sanitizeCheckinVia(req.body?.via || 'ticket_scanned');
+  const ticketToken = cleanTicketToken(
+    req.body?.ticketToken ?? req.body?.ticket_token
+  );
+  const targetHandleInput = cleanHandle(
+    req.body?.targetHandle ?? req.body?.target_handle
+  );
+  const targetMemberId = toNullableNumber(
+    req.body?.targetMemberId ?? req.body?.target_member_id
+  );
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+    if (!access.isHost) {
+      return res.status(403).json({ ok: false, error: 'not_party_host' });
+    }
+
+    const party = access.party;
+    if (party.state === 'cut') return res.status(410).json({ ok: false, error: 'party_cut' });
+    if (normalizePartyType(party) !== 'ticket') {
+      return res.status(400).json({ ok: false, error: 'not_ticket_party' });
+    }
+    if (!ticketToken) {
+      return res.status(422).json({ ok: false, error: 'ticket_token_required' });
+    }
+
+    let ticketRecord = await TicketService.findTicketByToken(partyId, ticketToken);
+    if (!ticketRecord) {
+      throw new PartyCheckinError(404, 'ticket_not_found');
+    }
+
+    const subjectHandle =
+      targetHandleInput ||
+      cleanHandle(ticketRecord.assigned_handle) ||
+      '';
+    if (!subjectHandle) {
+      return res.status(422).json({ ok: false, error: 'target_handle_required' });
+    }
+
+    const subjectMemberId =
+      targetMemberId ??
+      toNullableNumber(ticketRecord.assigned_member_id) ??
+      null;
+
+    const identifiers = {
+      memberId: subjectMemberId,
+      handle: subjectHandle,
+    };
+
+    let membership = await fetchMembership(partyId, subjectHandle);
+
+    await TicketService.redeemTicket({
+      party,
+      ticket: ticketRecord,
+      member: identifiers,
+      membership,
+      actorHandle: me.handle,
+      via,
+    });
+
+    const membershipRecord = await performPartyCheckin({
+      party,
+      subjectHandle,
+      subjectMemberId,
+      lat,
+      lon,
+      via,
+      membership,
+      ticketVerified: true,
+      locationOverride: true,
+    });
+
+    return res.json({
+      ok: true,
+      party: serializeParty(party),
+      membership: membershipRecord,
+    });
+  } catch (err) {
+    if (err instanceof PartyCheckinError) {
+      return res
+        .status(err.status || 400)
+        .json({ ok: false, error: err.code, ...(err.meta || {}) });
+    }
+    console.error('[party:tickets:take]', err);
+    return res.status(500).json({ ok: false, error: 'ticket_take_failed' });
   }
 });
 
@@ -1840,57 +2419,4 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
   }
 });
 
-// POST /api/party/:partyId/invite
-router.post('/:partyId/invite', async (req, res) => {
-  const me = await getCurrentIdentity(req, pool);
-  if (!me) return res.status(401).json({ error: 'Not logged in' });
-
-  const { partyId } = req.params;
-  const { invitees } = req.body || {};      // ["handle1","handle2",...]
-
-  if (!Array.isArray(invitees) || invitees.length === 0) {
-    return res.status(400).json({ error: 'No invitees provided' });
-  }
-
-  try {
-    // 1) Make sure caller is the host
-    const hostCheck = await pool.query(
-      `SELECT party_id
-         FROM tt_party
-        WHERE party_id = $1
-          AND host_handle = $2`,
-      [partyId, me.handle]
-    );
-
-    if (hostCheck.rowCount === 0) {
-      return res.status(403).json({ error: 'Only the host can invite' });
-    }
-
-    // 2) Insert / upsert party_member rows
-    const sql = `
-      INSERT INTO tt_party_member (
-        party_id, handle, invited_by_handle, access_level
-      )
-      VALUES ($1, $2, $3, 'card')
-      ON CONFLICT (party_id, handle)
-      DO UPDATE SET
-        invited_by_handle = EXCLUDED.invited_by_handle,
-        access_level      = 'card'
-      RETURNING party_id, handle, invited_by_handle, access_level, arrived_at, left_at;
-    `;
-
-    const invitedRows = [];
-    for (const h of invitees) {
-      const trimmed = String(h).trim();
-      if (!trimmed) continue;
-      const { rows } = await pool.query(sql, [partyId, trimmed, me.handle]);
-      invitedRows.push(rows[0]);
-    }
-
-    return res.json({ success: true, invited: invitedRows });
-  } catch (err) {
-    console.error('[party:invite] error:', err);
-    return res.status(500).json({ error: 'Failed to send invites' });
-  }
-});
 module.exports = router;
