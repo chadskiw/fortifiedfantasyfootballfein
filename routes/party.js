@@ -136,6 +136,16 @@ function cleanTicketToken(value) {
   return String(value).trim();
 }
 
+function cleanInviteToken(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
+function cleanMemberId(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
 async function fetchReactionSnapshots(client, entityKeys, userId) {
   const uniqueKeys = Array.from(
     new Set((entityKeys || []).filter((key) => typeof key === 'string' && key))
@@ -1975,6 +1985,123 @@ router.patch('/:partyId/vibe', jsonParser, async (req, res) => {
   }
 });
 
+router.post('/:partyId/redeem', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const inviteToken = cleanInviteToken(
+    req.body?.inviteToken ?? req.body?.invite_token
+  );
+  const guestMemberId = cleanMemberId(
+    req.body?.guestMemberId ?? req.body?.guest_member_id ?? ''
+  );
+  const authMemberId = cleanMemberId(me.memberId ?? me.member_id ?? '');
+  const targetMemberId = guestMemberId || authMemberId;
+
+  if (!partyId) {
+    return res.status(400).json({ error: 'party_id_required' });
+  }
+  if (!inviteToken) {
+    return res.status(422).json({ error: 'invite_token_required' });
+  }
+  if (!targetMemberId) {
+    return res.status(422).json({ error: 'member_id_required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const partyResult = await client.query(
+      `
+        SELECT party_id,
+               starts_at,
+               no_reentry,
+               no_late_entry,
+               late_entry_grace_minutes,
+               state
+          FROM tt_party
+         WHERE party_id = $1
+         LIMIT 1
+      `,
+      [partyId]
+    );
+    if (!partyResult.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'party_not_found' });
+    }
+    const party = partyResult.rows[0];
+    if ((party.state || '').toLowerCase() === 'cut') {
+      await client.query('ROLLBACK');
+      return res.status(410).json({ error: 'party_cut' });
+    }
+
+    const inviteRes = await client.query(
+      `
+        SELECT party_id,
+               member_id,
+               access_level,
+               arrived_at,
+               left_at
+          FROM tt_party_member
+         WHERE party_id = $1
+           AND member_id = $2
+           AND invite_token = $3
+         LIMIT 1
+      `,
+      [partyId, targetMemberId, inviteToken]
+    );
+    if (!inviteRes.rowCount) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ error: 'invite_not_found_or_used' });
+    }
+    const membership = inviteRes.rows[0];
+
+    if (party.no_reentry && membership.left_at) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'no_reentry' });
+    }
+
+    if (party.no_late_entry && !membership.arrived_at) {
+      const cutoffMs = computeLateEntryCutoffMs(party);
+      if (cutoffMs && Date.now() > cutoffMs) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'late_entry_closed' });
+      }
+    }
+
+    const updateRes = await client.query(
+      `
+        UPDATE tt_party_member
+           SET access_level = COALESCE(access_level, 'guest'),
+               arrived_at = COALESCE(arrived_at, NOW()),
+               last_seen_at = NOW(),
+               invite_token = NULL
+         WHERE party_id = $1
+           AND member_id = $2
+         RETURNING party_id, member_id, access_level, arrived_at
+      `,
+      [partyId, targetMemberId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      ...updateRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[party:redeem]', err);
+    return res
+      .status(500)
+      .json({ error: 'invite_redeem_failed' });
+  } finally {
+    client.release();
+  }
+});
+
 router.post('/:partyId/checkin', jsonParser, async (req, res) => {
   const me = await requireIdentity(req, res);
   if (!me) return;
@@ -2446,6 +2573,94 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
   } catch (err) {
     console.error('[party:message]', err);
     return res.status(500).json({ ok: false, error: 'party_message_failed' });
+  }
+});
+router.post('/api/party/:partyId/redeem', requireAuth, async (req, res) => {
+  const partyId = req.params.partyId;
+  const authMemberId = req.user.member_id; // from session
+  const { inviteToken, guestMemberId } = req.body || {};
+
+  if (!inviteToken) {
+    return res.status(400).json({ error: 'Missing inviteToken' });
+  }
+
+  // target member for this invite:
+  const targetMemberId = guestMemberId || authMemberId;
+
+  try {
+    // 1) load party (to enforce rules later if needed)
+    const party = await req.db.oneOrNone(
+      `
+      SELECT party_id, state, party_type, no_late_entry, no_reentry, starts_at, late_entry_grace_minutes
+        FROM tt_party
+       WHERE party_id = $1
+      `,
+      [partyId]
+    );
+    if (!party) {
+      return res.status(404).json({ error: 'Party not found' });
+    }
+
+    // 2) find matching invite row
+    const inviteRow = await req.db.oneOrNone(
+      `
+      SELECT party_id, member_id, invite_token, access_level,
+             arrived_at, left_at
+        FROM tt_party_member
+       WHERE party_id = $1
+         AND member_id = $2
+         AND invite_token = $3
+      `,
+      [partyId, targetMemberId, inviteToken]
+    );
+
+    if (!inviteRow) {
+      return res.status(404).json({ error: 'Invite not found or already used' });
+    }
+
+    // 3) enforce basic no_reentry / no_late_entry here if you want invites to respect those
+    const now = new Date();
+
+    if (party.no_reentry && inviteRow.left_at) {
+      return res.status(403).json({ error: 'No re-entry allowed for this party' });
+    }
+
+    if (party.no_late_entry) {
+      const cutoff = new Date(
+        new Date(party.starts_at).getTime() +
+        (party.late_entry_grace_minutes || 0) * 60 * 1000
+      );
+      if (now > cutoff && !inviteRow.arrived_at) {
+        return res.status(403).json({ error: 'Late entry is not allowed for this party' });
+      }
+    }
+
+    // 4) mark invite as redeemed / member as arrived
+    const updated = await req.db.one(
+      `
+      UPDATE tt_party_member
+         SET access_level = COALESCE(access_level, 'guest'),
+             arrived_at   = COALESCE(arrived_at, now()),
+             last_seen_at = now()
+       WHERE party_id = $1
+         AND member_id = $2
+         AND invite_token = $3
+       RETURNING party_id, member_id, access_level, arrived_at, last_seen_at
+      `,
+      [partyId, targetMemberId, inviteToken]
+    );
+
+    // 5) respond
+    return res.json({
+      ok: true,
+      party_id: partyId,
+      member_id: updated.member_id,
+      access_level: updated.access_level,
+      arrived_at: updated.arrived_at
+    });
+  } catch (err) {
+    console.error('[party:redeem] error:', err);
+    return res.status(500).json({ error: 'Internal error redeeming invite' });
   }
 });
 
