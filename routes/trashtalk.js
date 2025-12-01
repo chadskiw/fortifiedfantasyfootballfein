@@ -149,6 +149,72 @@ function resolveAudience(requested, hasParty) {
   return DEFAULT_AUDIENCE;
 }
 
+async function findNearbyPartyForHandle(handle, lat, lon) {
+  if (
+    !handle ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon)
+  ) {
+    return null;
+  }
+
+  const { rows } = await pool.query(
+    `
+      SELECT
+        p.party_id,
+        p.host_handle,
+        p.center_lat,
+        p.center_lon,
+        p.radius_m,
+        p.state,
+        pm.access_level
+      FROM tt_party p
+      LEFT JOIN tt_party_member pm
+        ON pm.party_id = p.party_id
+       AND pm.handle = $1
+      WHERE
+        p.state <> 'cut'
+        AND p.center_lat IS NOT NULL
+        AND p.center_lon IS NOT NULL
+        AND p.radius_m IS NOT NULL
+        AND (
+          p.host_handle = $1
+          OR pm.handle = $1
+        )
+    `,
+    [handle]
+  );
+
+  let best = null;
+  for (const row of rows) {
+    const radius = Number(row.radius_m) || 0;
+    const dist = distanceMeters(
+      Number(row.center_lat),
+      Number(row.center_lon),
+      lat,
+      lon
+    );
+    if (dist == null) continue;
+
+    const allowed = radius ? radius * 1.3 : 150;
+    if (dist > allowed) continue;
+
+    const hostMatch =
+      (row.host_handle || '').toLowerCase() === handle.toLowerCase();
+    const invited =
+      hostMatch ||
+      (row.access_level &&
+        row.access_level !== 'declined');
+    if (!invited) continue;
+
+    if (!best || dist < best.dist) {
+      best = { party_id: row.party_id, dist };
+    }
+  }
+
+  return best?.party_id || null;
+}
+
 /**
  * POST /api/trashtalk/upload
  * Upload photos, parse EXIF, stash in R2 + tt_photo.
@@ -218,20 +284,29 @@ router.post(
 
 const takenAt = new Date(timestamp);
 
-const upsertValues = [
-  ownerHandle,           // $1
-  r2Key,                 // $2
-  ownerMemberId,         // $3
-  file.originalname,     // $4
-  file.mimetype,         // $5
-  exifData ? JSON.stringify(exifData) : null, // $6
-  lat,                   // $7
-  lon,                   // $8
-  takenAt,               // $9
-  cameraFingerprint,     // $10
-  partyId,               // $11
-  audience               // $12
-];
+        let effectivePartyId = partyId;
+        if (!effectivePartyId) {
+          effectivePartyId = await findNearbyPartyForHandle(
+            ownerHandle,
+            lat,
+            lon
+          );
+        }
+
+        const upsertValues = [
+          ownerHandle,           // $1
+          r2Key,                 // $2
+          ownerMemberId,         // $3
+          file.originalname,     // $4
+          file.mimetype,         // $5
+          exifData ? JSON.stringify(exifData) : null, // $6
+          lat,                   // $7
+          lon,                   // $8
+          takenAt,               // $9
+          cameraFingerprint,     // $10
+          effectivePartyId,      // $11
+          audience               // $12
+        ];
 
 const existing = await pool.query(
   `
