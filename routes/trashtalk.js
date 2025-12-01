@@ -236,7 +236,6 @@ router.post(
       const partyId =
         rawParty && String(rawParty).trim() ? String(rawParty).trim() : null;
       const requestedAudience = req.body?.audience;
-      const audience = resolveAudience(requestedAudience, Boolean(partyId));
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: 'No files uploaded' });
@@ -292,6 +291,11 @@ const takenAt = new Date(timestamp);
             lon
           );
         }
+
+        const audience = resolveAudience(
+          requestedAudience,
+          Boolean(effectivePartyId)
+        );
 
         const upsertValues = [
           ownerHandle,           // $1
