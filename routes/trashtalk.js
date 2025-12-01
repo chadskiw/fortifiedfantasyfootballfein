@@ -9,6 +9,7 @@ const { pool } = require('../src/db');
 
 // ...
 const router = express.Router();
+const jsonParser = express.json({ limit: '256kb' });
 
 const EARTH_RADIUS_M = 6371000; // meters
 const VALID_AUDIENCES = new Set(['private', 'public', 'party']);
@@ -712,7 +713,7 @@ router.delete('/photo/:photoId', async (req, res) => {
   }
 });
 // in trashtalk.js (or wherever party routes live)
-router.post('/api/party/:partyId/message', requirePartyAccess, async (req, res, next) => {
+router.post('/api/party/:partyId/message', jsonParser, requirePartyAccess, async (req, res, next) => {
   const { partyId } = req.params;
   const memberId = req.member.member_id;
   const { body } = req.body || {};
