@@ -606,5 +606,27 @@ router.delete('/photo/:photoId', async (req, res) => {
     return res.status(500).json({ error: 'Failed to delete photo.' });
   }
 });
+// in trashtalk.js (or wherever party routes live)
+router.post('/api/party/:partyId/message', requirePartyAccess, async (req, res, next) => {
+  const { partyId } = req.params;
+  const memberId = req.member.member_id;
+  const { body } = req.body || {};
+
+  if (!body || !body.trim()) {
+    return res.status(400).json({ error: 'empty_message' });
+  }
+
+  try {
+    const { rows: [msg] } = await pool.query(`
+      INSERT INTO tt_party_message (party_id, member_id, body)
+      VALUES ($1, $2, $3)
+      RETURNING message_id, party_id, member_id, body, created_at;
+    `, [partyId, memberId, body.trim()]);
+
+    res.json(msg);
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;

@@ -619,85 +619,109 @@ router.post('/:partyId/cut', async (req, res) => {
   }
 });
 
-router.get('/:partyId/feed', async (req, res) => {
-  const me = await requireIdentity(req, res);
-  if (!me) return;
-
+  router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
   const { partyId } = req.params;
+  const memberId = req.member.member_id;
+  const client = await pool.connect();
+
   try {
-    const party = await fetchPartyById(partyId);
-    if (!party) return res.status(404).json({ ok: false, error: 'party_not_found' });
-    if (party.state === 'cut') {
-      return res.status(410).json({ ok: false, error: 'party_cut' });
+    // 1) Load party
+    const { rows: [party] } = await client.query(`
+      SELECT
+        p.*,
+        host.handle AS host_handle
+      FROM tt_party p
+      JOIN ff_member host ON host.member_id = p.host_member_id
+      WHERE p.party_id = $1
+    `, [partyId]);
+
+    if (!party) {
+      return res.status(404).json({ error: 'party_not_found' });
     }
 
-    const membership = await fetchMembership(partyId, me.handle);
-    if (!membership && party.host_handle !== me.handle) {
-      return res.status(403).json({ ok: false, error: 'not_invited' });
-    }
+    // 2) Load posts: messages + photos, all as unified "posts"
+    const { rows: posts } = await client.query(`
+      WITH party_ctx AS (
+        SELECT
+          party_id,
+          host_member_id,
+          starts_at,
+          COALESCE(ends_at, starts_at + INTERVAL '12 hours') AS ends_at
+        FROM tt_party
+        WHERE party_id = $1
+      )
 
-    const now = new Date();
-    let rangeStart = party.starts_at || null;
-    let rangeEnd = party.ends_at || now;
+      SELECT *
+      FROM (
+        -- Text messages
+        SELECT
+          'message' AS kind,
+          m.message_id      AS id,
+          m.party_id,
+          m.member_id,
+          u.handle,
+          m.body,
+          NULL::text        AS r2_key,
+          NULL::timestamptz AS taken_at,
+          m.created_at      AS event_time,
+          CASE
+            WHEN m.created_at <  ctx.starts_at THEN 'preparty'
+            WHEN m.created_at >  ctx.ends_at   THEN 'recap'
+            ELSE 'live'
+          END AS phase
+        FROM tt_party_message m
+        JOIN party_ctx ctx ON ctx.party_id = m.party_id
+        JOIN ff_member u   ON u.member_id  = m.member_id
 
-    if (!membership && party.host_handle === me.handle) {
-      rangeStart = party.starts_at || null;
-      rangeEnd = party.ends_at || now;
-    } else if (membership) {
-      if (membership.access_level === 'card') {
-        return res.status(403).json({ ok: false, error: 'not_checked_in' });
-      }
-      rangeStart = membership.arrived_at || party.starts_at || null;
-      if (membership.access_level === 'live') {
-        rangeEnd = now;
-      } else {
-        rangeEnd =
-          membership.left_at ||
-          membership.last_seen_at ||
-          party.ends_at ||
-          now;
-      }
-    }
+        UNION ALL
 
-    const { rows: photoRows } = await pool.query(
-      `
-        SELECT t.*,
-               COALESCE(q.color_hex, q.color_hex) AS owner_hue
-          FROM tt_photo t
-          LEFT JOIN ff_quickhitter q ON q.handle = t.handle
-         WHERE t.party_id = $1
-           AND t.audience = 'party'
-           AND ($2::timestamptz IS NULL OR t.taken_at >= $2)
-           AND ($3::timestamptz IS NULL OR t.taken_at <= $3)
-         ORDER BY t.taken_at ASC NULLS LAST, t.created_at ASC
-      `,
-      [partyId, rangeStart, rangeEnd || now]
+        -- Photos
+        SELECT
+          'photo'          AS kind,
+          ph.photo_id      AS id,
+          ph.party_id,
+          ph.member_id,
+          u.handle,
+          NULL::text       AS body,
+          ph.r2_key,
+          ph.taken_at,
+          COALESCE(ph.taken_at, ph.created_at) AS event_time,
+          CASE
+            WHEN COALESCE(ph.taken_at, ph.created_at) < ctx.starts_at THEN 'preparty'
+            WHEN COALESCE(ph.taken_at, ph.created_at) > ctx.ends_at   THEN 'recap'
+            ELSE 'live'
+          END AS phase
+        FROM tt_photo ph
+        JOIN party_ctx ctx ON ctx.party_id = ph.party_id
+        JOIN ff_member u   ON u.member_id  = ph.member_id
+      ) all_posts
+      WHERE party_id = $1
+      ORDER BY event_time ASC
+      LIMIT 512;
+    `, [partyId]);
+
+    // 3) Break into hype / live / recap, but only host gets to seed Hypefest
+    const hype = posts.filter(p =>
+      p.phase === 'preparty' &&
+      p.member_id === party.host_member_id
     );
 
-    return res.json({
-      ok: true,
-      party: serializeParty(party),
-      membership: serializeMembership(membership),
-      photos: photoRows.map((row) => ({
-        photo_id: row.photo_id,
-        handle: row.handle,
-        hue: row.owner_hue || null,
-        r2_key: row.r2_key,
-        original_filename: row.original_filename,
-        mime_type: row.mime_type,
-        lat: row.lat,
-        lon: row.lon,
-        taken_at: row.taken_at,
-        created_at: row.created_at,
-        party_id: row.party_id,
-        audience: row.audience,
-      })),
+    const live = posts.filter(p => p.phase === 'live');
+    const recap = posts.filter(p => p.phase === 'recap');
+
+    res.json({
+      party,
+      hype,
+      feed: live,
+      recap
     });
   } catch (err) {
-    console.error('[party:feed]', err);
-    return res.status(500).json({ ok: false, error: 'party_feed_failed' });
+    next(err);
+  } finally {
+    client.release();
   }
 });
+
 // POST /api/party/:partyId/invite
 router.post('/:partyId/invite', async (req, res) => {
   const me = await getCurrentIdentity(req, pool);
