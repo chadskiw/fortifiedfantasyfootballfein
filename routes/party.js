@@ -678,7 +678,7 @@ router.post('/:partyId/cut', async (req, res) => {
   }
 });
 
-  router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
+router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
   const { partyId } = req.params;
   const memberId = req.member.member_id;
   const client = await pool.connect();
@@ -779,6 +779,39 @@ router.post('/:partyId/cut', async (req, res) => {
     next(err);
   } finally {
     client.release();
+  }
+});
+
+router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res) => {
+  const { partyId } = req.params;
+  const memberId = req.member.member_id;
+  const body = (req.body?.body || '').trim();
+
+  if (!req.isPartyHost) {
+    return res.status(403).json({ ok: false, error: 'host_only' });
+  }
+
+  if (!body) {
+    return res.status(422).json({ ok: false, error: 'message_required' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_party_message (party_id, member_id, body)
+        VALUES ($1, $2, $3)
+        RETURNING message_id, party_id, member_id, body, created_at
+      `,
+      [partyId, memberId, body]
+    );
+
+    return res.json({
+      ok: true,
+      message: rows[0],
+    });
+  } catch (err) {
+    console.error('[party:message]', err);
+    return res.status(500).json({ ok: false, error: 'party_message_failed' });
   }
 });
 
