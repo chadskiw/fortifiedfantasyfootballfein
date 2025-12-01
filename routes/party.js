@@ -68,17 +68,21 @@ async function fetchReactionSnapshots(client, entityKeys, userId) {
     return map;
   }
 
+  // 🔧 totals: reaction -> alias as "type" so the rest of the code keeps working
   const { rows: totalRows } = await client.query(
     `
-      SELECT entity_key, type, total
-        FROM tt_reaction_totals
-       WHERE entity_key = ANY($1::text[])
+      SELECT
+        entity_key,
+        reaction AS type,
+        total
+      FROM tt_reaction_totals
+      WHERE entity_key = ANY($1::text[])
     `,
     [uniqueKeys]
   );
 
   totalRows.forEach((row) => {
-    const type = normalizeReactionType(row.type);
+    const type = normalizeReactionType(row.type); // "heart", "fire", etc
     if (!type) return;
     if (!map.has(row.entity_key)) {
       map.set(row.entity_key, createReactionSnapshot());
@@ -87,12 +91,16 @@ async function fetchReactionSnapshots(client, entityKeys, userId) {
   });
 
   if (userId) {
+    // 🔧 per-user: use member_id + alias reaction as "type"
     const { rows: userRows } = await client.query(
       `
-        SELECT entity_key, type, qty
-          FROM tt_reaction_user
-         WHERE entity_key = ANY($1::text[])
-           AND user_id = $2
+        SELECT
+          entity_key,
+          reaction AS type,
+          qty
+        FROM tt_reaction_user
+        WHERE entity_key = ANY($1::text[])
+          AND member_id = $2
       `,
       [uniqueKeys, String(userId)]
     );
@@ -107,6 +115,7 @@ async function fetchReactionSnapshots(client, entityKeys, userId) {
     });
   }
 
+  // Ensure every requested key has at least an empty snapshot
   uniqueKeys.forEach((key) => {
     if (!map.has(key)) {
       map.set(key, createReactionSnapshot());
@@ -115,6 +124,7 @@ async function fetchReactionSnapshots(client, entityKeys, userId) {
 
   return map;
 }
+
 
 async function resolvePartyReactionTarget(client, partyId, targetKindRaw, targetId) {
   const kind = String(targetKindRaw || '').toLowerCase();
