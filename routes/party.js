@@ -1072,8 +1072,25 @@ router.post('/', async (req, res) => {
     centerLon,
     radiusM,
     startsAt,
-    endsAt
+    endsAt,
+    partyType,
+    noLateEntry,
+    noReentry,
+    lateEntryGraceMinutes,
   } = req.body || {};
+
+  let normalizedPartyType = String(partyType || '').trim().toLowerCase();
+  if (!PARTY_TYPES.has(normalizedPartyType)) {
+    normalizedPartyType = 'private';
+  }
+  const visibilityMode =
+    normalizedPartyType === 'public' ? 'public_party' : 'private_party';
+  const noLateEntryFlag = Boolean(noLateEntry);
+  const noReentryFlag = Boolean(noReentry);
+  let graceMinutes = toNullableNumber(lateEntryGraceMinutes);
+  if (graceMinutes != null) {
+    graceMinutes = clampNumber(graceMinutes, 0, 720);
+  }
 
   try {
     const sql = `
@@ -1088,7 +1105,11 @@ router.post('/', async (req, res) => {
         starts_at,
         ends_at,
         visibility_mode,
-        state
+        state,
+        party_type,
+        no_late_entry,
+        no_reentry,
+        late_entry_grace_minutes
       )
       VALUES (
         $1,  -- host_member_id
@@ -1100,8 +1121,12 @@ router.post('/', async (req, res) => {
         COALESCE($7, 75),  -- radius_m
         $8,  -- starts_at
         $9,  -- ends_at
-        'private_party',
-        'live'
+        $10,
+        'live',
+        $11,
+        $12,
+        $13,
+        $14
       )
       RETURNING *;
     `;
@@ -1115,7 +1140,12 @@ router.post('/', async (req, res) => {
       centerLon,        // $6
       radiusM,          // $7
       startsAt,         // $8
-      endsAt            // $9
+      endsAt,           // $9
+      visibilityMode,   // $10
+      normalizedPartyType, // $11
+      noLateEntryFlag,  // $12
+      noReentryFlag,    // $13
+      graceMinutes,     // $14
     ];
 
     const { rows } = await pool.query(sql, params);
