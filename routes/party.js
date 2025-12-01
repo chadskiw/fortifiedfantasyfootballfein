@@ -2575,7 +2575,7 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
     return res.status(500).json({ ok: false, error: 'party_message_failed' });
   }
 });
-router.post('/api/party/:partyId/redeem', requireAuth, async (req, res) => {
+router.post('/api/party/:partyId/redeem', requirePartyAccess, async (req, res) => {
   const partyId = req.params.partyId;
   const authMemberId = req.user.member_id; // from session
   const { inviteToken, guestMemberId } = req.body || {};
