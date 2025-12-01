@@ -7,6 +7,9 @@ const { getCurrentIdentity } = require('../services/identity');
 const router = express.Router();
 const jsonParser = express.json({ limit: '512kb' });
 const HANDLE_RE = /^[a-z0-9_.-]{3,32}$/i;
+const ITEM_KINDS = new Set(['supply', 'task', 'ride', 'cash', 'other']);
+const CLAIM_STATUSES = new Set(['promised', 'brought', 'cancelled']);
+const NOTE_KINDS = new Set(['note', 'thank_you', 'request', 'announcement']);
 const REACTION_TYPES = new Set(['heart', 'fire']);
 const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
 
@@ -256,6 +259,18 @@ function cleanHandle(value) {
   return String(value).trim();
 }
 
+function cleanText(value, limit = 512) {
+  if (value == null) return '';
+  const result = String(value).trim();
+  if (!limit || limit <= 0) return result;
+  return result.slice(0, limit);
+}
+
+function equalsIgnoreCase(a, b) {
+  if (a == null || b == null) return false;
+  return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+}
+
 async function requireIdentity(req, res) {
   const me = await getCurrentIdentity(req, pool);
 if (!me) return res.status(401).json({ error: 'Not logged in' });
@@ -405,6 +420,12 @@ function toNullableNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+function toNumeric(value) {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function degToRad(v) {
   return (v * Math.PI) / 180;
 }
@@ -444,6 +465,145 @@ function cleanHandleList(invitees = []) {
     result.push(normalized);
   });
   return result;
+}
+
+function serializePartyItem(row) {
+  if (!row) return null;
+  const qtyNeeded = toNumeric(row.qty_needed);
+  const qtyClaimed = toNumeric(row.qty_claimed);
+  return {
+    party_item_id: row.party_item_id,
+    party_id: row.party_id,
+    label: row.label,
+    details: row.details,
+    kind: row.kind,
+    qty_needed: qtyNeeded,
+    qty_unit: row.qty_unit,
+    created_by_member_id: row.created_by_member_id,
+    created_at: row.created_at,
+    qty_claimed: qtyClaimed ?? 0,
+    qty_remaining:
+      qtyNeeded != null && qtyClaimed != null
+        ? qtyNeeded - qtyClaimed
+        : null,
+  };
+}
+
+function serializePartyItemClaim(row) {
+  if (!row) return null;
+  return {
+    party_item_claim_id: row.party_item_claim_id,
+    party_item_id: row.party_item_id,
+    member_id: row.member_id,
+    qty_promised: toNumeric(row.qty_promised),
+    qty_brought: toNumeric(row.qty_brought),
+    status: row.status,
+    thank_you_note: row.thank_you_note,
+    thanked_at: row.thanked_at,
+    created_at: row.created_at,
+    member_handle: row.member_handle || row.claimer_handle || null,
+    member_hue: row.member_hue || null,
+  };
+}
+
+function serializePartyNote(row) {
+  if (!row) return null;
+  return {
+    party_note_id: row.party_note_id,
+    party_id: row.party_id,
+    from_member_id: row.from_member_id,
+    to_member_id: row.to_member_id,
+    related_item_id: row.related_item_id,
+    kind: row.kind,
+    body: row.body,
+    created_at: row.created_at,
+    from_handle: row.from_handle || null,
+    from_hue: row.from_hue || null,
+    to_handle: row.to_handle || null,
+    to_hue: row.to_hue || null,
+  };
+}
+
+async function resolvePartyAccess(partyId, me) {
+  if (!partyId) return { ok: false, status: 400, error: 'party_id_required' };
+  if (!me?.handle) {
+    return { ok: false, status: 403, error: 'handle_required' };
+  }
+
+  const party = await fetchPartyById(partyId);
+  if (!party) {
+    return { ok: false, status: 404, error: 'party_not_found' };
+  }
+
+  const isHost = equalsIgnoreCase(party.host_handle, me.handle);
+
+  if (isHost) {
+    return { ok: true, party, membership: null, isHost: true };
+  }
+
+  const membership = await fetchMembership(partyId, me.handle);
+  if (!membership) {
+    return { ok: false, status: 403, error: 'not_invited' };
+  }
+
+  return { ok: true, party, membership, isHost: false };
+}
+
+async function fetchClaimsForItemIds(itemIds = []) {
+  if (!itemIds.length) return [];
+  const { rows } = await pool.query(
+    `
+      SELECT c.*,
+             q.handle AS member_handle,
+             q.color_hex AS member_hue
+        FROM tt_party_item_claim c
+        LEFT JOIN ff_quickhitter q
+          ON q.member_id = c.member_id
+       WHERE c.party_item_id = ANY($1::bigint[])
+       ORDER BY c.created_at ASC
+    `,
+    [itemIds]
+  );
+  return rows;
+}
+
+async function fetchClaimById(claimId) {
+  if (!claimId) return null;
+  const { rows } = await pool.query(
+    `
+      SELECT c.*,
+             q.handle AS member_handle,
+             q.color_hex AS member_hue,
+             i.party_id
+        FROM tt_party_item_claim c
+        JOIN tt_party_item i ON i.party_item_id = c.party_item_id
+        LEFT JOIN ff_quickhitter q ON q.member_id = c.member_id
+       WHERE c.party_item_claim_id = $1::bigint
+       LIMIT 1
+    `,
+    [claimId]
+  );
+  return rows[0] || null;
+}
+
+async function fetchNoteById(noteId) {
+  if (!noteId) return null;
+  const { rows } = await pool.query(
+    `
+      SELECT n.*,
+             from_q.handle AS from_handle,
+             from_q.color_hex AS from_hue,
+             to_q.handle   AS to_handle,
+             to_q.color_hex AS to_hue
+        FROM tt_party_note n
+        LEFT JOIN ff_quickhitter from_q ON from_q.member_id = n.from_member_id
+        LEFT JOIN ff_quickhitter to_q   ON to_q.member_id   = n.to_member_id
+       WHERE n.party_note_id = $1::bigint
+       LIMIT 1
+    `,
+    [noteId]
+  );
+  return rows[0] || null;
 }
 
 router.post('/', async (req, res) => {
@@ -828,6 +988,433 @@ router.get('/my', async (req, res) => {
   } catch (err) {
     console.error('[party:my]', err);
     return res.status(500).json({ ok: false, error: 'party_query_failed' });
+  }
+});
+
+router.get('/:partyId/items', async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+
+    const { rows } = await pool.query(
+      `
+        SELECT i.*,
+               COALESCE(
+                 SUM(c.qty_promised) FILTER (WHERE c.status <> 'cancelled'),
+                 0
+               ) AS qty_claimed
+          FROM tt_party_item i
+          LEFT JOIN tt_party_item_claim c
+            ON c.party_item_id = i.party_item_id
+         WHERE i.party_id = $1
+         GROUP BY i.party_item_id
+         ORDER BY i.created_at ASC
+      `,
+      [partyId]
+    );
+
+    const itemIds = rows.map((row) => row.party_item_id).filter(Boolean);
+    const claimRows = await fetchClaimsForItemIds(itemIds);
+    const claimsByItem = new Map();
+    claimRows.forEach((row) => {
+      if (!claimsByItem.has(row.party_item_id)) {
+        claimsByItem.set(row.party_item_id, []);
+      }
+      claimsByItem.get(row.party_item_id).push(serializePartyItemClaim(row));
+    });
+
+    const items = rows.map((row) => {
+      const serialized = serializePartyItem(row);
+      serialized.claims = claimsByItem.get(row.party_item_id) || [];
+      return serialized;
+    });
+
+    return res.json({
+      ok: true,
+      party: serializeParty(access.party),
+      items,
+    });
+  } catch (err) {
+    console.error('[party:items:list]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_items_fetch_failed' });
+  }
+});
+
+router.post('/:partyId/items', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const label = cleanText(req.body?.label, 120);
+  const details = cleanText(req.body?.details, 1024) || null;
+  const kindRaw = String(req.body?.kind || '').trim().toLowerCase();
+  const qtyNeeded = toNullableNumber(
+    req.body?.qtyNeeded ?? req.body?.qty_needed ?? null
+  );
+  const qtyUnit = cleanText(req.body?.qtyUnit ?? req.body?.qty_unit, 64) || null;
+
+  if (!label) {
+    return res.status(422).json({ ok: false, error: 'item_label_required' });
+  }
+  if (qtyNeeded != null && qtyNeeded < 0) {
+    return res.status(422).json({ ok: false, error: 'invalid_qty_needed' });
+  }
+
+  const kind = ITEM_KINDS.has(kindRaw) ? kindRaw : 'other';
+  const createdByMemberId = me.memberId || me.member_id || null;
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+    if (!access.isHost) {
+      return res.status(403).json({ ok: false, error: 'not_party_host' });
+    }
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_party_item (
+          party_id,
+          label,
+          details,
+          kind,
+          qty_needed,
+          qty_unit,
+          created_by_member_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+        RETURNING *
+      `,
+      [partyId, label, details, kind, qtyNeeded, qtyUnit, createdByMemberId]
+    );
+
+    const item = serializePartyItem({ ...rows[0], qty_claimed: 0 });
+    item.claims = [];
+
+    return res.status(201).json({ ok: true, item });
+  } catch (err) {
+    console.error('[party:items:create]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_item_create_failed' });
+  }
+});
+
+router.post('/:partyId/items/:itemId/claims', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId, itemId } = req.params;
+  const qtyPromised = toNullableNumber(
+    req.body?.qtyPromised ?? req.body?.qty_promised ?? 1
+  );
+
+  if (!qtyPromised || qtyPromised <= 0) {
+    return res.status(422).json({ ok: false, error: 'qty_promised_required' });
+  }
+
+  const memberIdValue = me.memberId || me.member_id || me.handle || null;
+  if (!memberIdValue) {
+    return res.status(403).json({ ok: false, error: 'member_id_required' });
+  }
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+
+    const itemCheck = await pool.query(
+      `
+        SELECT party_item_id
+          FROM tt_party_item
+         WHERE party_id = $1
+           AND party_item_id = $2::bigint
+         LIMIT 1
+      `,
+      [partyId, itemId]
+    );
+
+    if (!itemCheck.rowCount) {
+      return res.status(404).json({ ok: false, error: 'party_item_not_found' });
+    }
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_party_item_claim (
+          party_item_id,
+          member_id,
+          qty_promised,
+          status
+        ) VALUES ($1::bigint,$2,$3,'promised')
+        RETURNING party_item_claim_id
+      `,
+      [itemId, memberIdValue, qtyPromised]
+    );
+
+    const claimRow = await fetchClaimById(rows[0].party_item_claim_id);
+    return res
+      .status(201)
+      .json({ ok: true, claim: serializePartyItemClaim(claimRow) });
+  } catch (err) {
+    console.error('[party:item_claim:create]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_item_claim_failed' });
+  }
+});
+
+router.patch('/items/claims/:claimId', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const claimId = String(req.params.claimId || '').trim();
+  if (!/^\d+$/.test(claimId)) {
+    return res.status(400).json({ ok: false, error: 'invalid_claim_id' });
+  }
+
+  const updates = [];
+  const values = [];
+  let paramIndex = 1;
+
+  const qtyPromised = toNullableNumber(
+    req.body?.qtyPromised ?? req.body?.qty_promised
+  );
+  if (qtyPromised != null) {
+    if (qtyPromised <= 0) {
+      return res.status(422).json({ ok: false, error: 'invalid_qty_promised' });
+    }
+    updates.push(`qty_promised = $${paramIndex++}`);
+    values.push(qtyPromised);
+  }
+
+  const qtyBrought = toNullableNumber(
+    req.body?.qtyBrought ?? req.body?.qty_brought
+  );
+  if (qtyBrought != null) {
+    if (qtyBrought < 0) {
+      return res.status(422).json({ ok: false, error: 'invalid_qty_brought' });
+    }
+    updates.push(`qty_brought = $${paramIndex++}`);
+    values.push(qtyBrought);
+  }
+
+  const statusRaw = String(req.body?.status || '').trim().toLowerCase();
+  if (statusRaw) {
+    if (!CLAIM_STATUSES.has(statusRaw)) {
+      return res.status(422).json({ ok: false, error: 'invalid_claim_status' });
+    }
+    updates.push(`status = $${paramIndex++}`);
+    values.push(statusRaw);
+    if (statusRaw === 'brought' && qtyBrought == null) {
+      updates.push('qty_brought = COALESCE(qty_brought, qty_promised)');
+    }
+  }
+
+  const hasThankYou =
+    Object.prototype.hasOwnProperty.call(req.body || {}, 'thankYouNote') ||
+    Object.prototype.hasOwnProperty.call(req.body || {}, 'thank_you_note');
+  let thankYouNote = null;
+  if (hasThankYou) {
+    thankYouNote = cleanText(
+      req.body?.thankYouNote ?? req.body?.thank_you_note,
+      1024
+    );
+  }
+
+  if (hasThankYou) {
+    const noteValue = thankYouNote || null;
+    updates.push(`thank_you_note = $${paramIndex++}`);
+    values.push(noteValue);
+    if (noteValue) {
+      updates.push('thanked_at = COALESCE(thanked_at, NOW())');
+    } else {
+      updates.push('thanked_at = NULL');
+    }
+  }
+
+  if (!updates.length) {
+    return res.status(422).json({ ok: false, error: 'no_updates_supplied' });
+  }
+
+  try {
+    const existing = await fetchClaimById(claimId);
+    if (!existing) {
+      return res.status(404).json({ ok: false, error: 'claim_not_found' });
+    }
+
+    const party = await fetchPartyById(existing.party_id);
+    if (!party) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+
+    const isHost = equalsIgnoreCase(party.host_handle, me.handle);
+    const memberIdValue = me.memberId || me.member_id || me.handle || null;
+    const isOwner = memberIdValue
+      ? equalsIgnoreCase(memberIdValue, existing.member_id)
+      : false;
+
+    if (!isHost && !isOwner) {
+      return res.status(403).json({ ok: false, error: 'not_allowed' });
+    }
+    if (hasThankYou && !isHost) {
+      return res.status(403).json({ ok: false, error: 'host_only' });
+    }
+
+    values.push(claimId);
+    const { rows } = await pool.query(
+      `
+        UPDATE tt_party_item_claim
+           SET ${updates.join(', ')}
+         WHERE party_item_claim_id = $${paramIndex}::bigint
+         RETURNING party_item_claim_id
+      `,
+      values
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'claim_not_found' });
+    }
+
+    const updated = await fetchClaimById(rows[0].party_item_claim_id);
+    return res.json({
+      ok: true,
+      claim: serializePartyItemClaim(updated),
+    });
+  } catch (err) {
+    console.error('[party:item_claim:update]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_item_claim_update_failed' });
+  }
+});
+
+router.get('/:partyId/notes', async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+
+    const { rows } = await pool.query(
+      `
+        SELECT n.*,
+               from_q.handle AS from_handle,
+               from_q.color_hex AS from_hue,
+               to_q.handle   AS to_handle,
+               to_q.color_hex AS to_hue
+          FROM tt_party_note n
+          LEFT JOIN ff_quickhitter from_q ON from_q.member_id = n.from_member_id
+          LEFT JOIN ff_quickhitter to_q   ON to_q.member_id   = n.to_member_id
+         WHERE n.party_id = $1
+         ORDER BY n.created_at ASC
+      `,
+      [partyId]
+    );
+
+    return res.json({
+      ok: true,
+      notes: rows.map(serializePartyNote),
+    });
+  } catch (err) {
+    console.error('[party:notes:list]', err);
+    return res.status(500).json({ ok: false, error: 'party_notes_failed' });
+  }
+});
+
+router.post('/:partyId/notes', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  const bodyText = cleanText(req.body?.body, 2048);
+
+  if (!bodyText) {
+    return res.status(422).json({ ok: false, error: 'note_body_required' });
+  }
+
+  const kindRaw = String(req.body?.kind || '').trim().toLowerCase();
+  const kind = NOTE_KINDS.has(kindRaw) ? kindRaw : 'note';
+  const fromMemberId = me.memberId || me.member_id || me.handle || null;
+  if (!fromMemberId) {
+    return res.status(403).json({ ok: false, error: 'member_id_required' });
+  }
+
+  const toMemberIdRaw =
+    req.body?.toMemberId ?? req.body?.to_member_id ?? null;
+  const toMemberId = cleanText(toMemberIdRaw, 128) || null;
+  const relatedItemRaw =
+    req.body?.relatedItemId ?? req.body?.related_item_id ?? null;
+  const relatedItemId =
+    relatedItemRaw != null && relatedItemRaw !== ''
+      ? String(relatedItemRaw).trim()
+      : null;
+  if (relatedItemId != null && !/^\d+$/.test(relatedItemId)) {
+    return res.status(422).json({ ok: false, error: 'invalid_related_item' });
+  }
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+
+    if (relatedItemId != null) {
+      const itemCheck = await pool.query(
+        `
+          SELECT party_item_id
+            FROM tt_party_item
+           WHERE party_id = $1
+             AND party_item_id = $2::bigint
+           LIMIT 1
+        `,
+        [partyId, relatedItemId]
+      );
+      if (!itemCheck.rowCount) {
+        return res
+          .status(404)
+          .json({ ok: false, error: 'party_item_not_found' });
+      }
+    }
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_party_note (
+          party_id,
+          from_member_id,
+          to_member_id,
+          related_item_id,
+          kind,
+          body
+        ) VALUES ($1,$2,$3,$4::bigint,$5,$6)
+        RETURNING party_note_id
+      `,
+      [partyId, fromMemberId, toMemberId, relatedItemId, kind, bodyText]
+    );
+
+    const noteRow = await fetchNoteById(rows[0].party_note_id);
+
+    return res.status(201).json({
+      ok: true,
+      note: serializePartyNote(noteRow),
+    });
+  } catch (err) {
+    console.error('[party:notes:create]', err);
+    return res.status(500).json({ ok: false, error: 'party_note_create_failed' });
   }
 });
 
