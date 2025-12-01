@@ -770,9 +770,10 @@ router.post('/:partyId/cut', async (req, res) => {
 
     res.json({
       party,
+      membership: serializeMembership(req.membership),
       hype,
       feed: live,
-      recap
+      recap,
     });
   } catch (err) {
     next(err);
