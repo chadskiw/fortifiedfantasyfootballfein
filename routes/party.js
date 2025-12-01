@@ -10,6 +10,11 @@ const HANDLE_RE = /^[a-z0-9_.-]{3,32}$/i;
 const ITEM_KINDS = new Set(['supply', 'task', 'ride', 'cash', 'other']);
 const CLAIM_STATUSES = new Set(['promised', 'brought', 'cancelled']);
 const NOTE_KINDS = new Set(['note', 'thank_you', 'request', 'announcement']);
+const DEFAULT_VIBE = Object.freeze({
+  hue: 330,
+  saturation: 72,
+  brightness: 55,
+});
 const REACTION_TYPES = new Set(['heart', 'fire']);
 const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
 
@@ -390,6 +395,9 @@ function serializeParty(row) {
     cord_cut_at: row.cord_cut_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    vibe_hue: toNullableNumber(row.vibe_hue),
+    vibe_saturation: toNullableNumber(row.vibe_saturation),
+    vibe_brightness: toNullableNumber(row.vibe_brightness),
   };
 }
 
@@ -420,10 +428,30 @@ function toNullableNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+function clampNumber(value, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return Number.isFinite(min) ? min : Number.isFinite(max) ? max : 0;
+  if (Number.isFinite(min) && num < min) return min;
+  if (Number.isFinite(max) && num > max) return max;
+  return num;
+}
+
 function toNumeric(value) {
   if (value === null || value === undefined) return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function normalizeVibeValue(input, fallback, min, max) {
+  if (Number.isFinite(Number(input))) {
+    return clampNumber(input, min, max);
+  }
+  if (Number.isFinite(Number(fallback))) {
+    return clampNumber(fallback, min, max);
+  }
+  if (Number.isFinite(min)) return min;
+  if (Number.isFinite(max)) return max;
+  return DEFAULT_VIBE.hue;
 }
 
 function degToRad(v) {
@@ -1415,6 +1443,78 @@ router.post('/:partyId/notes', jsonParser, async (req, res) => {
   } catch (err) {
     console.error('[party:notes:create]', err);
     return res.status(500).json({ ok: false, error: 'party_note_create_failed' });
+  }
+});
+
+router.patch('/:partyId/vibe', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access.ok) {
+      return res.status(access.status).json({ ok: false, error: access.error });
+    }
+    if (!access.isHost) {
+      return res.status(403).json({ ok: false, error: 'not_party_host' });
+    }
+
+    const party = access.party || (await fetchPartyById(partyId));
+    if (!party) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+
+    const hue = normalizeVibeValue(
+      req.body?.hue ?? req.body?.vibeHue,
+      party.vibe_hue ?? DEFAULT_VIBE.hue,
+      0,
+      360
+    );
+    const saturation = normalizeVibeValue(
+      req.body?.saturation ?? req.body?.vibeSaturation,
+      party.vibe_saturation ?? DEFAULT_VIBE.saturation,
+      10,
+      100
+    );
+    const brightness = normalizeVibeValue(
+      req.body?.brightness ?? req.body?.vibeBrightness,
+      party.vibe_brightness ?? DEFAULT_VIBE.brightness,
+      5,
+      95
+    );
+
+    const { rows } = await pool.query(
+      `
+        UPDATE tt_party
+           SET vibe_hue        = $2,
+               vibe_saturation = $3,
+               vibe_brightness = $4,
+               updated_at      = NOW()
+         WHERE party_id = $1
+         RETURNING *
+      `,
+      [partyId, hue, saturation, brightness]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+
+    const updatedParty = serializeParty(rows[0]);
+    return res.json({
+      ok: true,
+      party: updatedParty,
+      vibe: {
+        hue: updatedParty.vibe_hue,
+        saturation: updatedParty.vibe_saturation,
+        brightness: updatedParty.vibe_brightness,
+      },
+    });
+  } catch (err) {
+    console.error('[party:vibe:update]', err);
+    return res.status(500).json({ ok: false, error: 'party_vibe_update_failed' });
   }
 });
 
