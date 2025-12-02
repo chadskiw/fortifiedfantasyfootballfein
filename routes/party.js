@@ -3029,7 +3029,7 @@ async function redeemTicketAndCheckin(db, partyId, opts) {
     arrived_at: updated.arrived_at,
   };
 }
-router.post('/api/party/:partyId/redeem', requireAuth, async (req, res) => {
+router.post('/api/party/:partyId/redeem', requirePartyAccess, async (req, res) => {
   const partyId = req.params.partyId;
   const actorMemberId = req.user.member_id; // who is calling this endpoint
   const { inviteToken, guestMemberId, shareId } = req.body || {};
