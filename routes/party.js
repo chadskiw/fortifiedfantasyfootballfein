@@ -18,7 +18,7 @@ const DEFAULT_VIBE = Object.freeze({
 });
 const REACTION_TYPES = new Set(['heart', 'fire']);
 const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
-const PARTY_TYPES = new Set(['public', 'private', 'arrival', 'ticket']);
+const PARTY_TYPES = new Set(['public', 'private', 'arrival', 'ticket', 'business']);
 const LOCATION_REQUIRED_PARTY_TYPES = new Set(['arrival', 'ticket']);
 const CHECKIN_VIA_VALUES = new Set([
   'manual',
@@ -1501,9 +1501,14 @@ router.get('/my', async (req, res) => {
       });
     }
 
+    const partiesPayload = Array.from(byParty.values()).filter((entry) => {
+      const type = normalizePartyType(entry.party);
+      return type !== 'business';
+    });
+
     return res.json({
       ok: true,
-      parties: Array.from(byParty.values()),
+      parties: partiesPayload,
     });
   } catch (err) {
     console.error('[party:my]', err);
