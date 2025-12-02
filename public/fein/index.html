@@ -95,15 +95,30 @@
       border-radius: inherit;
       padding: 3px;
       background: linear-gradient(135deg, var(--glow-cyan), var(--glow-magenta));
-      -webkit-mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
       z-index: 0;
+    }
+
+    @supports (mask-composite: exclude) or (-webkit-mask-composite: xor) {
+      .neon-frame::before,
+      .neon-frame::after {
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+      }
+    }
+
+    @supports not ((mask-composite: exclude) or (-webkit-mask-composite: xor)) {
+      .neon-frame::before,
+      .neon-frame::after {
+        background: none;
+        border: 3px solid;
+        border-image: linear-gradient(135deg, var(--glow-cyan), var(--glow-magenta)) 1;
+      }
     }
 
     .neon-frame::after {
@@ -153,8 +168,14 @@
       background: linear-gradient(90deg, var(--glow-cyan), #70d7ff, var(--glow-purple), var(--glow-magenta));
       -webkit-background-clip: text;
       background-clip: text;
-      color: transparent;
+      color: var(--glow-cyan);
       animation: glowShift 8s ease-in-out infinite;
+    }
+
+    @supports (background-clip: text) or (-webkit-background-clip: text) {
+      .brand {
+        color: transparent;
+      }
     }
 
     @keyframes glowShift {
