@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"UTF-8\" />
+  <meta charset="UTF-8" />
   <title>s1c.live</title>
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
       color-scheme: dark;
@@ -21,7 +21,7 @@
     body {
       min-height: 100vh;
       margin: 0;
-      font-family: 'Space Grotesk', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: "Space Grotesk", "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       background: radial-gradient(circle at 18% 18%, #0c1032 0%, #040211 42%, #010109 80%);
       color: #f5f7ff;
       display: grid;
@@ -35,7 +35,7 @@
       pointer-events: none;
       opacity: 0.22;
       mix-blend-mode: screen;
-      background-image: url('data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'160\' height=\'160\' viewBox=\'0 0 160 160\'%3E%3Cfilter id=\'n\'%3E%3CfeTurbulence type=\'fractalNoise\' baseFrequency=\'0.85\' numOctaves=\'3\'/%3E%3C/filter%3E%3Crect width=\'160\' height=\'160\' filter=\'url(%23n)\' opacity=\'0.45\'/%3E%3C/svg%3E');
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.45'/%3E%3C/svg%3E");
       animation: pulseNoise 6s ease-in-out infinite alternate;
     }
 
@@ -89,7 +89,7 @@
 
     .neon-frame::before,
     .neon-frame::after {
-      content: '';
+      content: "";
       position: absolute;
       inset: 0;
       border-radius: inherit;
@@ -123,7 +123,7 @@
     }
 
     .neon-core::before {
-      content: '';
+      content: "";
       position: absolute;
       inset: 14%;
       border-radius: 50%;
@@ -206,17 +206,17 @@
   </style>
 </head>
 <body>
-  <div class=\"bg-rings\"></div>
-  <div class=\"bg-noise\"></div>
+  <div class="bg-rings"></div>
+  <div class="bg-noise"></div>
 
   <main>
-    <span class=\"ambient-orb ambient-orb--left\"></span>
-    <span class=\"ambient-orb ambient-orb--right\"></span>
+    <span class="ambient-orb ambient-orb--left"></span>
+    <span class="ambient-orb ambient-orb--right"></span>
 
-    <div class=\"neon-frame\">
-      <div class=\"neon-core\">
-        <div class=\"brand\">
-          s1c<span class=\"dot\"></span>live
+    <div class="neon-frame">
+      <div class="neon-core">
+        <div class="brand">
+          s1c<span class="dot"></span>live
         </div>
       </div>
     </div>
