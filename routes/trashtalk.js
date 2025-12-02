@@ -565,6 +565,60 @@ const sql = `
   }
 });
 
+router.get('/businesses', async (req, res) => {
+  try {
+    const lat = parseFloat(req.query.lat);
+    const lon = parseFloat(req.query.lon);
+    let radiusMeters = parseFloat(req.query.radiusMeters);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: 'lat and lon query params required' });
+    }
+
+    if (!Number.isFinite(radiusMeters) || radiusMeters <= 0) {
+      radiusMeters = 5000;
+    }
+    radiusMeters = Math.min(Math.max(radiusMeters, 250), 20000);
+
+    const distanceExpr = haversineSql('$1', '$2', 'center_lat', 'center_lon');
+
+    const { rows } = await pool.query(
+      `
+        SELECT
+          party_id,
+          name,
+          host_handle,
+          center_lat,
+          center_lon,
+          radius_m,
+          starts_at,
+          ends_at,
+          state,
+          ${distanceExpr} AS distance_m
+        FROM tt_party
+        WHERE party_type = 'business'
+          AND state <> 'cut'
+          AND center_lat IS NOT NULL
+          AND center_lon IS NOT NULL
+          AND ${distanceExpr} <= $3
+        ORDER BY distance_m ASC
+        LIMIT 200
+      `,
+      [lat, lon, radiusMeters]
+    );
+
+    return res.json({
+      lat,
+      lon,
+      radiusMeters,
+      parties: rows,
+    });
+  } catch (err) {
+    console.error('TrashTalk businesses error', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 router.get('/debug/latest-object', async (req, res) => {
   try {
