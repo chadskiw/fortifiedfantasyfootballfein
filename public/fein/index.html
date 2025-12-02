@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>s1c.live</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background: radial-gradient(circle at top left, #05081a 0%, #020308 60%, #000000 100%);
+      height: 100vh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+    #logo-container {
+      position: fixed;
+      inset: 0;
+    }
+    #logo {
+      position: absolute;
+      width: 35vmin;         /* scales with viewport, stays responsive */
+      max-width: 420px;
+      height: auto;
+      filter: drop-shadow(0 0 16px rgba(0, 255, 255, 0.6))
+              drop-shadow(0 0 32px rgba(255, 0, 255, 0.4));
+      will-change: transform;
+    }
+
+    /* Optional: subtle fade-in on load */
+    body.ready #logo {
+      animation: fadeIn 1.2s ease-out forwards;
+      opacity: 0;
+    }
+    @keyframes fadeIn {
+      to {
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="logo-container">
+    <img
+      id="logo"
+      src="https://img.fortifiedfantasy.com/assets/s1clive.png"
+      alt="s1c.live"
+    />
+  </div>
+
+  <!-- Later you can drop in your audio, e.g.
+  <audio id="bg-music" src="your-track.mp3" loop autoplay></audio>
+  -->
+
+  <script>
+    (function () {
+      const logo = document.getElementById("logo");
+      let x = 60;
+      let y = 60;
+      let vx = 0.30; // pixels per ms, horizontal speed
+      let vy = 0.22; // pixels per ms, vertical speed
+      let lastTime = null;
+
+      function clampPosition() {
+        const maxX = window.innerWidth - logo.offsetWidth;
+        const maxY = window.innerHeight - logo.offsetHeight;
+
+        if (x > maxX) x = maxX;
+        if (y > maxY) y = maxY;
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+      }
+
+      function step(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const dt = timestamp - lastTime;
+        lastTime = timestamp;
+
+        const maxX = window.innerWidth - logo.offsetWidth;
+        const maxY = window.innerHeight - logo.offsetHeight;
+
+        x += vx * dt;
+        y += vy * dt;
+
+        if (x <= 0) {
+          x = 0;
+          vx = Math.abs(vx);
+        } else if (x >= maxX) {
+          x = maxX;
+          vx = -Math.abs(vx);
+        }
+
+        if (y <= 0) {
+          y = 0;
+          vy = Math.abs(vy);
+        } else if (y >= maxY) {
+          y = maxY;
+          vy = -Math.abs(vy);
+        }
+
+        logo.style.transform = `translate(${x}px, ${y}px)`;
+        requestAnimationFrame(step);
+      }
+
+      function start() {
+        document.body.classList.add("ready");
+        clampPosition();
+        requestAnimationFrame(step);
+      }
+
+      if (logo.complete) {
+        // image already cached
+        start();
+      } else {
+        logo.addEventListener("load", start, { once: true });
+      }
+
+      window.addEventListener("resize", clampPosition);
+    })();
+  </script>
+</body>
+</html>
