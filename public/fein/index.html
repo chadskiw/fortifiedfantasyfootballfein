@@ -7,263 +7,185 @@
   <style>
     :root {
       color-scheme: dark;
-      --ink: #02030a;
-      --glow-cyan: #45f4ff;
-      --glow-magenta: #ff3fd0;
-      --glow-purple: #8c4bff;
-      --frame-width: clamp(270px, 55vmin, 620px);
+      --bg-deep: #03020a;
+      --glow-a: #4cf2ff;
+      --glow-b: #ff49d0;
     }
 
-    *,
-    *::before,
-    *::after {
+    * {
       box-sizing: border-box;
+      margin: 0;
+      padding: 0;
     }
 
     body {
       min-height: 100vh;
-      margin: 0;
-      font-family: "Space Grotesk", "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      background: radial-gradient(circle at 20% 20%, #0d1027 0%, #04030f 42%, #010109 80%);
-      color: #f5f7ff;
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-    }
-
-    .bg-noise {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.25;
-      mix-blend-mode: screen;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
-      animation: pulseNoise 6s ease-in-out infinite alternate;
-    }
-
-    @keyframes pulseNoise {
-      from { opacity: 0.2; }
-      to { opacity: 0.32; }
-    }
-
-    .bg-rings {
-      position: fixed;
-      width: 140vmax;
-      height: 140vmax;
-      border-radius: 50%;
-      background: conic-gradient(
-        from 120deg,
-        rgba(69, 244, 255, 0.08),
-        rgba(255, 63, 208, 0.05),
-        rgba(140, 75, 255, 0.07),
-        rgba(69, 244, 255, 0.06)
-      );
-      filter: blur(40px);
-      animation: spin 40s linear infinite;
-      opacity: 0.85;
-    }
-
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-
-    main {
-      position: relative;
-      width: min(90vw, 720px);
-      height: min(90vh, 520px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 3rem;
-    }
-
-    .neon-frame {
-      position: relative;
-      width: var(--frame-width);
-      aspect-ratio: 4 / 3;
-      border-radius: 36px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: radial-gradient(circle at top, rgba(69, 244, 255, 0.18), transparent 45%);
-    }
-
-    .neon-frame::before,
-    .neon-frame::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      padding: 3px;
-      background: linear-gradient(135deg, var(--glow-cyan), var(--glow-magenta));
-      -webkit-mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
-      z-index: 0;
-    }
-
-    .neon-frame::after {
-      filter: blur(30px);
-      opacity: 0.8;
-    }
-
-    .neon-core {
-      position: relative;
-      width: 100%;
-      height: 100%;
-      border-radius: inherit;
-      background: radial-gradient(circle at 20% 40%, rgba(69, 244, 255, 0.12), rgba(1, 2, 15, 0.88));
-      box-shadow:
-        inset 0 0 45px rgba(5, 8, 25, 0.95),
-        0 25px 55px rgba(5, 0, 25, 0.55);
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-    }
-
-    .neon-core::before {
-      content: "";
-      position: absolute;
-      inset: 15%;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(69, 244, 255, 0.2), transparent 70%);
-      filter: blur(30px);
-      opacity: 0.7;
-      animation: pulse 5s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { transform: scale(0.95); opacity: 0.45; }
-      50% { transform: scale(1.05); opacity: 0.8; }
-    }
-
-    .brand {
-      position: relative;
-      font-size: clamp(3rem, 11vw, 5.5rem);
-      font-weight: 600;
-      letter-spacing: 0.04em;
+      font-family: 'Space Grotesk', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: radial-gradient(circle at 20% 30%, rgba(76, 242, 255, 0.18), transparent 55%),
+                  radial-gradient(circle at 75% 15%, rgba(255, 73, 208, 0.18), transparent 50%),
+                  var(--bg-deep);
       color: #fff;
-      text-shadow:
-        0 0 15px rgba(69, 244, 255, 0.9),
-        0 0 35px rgba(140, 75, 255, 0.85),
-        0 0 60px rgba(255, 63, 208, 0.75);
-      background: linear-gradient(90deg, var(--glow-cyan), #70d7ff, var(--glow-purple), var(--glow-magenta));
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
-      animation: glowShift 8s ease-in-out infinite;
+      overflow: hidden;
     }
 
-    @keyframes glowShift {
-      0% { filter: drop-shadow(0 0 18px rgba(69, 244, 255, 0.9)); }
-      50% { filter: drop-shadow(0 0 22px rgba(255, 63, 208, 0.85)); }
-      100% { filter: drop-shadow(0 0 18px rgba(69, 244, 255, 0.9)); }
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+      background-size: 100% 3px;
+      opacity: 0.08;
+      mix-blend-mode: screen;
     }
 
-    .brand .dot {
-      display: inline-block;
-      width: 0.22em;
-      height: 0.22em;
-      border-radius: 50%;
-      background: currentColor;
-      margin: 0 0.15em;
-      box-shadow: 0 0 16px currentColor;
-    }
-
-    .ambient-orb {
-      position: absolute;
-      width: 22vmax;
-      height: 22vmax;
-      border-radius: 50%;
-      filter: blur(50px);
-      opacity: 0.45;
+    .stars {
+      position: fixed;
+      inset: -20%;
+      background-image: radial-gradient(circle, rgba(255,255,255,0.12) 1px, transparent 1px);
+      background-size: 160px 160px;
+      animation: driftStars 40s linear infinite;
+      opacity: 0.4;
       pointer-events: none;
     }
 
-    .ambient-orb--left {
-      background: radial-gradient(circle, rgba(69, 244, 255, 0.8), transparent 70%);
-      top: 10%;
-      left: -5%;
-      animation: driftLeft 16s ease-in-out infinite alternate;
+    @keyframes driftStars {
+      from { transform: translate3d(0,0,0); }
+      to { transform: translate3d(-80px,-120px,0); }
     }
 
-    .ambient-orb--right {
-      background: radial-gradient(circle, rgba(255, 63, 208, 0.9), transparent 70%);
-      bottom: 5%;
-      right: -8%;
-      animation: driftRight 18s ease-in-out infinite alternate;
+    .dvd-stage {
+      position: fixed;
+      inset: clamp(20px, 4vmin, 64px);
+      border-radius: clamp(12px, 4vmin, 32px);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 0 60px rgba(5,0,20,0.45), inset 0 0 45px rgba(0,0,0,0.45);
+      overflow: hidden;
+      backdrop-filter: blur(40px);
+      background: rgba(3,2,12,0.68);
     }
 
-    @keyframes driftLeft {
-      from { transform: translate(-10%, -6%) scale(0.9); }
-      to { transform: translate(6%, 12%) scale(1.05); }
+    .dvd-stage::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(76,242,255,0.2), rgba(255,73,208,0.16));
+      filter: blur(120px);
+      opacity: 0.45;
     }
 
-    @keyframes driftRight {
-      from { transform: translate(8%, -4%) scale(1); }
-      to { transform: translate(-6%, 10%) scale(0.92); }
+    .dvd-logo {
+      position: absolute;
+      width: clamp(140px, 24vmin, 320px);
+      height: clamp(110px, 18vmin, 240px);
+      display: grid;
+      place-items: center;
+      border-radius: 30px;
+      background: rgba(6,7,18,0.75);
+      box-shadow: 0 20px 45px rgba(5,0,20,0.4), inset 0 0 30px rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+
+    .dvd-logo img {
+      width: 90%;
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 0 12px rgba(255,255,255,0.35)) drop-shadow(0 0 24px rgba(76,242,255,0.5));
+    }
+
+    .dvd-glow {
+      position: absolute;
+      inset: -15%;
+      border-radius: 40px;
+      background: linear-gradient(135deg, var(--glow-a), var(--glow-b));
+      opacity: 0.45;
+      filter: blur(55px);
+      z-index: -1;
     }
 
     footer {
       position: fixed;
-      bottom: 2vh;
+      bottom: 1.5rem;
       width: 100%;
       text-align: center;
-      font-size: 0.8rem;
-      letter-spacing: 0.2em;
+      font-size: 0.75rem;
+      letter-spacing: 0.35em;
       text-transform: uppercase;
-      color: rgba(255, 255, 255, 0.6);
-      opacity: 0.6;
+      color: rgba(255,255,255,0.45);
     }
   </style>
 </head>
 <body>
-  <div class="bg-rings"></div>
-  <div class="bg-noise"></div>
+  <div class="scanlines"></div>
+  <div class="stars"></div>
 
-  <main>
-    <span class="ambient-orb ambient-orb--left"></span>
-    <span class="ambient-orb ambient-orb--right"></span>
-
-    <div class="neon-frame">
-      <div class="neon-core">
-        <div class="brand">
-          s1c<span class="dot"></span>live
-        </div>
-      </div>
+  <div class="dvd-stage" id="dvdStage">
+    <div class="dvd-logo" id="dvdLogo">
+      <span class="dvd-glow" id="dvdGlow"></span>
+      <img src="https://img.fortifiedfantasy.com/assets/s1clive.png" alt="s1c.live" />
     </div>
-  </main>
+  </div>
 
-  <!-- Drop in your Dolby-powered audio when you're ready -->
-  <!--
-  <audio id="bg-track" src="path-to-track.mp3" autoplay loop></audio>
-  -->
+  <footer>press play ? find the signal</footer>
 
   <script>
-    const brand = document.querySelector('.brand');
-    const frame = document.querySelector('.neon-core');
+    (function bounceLogo(){
+      const logo = document.getElementById('dvdLogo');
+      const glow = document.getElementById('dvdGlow');
+      const stage = document.getElementById('dvdStage');
+      const combos = [
+        ['#4cf2ff', '#ff49d0'],
+        ['#4cffb6', '#4c8cff'],
+        ['#ffd24c', '#ff49d0'],
+        ['#7e5dff', '#4cf2ff']
+      ];
+      let x = 120;
+      let y = 150;
+      let vx = 0.22;
+      let vy = 0.18;
+      let last = performance.now();
 
-    function magnetize(event) {
-      const rect = frame.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const moveX = (x - rect.width / 2) / 20;
-      const moveY = (y - rect.height / 2) / 20;
+      function paintGlow([a,b]){
+        glow.style.background = linear-gradient(135deg, , );
+        document.documentElement.style.setProperty('--glow-a', a);
+        document.documentElement.style.setProperty('--glow-b', b);
+      }
 
-      brand.style.transform = `translate(${moveX}px, ${moveY}px)`;
-      frame.style.setProperty('--shadow-x', `${-moveX / 2}px`);
-      frame.style.setProperty('--shadow-y', `${-moveY / 2}px`);
-    }
+      paintGlow(combos[0]);
 
-    function resetMagnet() {
-      brand.style.transform = 'translate(0, 0)';
-    }
+      function loop(now){
+        const dt = now - last;
+        last = now;
+        const maxX = stage.clientWidth - logo.offsetWidth;
+        const maxY = stage.clientHeight - logo.offsetHeight;
+        x += vx * dt;
+        y += vy * dt;
+        let bounced = false;
+        if (x <= 0 || x >= maxX){
+          vx = -vx;
+          x = Math.max(0, Math.min(x, maxX));
+          bounced = true;
+        }
+        if (y <= 0 || y >= maxY){
+          vy = -vy;
+          y = Math.max(0, Math.min(y, maxY));
+          bounced = true;
+        }
+        logo.style.transform = 	ranslate(px, px);
+        if (bounced){
+          paintGlow(combos[Math.floor(Math.random()*combos.length)]);
+        }
+        requestAnimationFrame(loop);
+      }
 
-    frame.addEventListener('pointermove', magnetize);
-    frame.addEventListener('pointerleave', resetMagnet);
+      new ResizeObserver(() => {
+        const maxX = stage.clientWidth - logo.offsetWidth;
+        const maxY = stage.clientHeight - logo.offsetHeight;
+        x = Math.min(Math.max(0, x), maxX);
+        y = Math.min(Math.max(0, y), maxY);
+      }).observe(stage);
+
+      requestAnimationFrame(loop);
+    })();
   </script>
 </body>
 </html>
