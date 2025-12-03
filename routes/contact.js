@@ -345,21 +345,23 @@ router.get('/requests', async (req, res) => {
   try {
     const rows = await fetchPendingContactRequests(targetId);
 
-    return res.json({
-      ok: true,
-      requests: rows.map((row) => ({
-        request_id: row.request_id,
-        requester_member_id: row.requester_member_id,
-        requester_handle: row.requester_handle || row.requester_member_id,
-        requester_name: row.requester_name || row.requester_handle || row.requester_member_id,
-        channel_type: row.channel_type,
-        message: row.message || '',
-        status: row.status,
-        guardian_reason: row.guardian_reason || null,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        ...parseContactRequestMessage(row.message),
-      })),
+return res.json({
+  ok: true,
+  requests: rows.map((row) => ({
+    request_id: row.request_id,
+    requester_member_id: row.requester_member_id,
+    requester_handle: row.requester_handle || row.requester_member_id,
+    requester_name:
+      row.requester_name || row.requester_handle || row.requester_member_id,
+    channel_type: row.channel_type,
+    message: row.message || '',
+    status: row.status,
+    guardian_reason: row.guardian_reason || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    viewed_at: row.viewed_at,
+    ...parseContactRequestMessage(row.message),
+  })),
     });
   } catch (err) {
     console.error('contact.requests error', err);
@@ -374,27 +376,28 @@ async function fetchPendingContactRequests(targetId) {
     ? 'LEFT JOIN ff_member fm ON fm.member_id = r.requester_member_id'
     : '';
 
-  const sql = `
-    SELECT
-      r.request_id,
-      r.requester_member_id,
-      r.target_member_id,
-      r.channel_type,
-      r.message,
-      r.status,
-      r.guardian_reason,
-      r.created_at,
-      r.updated_at,
-      r.message,
-      ${selectHandle},
-      ${selectName}
-    FROM tt_contact_request r
-    ${joinClause}
-    WHERE r.target_member_id = $1
-      AND r.status = 'pending'
-    ORDER BY r.created_at DESC
-    LIMIT 100
-  `;
+const sql = `
+  SELECT
+    r.request_id,
+    r.requester_member_id,
+    r.target_member_id,
+    r.channel_type,
+    r.message,
+    r.status,
+    r.guardian_reason,
+    r.created_at,
+    r.updated_at,
+    r.viewed_at,
+    ${selectHandle},
+    ${selectName}
+  FROM tt_contact_request r
+  ${joinClause}
+  WHERE r.target_member_id = $1
+    AND r.status = 'pending'
+  ORDER BY r.created_at DESC
+  LIMIT 100
+`;
+
 
   try {
     const { rows } = await pool.query(sql, [targetId]);
@@ -416,5 +419,43 @@ async function fetchPendingContactRequests(targetId) {
     throw err;
   }
 }
+router.post('/request/:requestId/viewed', async (req, res) => {
+  const viewerId = Bouncer.getViewerId(req);
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+
+  const requestId = req.params.requestId;
+  if (!requestId) {
+    return res.status(400).json({ error: 'missing_request_id' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        UPDATE tt_contact_request
+        SET viewed_at = COALESCE(viewed_at, NOW()),
+            updated_at = NOW()
+        WHERE request_id = $1
+          AND target_member_id = $2
+        RETURNING request_id, viewed_at
+      `,
+      [requestId, viewerId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'request_not_found' });
+    }
+
+    return res.json({
+      ok: true,
+      request_id: rows[0].request_id,
+      viewed_at: rows[0].viewed_at,
+    });
+  } catch (err) {
+    console.error('contact.request_viewed error', err);
+    return res.status(500).json({ error: 'mark_viewed_failed' });
+  }
+});
 
 module.exports = router;
