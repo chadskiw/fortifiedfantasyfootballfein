@@ -234,26 +234,63 @@ router.post('/me', async (req, res) => {
       });
     }
 
-    const { rows } = await client.query(
-      `
-        SELECT *
-        FROM tt_member_contact_channel
-        WHERE member_id = $1
-          AND (is_active IS NULL OR is_active = TRUE)
-        ORDER BY
-          is_primary DESC NULLS LAST,
-          channel_type ASC
-      `,
-      [targetId]
-    );
+const { rows } = await client.query(
+  `
+    SELECT
+      phone,
+      phone_is_verified,
+      email,
+      email_is_verified
+    FROM ff_quickhitter
+    WHERE member_id = $1
+    ORDER BY created_at DESC
+    LIMIT 1
+  `,
+  [targetId]
+);
 
-    const channels = (rows || [])
-      .map(normalizeChannelRow)
-      .filter(Boolean);
+const row = rows && rows[0];
 
-    if (!channels.length) {
-      return res.status(404).json({ error: 'no_contact_channels' });
-    }
+const channels = [];
+
+if (row && row.phone) {
+  channels.push({
+    channel_id: null, // no per-channel row in ff_quickhitter
+    channel_type: 'phone_text',
+    value: row.phone,
+    display_label: 'Text',
+    is_primary: true,
+    verified_at: null,
+    is_verified: row.phone_is_verified === true,
+  });
+
+  channels.push({
+    channel_id: null,
+    channel_type: 'phone_call',
+    value: row.phone,
+    display_label: 'Call',
+    is_primary: false,
+    verified_at: null,
+    is_verified: row.phone_is_verified === true,
+  });
+}
+
+if (row && row.email) {
+  channels.push({
+    channel_id: null,
+    channel_type: 'email',
+    value: row.email,
+    display_label: 'Email',
+    is_primary: !row.phone, // primary if no phone
+    verified_at: null,
+    is_verified: row.email_is_verified === true,
+  });
+}
+
+if (!channels.length) {
+  return res.status(404).json({ error: 'no_contact_channels' });
+}
+
 
     await Promise.all(
       channels
