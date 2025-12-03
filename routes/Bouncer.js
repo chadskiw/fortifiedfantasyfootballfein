@@ -3,7 +3,7 @@
 // Central access-control logic for s1c / TrashTalk.
 // Controls who can see whose page and who can send contact requests.
 
-const rawDb = require('../db');
+const rawDb = require('../src/db');
 const pool = rawDb.pool || rawDb;
 
 // -----------------------------
