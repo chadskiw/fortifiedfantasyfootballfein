@@ -5,6 +5,60 @@ const Bouncer = require('./Bouncer');
 const router = express.Router();
 let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
+const CONTACT_CHANNEL_TYPES = new Set(['phone_call', 'phone_text', 'email']);
+
+function normalizeChannelValue(row) {
+  if (!row) return null;
+  return row.value || row.channel_value || row.channelValue || null;
+}
+
+async function fetchMemberContactValue(memberId, channelType) {
+  if (!memberId || !channelType) return null;
+  if (!CONTACT_CHANNEL_TYPES.has(channelType)) return null;
+
+  const { rows } = await pool.query(
+    `
+      SELECT value, channel_value
+      FROM tt_member_contact_channel
+      WHERE member_id = $1
+        AND channel_type = $2
+        AND (is_active IS NULL OR is_active = TRUE)
+      ORDER BY
+        is_primary DESC NULLS LAST,
+        created_at DESC NULLS LAST
+      LIMIT 1
+    `,
+    [memberId, channelType]
+  );
+
+  return normalizeChannelValue(rows[0]);
+}
+
+function buildContactRequestMessage({ contactValue, note }) {
+  const payload = {};
+  if (contactValue) payload.contact_value = contactValue;
+  if (note) payload.note = note;
+  if (!Object.keys(payload).length) return '';
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return note || '';
+  }
+}
+
+function parseContactRequestMessage(raw) {
+  if (!raw) return { note: '', contact_value: null };
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      note: typeof parsed.note === 'string' ? parsed.note : '',
+      contact_value:
+        typeof parsed.contact_value === 'string' ? parsed.contact_value : null,
+    };
+  } catch {
+    return { note: raw, contact_value: null };
+  }
+}
 
 function normalizeChannelRow(row) {
   if (!row) return null;
@@ -38,18 +92,38 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   }
 
   try {
+    const contactValue = await fetchMemberContactValue(
+      guard.requesterId,
+      guard.requestedChannelType
+    );
+    if (!contactValue) {
+      return res.status(400).json({ error: 'contact_value_missing' });
+    }
+
+    const note =
+      typeof req.body?.message === 'string'
+        ? req.body.message.trim().slice(0, 280)
+        : '';
+    const messagePayload = buildContactRequestMessage({ contactValue, note });
+
     const { rows } = await pool.query(
       `
         INSERT INTO tt_contact_request (
           requester_member_id,
           target_member_id,
           channel_type,
-          status
+          status,
+          message
         )
-        VALUES ($1, $2, $3, 'pending')
+        VALUES ($1, $2, $3, 'pending', $4)
         RETURNING request_id, status, created_at
       `,
-      [guard.requesterId, guard.targetId, guard.requestedChannelType]
+      [
+        guard.requesterId,
+        guard.targetId,
+        guard.requestedChannelType,
+        messagePayload || null,
+      ]
     );
 
     const payload = rows && rows[0]
@@ -211,6 +285,7 @@ router.get('/requests', async (req, res) => {
         guardian_reason: row.guardian_reason || null,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        ...parseContactRequestMessage(row.message),
       })),
     });
   } catch (err) {
@@ -237,6 +312,7 @@ async function fetchPendingContactRequests(targetId) {
       r.guardian_reason,
       r.created_at,
       r.updated_at,
+      r.message,
       ${selectHandle},
       ${selectName}
     FROM tt_contact_request r
