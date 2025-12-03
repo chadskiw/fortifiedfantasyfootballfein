@@ -23,6 +23,8 @@ const playerMeta = require('./routes/playerMeta'); // path to the file from the 
 const userLandingRoutes = require('./routes/userLanding');
 const partyLandingRoutes = require('./routes/partyLanding');
 const trashtalkUserRoutes = require('./routes/trashtalk-user');
+const specialsRouter = require('./routes/specials');
+
 
 // Routers (only require what you actually have in your repo)
 const espnLink          = require('./routes/espn/link');               // <-- new UI route (GET /api/espn/link, POST /api/espn/link/ingest)
@@ -36,6 +38,7 @@ const pool              = require('./src/db/pool');
 // app.js / index.js
 const trashtalkRouter = require('./routes/trashtalk');
 const partyRouter = require('./routes/party');
+const contactRouter = require('./routes/contact');
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
@@ -116,9 +119,12 @@ app.use(cookieParser());
 
 app.use('/api/trashtalk', trashtalkRouter);
 app.use('/api/party', partyRouter);
+app.use('/api/contact', contactRouter);
 app.use(userLandingRoutes);
 app.use(partyLandingRoutes);
 app.use(trashtalkUserRoutes);
+// ...
+app.use(specialsRouter);
 // === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
 function normalizeSwid(raw){
   try{

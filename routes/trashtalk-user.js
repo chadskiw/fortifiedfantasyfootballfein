@@ -1,9 +1,10 @@
 // routes/trashtalk-user.js (for example)
 const path = require('path');
 const express = require('express');
+const Bouncer = require('./Bouncer');
 const router = express.Router();
 
-router.get('/u/:memberId', (req, res) => {
+router.get('/u/:memberId', Bouncer.guardMemberPage, (req, res) => {
   // optional: guard if no ff_member_id cookie, redirect to '/'
   if (!req.cookies?.ff_member_id) {
     return res.redirect('/');
