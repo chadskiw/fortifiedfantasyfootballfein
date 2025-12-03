@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { requireAuth } = require('../middleware/auth'); // adjust path if needed
+const { getCurrentIdentity } = require('../services/identity');
 
 // --- Helper: approximate distance in meters (Haversine)
 function haversineMeters(lat1, lon1, lat2, lon2) {
@@ -14,12 +14,69 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
+async function requirePartyAccess(req, res, next) {
+  try {
+    const me = await getCurrentIdentity(req, pool);
+    if (!me) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const { partyId } = req.params;
+    if (!partyId) {
+      return res.status(400).json({ error: 'party_id_required' });
+    }
+    const party = await fetchPartyById(partyId);
+    if (!party) {
+      return res.status(404).json({ error: 'party_not_found' });
+    }
+    if ((party.state || '').toLowerCase() === 'cut') {
+      return res.status(410).json({ error: 'party_cut' });
+    }
 
+    const hostHandle = (party.host_handle || '').toLowerCase();
+    const myHandle = (me.handle || '').toLowerCase();
+    const isHost = hostHandle && myHandle && hostHandle === myHandle;
+
+    let membership = null;
+    if (!isHost) {
+      membership = await fetchMembership(partyId, me.handle);
+      if (!membership) {
+        return res.status(403).json({ error: 'not_invited' });
+      }
+      const accessLevel = (membership.access_level || '').toLowerCase();
+      if (accessLevel === 'declined') {
+        return res.status(403).json({ error: 'party_declined' });
+      }
+      if (accessLevel === 'card') {
+        return res.status(403).json({ error: 'not_checked_in' });
+      }
+    } else {
+      membership = {
+        party_id: party.party_id,
+        member_id: me.memberId || me.member_id || null,
+        handle: me.handle,
+        access_level: 'host',
+      };
+    }
+
+    req.me = me;
+    req.party = party;
+    req.membership = membership;
+    req.member = {
+      member_id: membership?.member_id || me.memberId || me.member_id || null,
+      handle: me.handle,
+      access_level: membership?.access_level || (isHost ? 'host' : 'guest'),
+    };
+    req.isPartyHost = isHost;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
 /**
  * POST /api/party/:partyId/specials
  * Create a new special for a party (host-only)
  */
-router.post('/api/party/:partyId/specials', requireAuth, async (req, res) => {
+router.post('/api/party/:partyId/specials', requirePartyAccess, async (req, res) => {
   const partyId = req.params.partyId;
   const memberId = req.user.member_id;
   const {
@@ -97,7 +154,7 @@ router.post('/api/party/:partyId/specials', requireAuth, async (req, res) => {
  * GET /api/specials/nearby?lat=&lon=&radius_m=
  * Returns active specials around a point, filtered by muted businesses for this user.
  */
-router.get('/api/specials/nearby', requireAuth, async (req, res) => {
+router.get('/api/specials/nearby', requirePartyAccess, async (req, res) => {
   const memberId = req.user.member_id; // you can make this optional later
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
@@ -184,7 +241,7 @@ router.get('/api/specials/nearby', requireAuth, async (req, res) => {
  * POST /api/business/:businessId/mute
  * Mute a business for the current member
  */
-router.post('/api/business/:businessId/mute', requireAuth, async (req, res) => {
+router.post('/api/business/:businessId/mute', requirePartyAccess, async (req, res) => {
   const memberId = req.user.member_id;
   const businessId = req.params.businessId;
 
