@@ -15,7 +15,9 @@ function getViewerId(req) {
   if (req.ff_member_id) return req.ff_member_id;
   if (req.user && req.user.member_id) return req.user.member_id;
   if (req.cookies && req.cookies.ff_member_id) return req.cookies.ff_member_id;
+  if (req.cookies && req.cookies.ff_member) return req.cookies.ff_member;
   if (req.headers['x-member-id']) return String(req.headers['x-member-id']);
+  if (req.headers['x-ff-member']) return String(req.headers['x-ff-member']);
   return null;
 }
 
