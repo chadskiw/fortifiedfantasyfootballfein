@@ -3,6 +3,8 @@ const pool = require('../src/db/pool');
 const Bouncer = require('./Bouncer');
 
 const router = express.Router();
+let ffMemberHasHandle = true;
+let ffMemberHasDisplayName = true;
 
 function normalizeChannelRow(row) {
   if (!row) return null;
@@ -144,25 +146,27 @@ router.post('/me', async (req, res) => {
     }
 
     await Promise.all(
-      channels.map((channel) =>
-        client
-          .query(
-            `
-              INSERT INTO tt_contact_exposure (
-                viewer_member_id,
-                target_member_id,
-                channel_id,
-                channel_type
-              )
-              VALUES ($1, $2, $3, $4)
-            `,
-            [viewerId, targetId, channel.channel_id, channel.channel_type]
-          )
-          .catch((err) => {
-            console.warn('contact exposure insert failed', err);
-            return null;
-          })
-      )
+      channels
+        .filter((channel) => channel.channel_id)
+        .map((channel) =>
+          client
+            .query(
+              `
+                INSERT INTO tt_contact_exposure (
+                  viewer_member_id,
+                  target_member_id,
+                  channel_id,
+                  channel_type
+                )
+                VALUES ($1, $2, $3, $4)
+              `,
+              [viewerId, targetId, channel.channel_id, channel.channel_type]
+            )
+            .catch((err) => {
+              console.warn('contact exposure insert failed', err);
+              return null;
+            })
+        )
     );
 
     return res.json({ ok: true, channels });
@@ -173,5 +177,95 @@ router.post('/me', async (req, res) => {
     client.release();
   }
 });
+
+router.get('/requests', async (req, res) => {
+  const viewerId = Bouncer.getViewerId(req);
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+
+  const targetId =
+    req.query?.target_member_id ||
+    req.query?.targetMemberId ||
+    req.query?.member_id ||
+    req.query?.memberId ||
+    viewerId;
+
+  if (targetId !== viewerId) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const rows = await fetchPendingContactRequests(targetId);
+
+    return res.json({
+      ok: true,
+      requests: rows.map((row) => ({
+        request_id: row.request_id,
+        requester_member_id: row.requester_member_id,
+        requester_handle: row.requester_handle || row.requester_member_id,
+        requester_name: row.requester_name || row.requester_handle || row.requester_member_id,
+        channel_type: row.channel_type,
+        message: row.message || '',
+        status: row.status,
+        guardian_reason: row.guardian_reason || null,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      })),
+    });
+  } catch (err) {
+    console.error('contact.requests error', err);
+    return res.status(500).json({ error: 'contact_requests_failed' });
+  }
+});
+
+async function fetchPendingContactRequests(targetId) {
+  const selectHandle = ffMemberHasHandle ? 'fm.handle AS requester_handle' : 'NULL::text AS requester_handle';
+  const selectName = ffMemberHasDisplayName ? 'fm.display_name AS requester_name' : 'NULL::text AS requester_name';
+  const joinClause = ffMemberHasHandle || ffMemberHasDisplayName
+    ? 'LEFT JOIN ff_member fm ON fm.member_id = r.requester_member_id'
+    : '';
+
+  const sql = `
+    SELECT
+      r.request_id,
+      r.requester_member_id,
+      r.target_member_id,
+      r.channel_type,
+      r.message,
+      r.status,
+      r.guardian_reason,
+      r.created_at,
+      r.updated_at,
+      ${selectHandle},
+      ${selectName}
+    FROM tt_contact_request r
+    ${joinClause}
+    WHERE r.target_member_id = $1
+      AND r.status = 'pending'
+    ORDER BY r.created_at DESC
+    LIMIT 100
+  `;
+
+  try {
+    const { rows } = await pool.query(sql, [targetId]);
+    return rows;
+  } catch (err) {
+    const msg = (err?.message || '').toLowerCase();
+    let retry = false;
+    if (ffMemberHasHandle && msg.includes('handle')) {
+      ffMemberHasHandle = false;
+      retry = true;
+    }
+    if (ffMemberHasDisplayName && msg.includes('display_name')) {
+      ffMemberHasDisplayName = false;
+      retry = true;
+    }
+    if (retry) {
+      return fetchPendingContactRequests(targetId);
+    }
+    throw err;
+  }
+}
 
 module.exports = router;

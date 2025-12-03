@@ -29,17 +29,18 @@ function buildAccessPayload(decision = {}, req) {
   const viewerId = Bouncer.getViewerId(req);
   const accessLevel = decision.accessLevel || 'limited';
   const isStranger = decision.isStranger !== false;
+  const isOwner = !!decision.isOwner;
   const canUseContactMe = !!viewerId && accessLevel !== 'none' && !isStranger;
 
   return {
     level: accessLevel,
     canRequestContact: !!decision.canRequestContact,
     isStranger,
-    isOwner: !!decision.isOwner,
+    isOwner,
     reason: decision.reason || null,
     guardianBlockReason: decision.guardianBlockReason || null,
     viewerIsAuthenticated: !!viewerId,
-    canUseContactMe,
+    canUseContactMe: canUseContactMe && !isOwner,
   };
 }
 
