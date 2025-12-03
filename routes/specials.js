@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getCurrentIdentity } = require('../services/identity');
+const pool = require('../src/db/pool');
 
 // --- Helper: approximate distance in meters (Haversine)
 function haversineMeters(lat1, lon1, lat2, lon2) {
