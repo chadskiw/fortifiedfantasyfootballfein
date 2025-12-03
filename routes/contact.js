@@ -7,9 +7,29 @@ let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 const CONTACT_CHANNEL_TYPES = new Set(['phone_call', 'phone_text', 'email']);
 
-function normalizeChannelValue(row) {
-  if (!row) return null;
-  return row.value || row.channel_value || row.channelValue || null;
+
+function normalizeChannelValue(row, channelType) {
+  if (!row || !channelType) return null;
+
+  // Phone (both call + text use the same stored phone number)
+  if (channelType === 'phone_call' || channelType === 'phone_text') {
+    if (!row.phone) return null;
+    return {
+      value: row.phone,
+      is_verified: row.phone_is_verified === true,
+    };
+  }
+
+  // Email
+  if (channelType === 'email') {
+    if (!row.email) return null;
+    return {
+      value: row.email,
+      is_verified: row.email_is_verified === true,
+    };
+  }
+
+  return null;
 }
 
 async function fetchMemberContactValue(memberId, channelType) {
@@ -18,25 +38,28 @@ async function fetchMemberContactValue(memberId, channelType) {
 
   const { rows } = await pool.query(
     `
-      SELECT value, channel_value
-      FROM tt_member_contact_channel
+      SELECT
+        phone,
+        phone_is_verified,
+        email,
+        email_is_verified
+      FROM ff_quickhitter
       WHERE member_id = $1
-        AND channel_type = $2
-        AND (is_active IS NULL OR is_active = TRUE)
-      ORDER BY
-        is_primary DESC NULLS LAST,
-        created_at DESC NULLS LAST
+      ORDER BY created_at DESC
       LIMIT 1
     `,
-    [memberId, channelType]
+    [memberId]
   );
 
-  return normalizeChannelValue(rows[0]);
+  const row = rows && rows[0];
+  return normalizeChannelValue(row, channelType);
 }
 
-function buildContactRequestMessage({ contactValue, note }) {
+
+function buildContactRequestMessage({ contactValue, note, isVerified }) {
   const payload = {};
   if (contactValue) payload.contact_value = contactValue;
+  if (typeof isVerified === 'boolean') payload.is_verified = isVerified;
   if (note) payload.note = note;
   if (!Object.keys(payload).length) return '';
   try {
@@ -46,19 +69,23 @@ function buildContactRequestMessage({ contactValue, note }) {
   }
 }
 
+
 function parseContactRequestMessage(raw) {
-  if (!raw) return { note: '', contact_value: null };
+  if (!raw) return { note: '', contact_value: null, is_verified: null };
   try {
     const parsed = JSON.parse(raw);
     return {
       note: typeof parsed.note === 'string' ? parsed.note : '',
       contact_value:
         typeof parsed.contact_value === 'string' ? parsed.contact_value : null,
+      is_verified:
+        typeof parsed.is_verified === 'boolean' ? parsed.is_verified : null,
     };
   } catch {
-    return { note: raw, contact_value: null };
+    return { note: raw, contact_value: null, is_verified: null };
   }
 }
+
 
 function normalizeChannelRow(row) {
   if (!row) return null;
@@ -92,39 +119,48 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   }
 
   try {
-    const contactValue = await fetchMemberContactValue(
-      guard.requesterId,
-      guard.requestedChannelType
-    );
-    if (!contactValue) {
-      return res.status(400).json({ error: 'contact_value_missing' });
-    }
+const contactInfo = await fetchMemberContactValue(
+  guard.requesterId,
+  guard.requestedChannelType
+);
+if (!contactInfo || !contactInfo.value) {
+  return res.status(400).json({ error: 'contact_value_missing' });
+}
 
-    const note =
-      typeof req.body?.message === 'string'
-        ? req.body.message.trim().slice(0, 280)
-        : '';
-    const messagePayload = buildContactRequestMessage({ contactValue, note });
+const note =
+  typeof req.body?.note === 'string'
+    ? req.body.note.trim().slice(0, 280)
+    : '';
 
-    const { rows } = await pool.query(
-      `
-        INSERT INTO tt_contact_request (
-          requester_member_id,
-          target_member_id,
-          channel_type,
-          status,
-          message
-        )
-        VALUES ($1, $2, $3, 'pending', $4)
-        RETURNING request_id, status, created_at
-      `,
-      [
-        guard.requesterId,
-        guard.targetId,
-        guard.requestedChannelType,
-        messagePayload || null,
-      ]
-    );
+const messagePayload = buildContactRequestMessage({
+  contactValue: contactInfo.value,
+  note,
+  isVerified: contactInfo.is_verified,
+});
+
+
+const { rows } = await pool.query(
+  `
+    INSERT INTO tt_contact_request (
+      requester_member_id,
+      target_member_id,
+      channel_type,
+      status,
+      message,
+      channel_value
+    )
+    VALUES ($1, $2, $3, 'pending', $4, $5)
+    RETURNING request_id, status, created_at
+  `,
+  [
+    guard.requesterId,
+    guard.targetId,
+    guard.requestedChannelType,
+    messagePayload || null,
+    contactInfo.value,
+  ]
+);
+
 
     const payload = rows && rows[0]
       ? {
