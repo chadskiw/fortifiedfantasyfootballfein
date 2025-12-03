@@ -112,6 +112,19 @@ function isGuardianReason(reason) {
   return reason === 'guardian_block_adult_male' || reason === 'guardian_blocks_strangers';
 }
 
+function normalizeViewedFilter(raw) {
+  if (typeof raw !== 'string') return 'unviewed';
+  const value = raw.trim().toLowerCase();
+  if (!value) return 'unviewed';
+  if (['true', '1', 'yes', 'viewed', 'revealed', 'archive'].includes(value)) {
+    return 'viewed';
+  }
+  if (['all', 'any', '*'].includes(value)) {
+    return 'all';
+  }
+  return 'unviewed';
+}
+
 router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   const guard = req.contactGuard;
   if (!guard) {
@@ -343,7 +356,8 @@ router.get('/requests', async (req, res) => {
   }
 
   try {
-    const rows = await fetchPendingContactRequests(targetId);
+    const viewFilter = normalizeViewedFilter(req.query?.viewed);
+    const rows = await fetchContactRequests(targetId, { viewFilter });
 
 return res.json({
   ok: true,
@@ -360,6 +374,8 @@ return res.json({
     created_at: row.created_at,
     updated_at: row.updated_at,
     viewed_at: row.viewed_at,
+    channel_value: row.channel_value || null,
+    requester_color_hex: row.requester_color_hex || null,
     ...parseContactRequestMessage(row.message),
   })),
     });
@@ -369,12 +385,25 @@ return res.json({
   }
 });
 
-async function fetchPendingContactRequests(targetId) {
+async function fetchContactRequests(targetId, { viewFilter = 'unviewed' } = {}) {
   const selectHandle = ffMemberHasHandle ? 'fm.handle AS requester_handle' : 'NULL::text AS requester_handle';
   const selectName = ffMemberHasDisplayName ? 'fm.display_name AS requester_name' : 'NULL::text AS requester_name';
   const joinClause = ffMemberHasHandle || ffMemberHasDisplayName
     ? 'LEFT JOIN ff_member fm ON fm.member_id = r.requester_member_id'
     : '';
+  const whereClauses = [
+    'r.target_member_id = $1',
+    "r.status = 'pending'",
+  ];
+  if (viewFilter === 'viewed') {
+    whereClauses.push('r.viewed_at IS NOT NULL');
+  } else if (viewFilter !== 'all') {
+    whereClauses.push('r.viewed_at IS NULL');
+  }
+  const orderBy =
+    viewFilter === 'viewed'
+      ? 'ORDER BY r.viewed_at DESC NULLS LAST'
+      : 'ORDER BY r.created_at DESC';
 
 const sql = `
   SELECT
@@ -388,13 +417,21 @@ const sql = `
     r.created_at,
     r.updated_at,
     r.viewed_at,
+    r.channel_value,
     ${selectHandle},
-    ${selectName}
+    ${selectName},
+    qh.color_hex AS requester_color_hex
   FROM tt_contact_request r
   ${joinClause}
-  WHERE r.target_member_id = $1
-    AND r.status = 'pending'
-  ORDER BY r.created_at DESC
+  LEFT JOIN LATERAL (
+    SELECT color_hex
+    FROM ff_quickhitter
+    WHERE member_id = r.requester_member_id
+    ORDER BY created_at DESC
+    LIMIT 1
+  ) qh ON TRUE
+  WHERE ${whereClauses.join('\n    AND ')}
+  ${orderBy}
   LIMIT 100
 `;
 
@@ -414,7 +451,7 @@ const sql = `
       retry = true;
     }
     if (retry) {
-      return fetchPendingContactRequests(targetId);
+      return fetchContactRequests(targetId, { viewFilter });
     }
     throw err;
   }
