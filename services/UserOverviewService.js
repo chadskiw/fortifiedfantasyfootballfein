@@ -287,7 +287,7 @@ const theme = await loadUserTheme(memberId);
       WHERE p.member_id = $1
         AND ${recentClause}
       ORDER BY p.taken_at DESC NULLS LAST, p.created_at DESC
-      LIMIT $2
+      LIMIT $2::int
     `;
 
     const { rows: recentPhotos } = await pool.query(recentSql, recentParams);
