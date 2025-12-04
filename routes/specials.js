@@ -244,7 +244,8 @@ router.get('/api/specials/nearby', requireMemberAccess, async (req, res) => {
   const memberId = req.member?.member_id || req.user?.member_id;
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
-  let radiusM = parseFloat(req.query.radius_m);
+  const radiusParam = req.query.radius_m ?? req.query.radiusMeters ?? req.query.radius;
+  let radiusM = parseFloat(radiusParam);
 
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     return res.status(400).json({ error: 'lat and lon are required' });
@@ -283,8 +284,10 @@ router.get('/api/specials/nearby', requireMemberAccess, async (req, res) => {
       WHERE s.is_active = true
         AND (s.starts_at IS NULL OR s.starts_at <= now())
         AND (s.ends_at IS NULL OR s.ends_at >= now())
-        AND p.center_lat BETWEEN $1 - $3 AND $1 + $3
-        AND p.center_lon BETWEEN $2 - $4 AND $2 + $4
+        AND p.center_lat BETWEEN ($1::double precision - $3::double precision)
+                             AND ($1::double precision + $3::double precision)
+        AND p.center_lon BETWEEN ($2::double precision - $4::double precision)
+                           AND ($2::double precision + $4::double precision)
         AND (mbm.business_id IS NULL)  -- not muted by this member
       `,
       [lat, lon, degLat, degLon, memberId]
