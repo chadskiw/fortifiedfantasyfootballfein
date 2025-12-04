@@ -215,6 +215,11 @@ class UserOverviewService {
       throw new Error('memberId is required');
     }
     const viewerId = options.viewerId || null;
+    const rawRecentLimit = options?.recentLimit ?? options?.limit;
+    const recentLimit = Math.min(
+      500,
+      Math.max(1, Number.parseInt(rawRecentLimit, 10) || 24)
+    );
 
     // Try to pull core member info from ff_member if it exists
 let member = await loadMemberProfile(memberId);
@@ -260,7 +265,7 @@ const theme = await loadUserTheme(memberId);
       alias: 'vis',
       params: recentParams,
     });
-    recentParams.push(24);
+    recentParams.push(recentLimit);
 
     const recentSql = `
       SELECT
