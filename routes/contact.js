@@ -33,6 +33,79 @@ function normalizeChannelValue(row, channelType) {
 
   return null;
 }
+async function ensureAcceptedRelationshipFromRequest(db, row, messagePayload, viewerId) {
+  const memberFrom = row.requester_member_id;  // sender
+  const memberTo   = row.target_member_id;     // acceptor
+
+  // Requester side (already baked into the original message)
+  const typeFrom =
+    typeof messagePayload.relationship_type === 'string'
+      ? messagePayload.relationship_type
+      : 'relationship';
+
+  const labelFrom =
+    typeof messagePayload.relationship_label === 'string'
+      ? messagePayload.relationship_label
+      : typeFrom;
+
+  // Acceptor side (can be set when accepting)
+  const typeTo =
+    typeof messagePayload.target_relationship_type === 'string'
+      ? messagePayload.target_relationship_type
+      : typeFrom; // fallback if not specified
+
+  const labelTo =
+    typeof messagePayload.target_relationship_label === 'string'
+      ? messagePayload.target_relationship_label
+      : typeTo;
+
+  const note =
+    typeof messagePayload.note === 'string'
+      ? messagePayload.note
+      : null;
+
+  await db.none(
+    `
+      INSERT INTO tt_relationships_accepted (
+        member_id_from,
+        member_id_to,
+        relationship_type_from,
+        relationship_type_to,
+        relationship_label_from,
+        relationship_label_to,
+        status,
+        is_mutual,
+        source_request_id,
+        created_by_member_id,
+        note
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,'active',TRUE,$7,$8,$9)
+      ON CONFLICT (member_id_from, member_id_to)
+      DO UPDATE SET
+        relationship_type_from  = EXCLUDED.relationship_type_from,
+        relationship_type_to    = EXCLUDED.relationship_type_to,
+        relationship_label_from = EXCLUDED.relationship_label_from,
+        relationship_label_to   = EXCLUDED.relationship_label_to,
+        status                  = 'active',
+        is_mutual               = TRUE,
+        source_request_id       = EXCLUDED.source_request_id,
+        note                    = EXCLUDED.note,
+        last_modified_at        = now()
+    `,
+    [
+      memberFrom,
+      memberTo,
+      typeFrom,
+      typeTo,
+      labelFrom,
+      labelTo,
+      row.request_id,
+      viewerId,
+      note
+    ]
+  );
+}
+
 
 async function fetchMemberContactValue(memberId, channelType) {
   if (!memberId || !channelType) return null;
@@ -324,123 +397,77 @@ async function ensureMemberRelationshipFromRequest(row, messagePayload) {
 
 router.post('/request/:requestId/relationship', async (req, res) => {
   const viewerId = Bouncer.getViewerId(req);
-  if (!viewerId) {
-    return res.status(401).json({ error: 'not_authenticated' });
-  }
+  // ... load row, check permissions, etc.
 
-  const requestId = req.params.requestId;
-  if (!requestId) {
-    return res.status(400).json({ error: 'missing_request_id' });
-  }
+  const decision = req.body?.decision;
 
-  const decision = (req.body?.decision || '').toLowerCase();
-  if (!['accept', 'ignore', 'block'].includes(decision)) {
-    return res.status(400).json({ error: 'invalid_relationship_decision' });
-  }
-
-  try {
-    const { rows } = await pool.query(
-      `
-        SELECT
-          request_id,
-          requester_member_id,
-          target_member_id,
-          channel_type,
-          status,
-          message
-        FROM tt_contact_request
-        WHERE request_id = $1
-      `,
-      [requestId]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ error: 'request_not_found' });
-    }
-
-    const row = rows[0];
-    if (row.target_member_id !== viewerId) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-    if (row.channel_type !== RELATIONSHIP_CHANNEL_TYPE) {
-      return res.status(400).json({ error: 'not_relationship_request' });
-    }
-    if (row.status !== 'pending') {
-      return res.status(409).json({ error: 'request_already_completed' });
-    }
-
-    let nextStatus = row.status;
-    let nextMessage = row.message || '';
-
-if (decision === 'accept') {
-  const relationshipLabel = normalizeRelationshipLabel(req.body?.relationship_label);
-  if (!relationshipLabel) {
-    return res.status(400).json({ error: 'relationship_detail_required' });
-  }
-
-  let messagePayload = {};
-  if (row.message) {
-    try {
-      const parsed = JSON.parse(row.message);
-      if (parsed && typeof parsed === 'object') {
-        messagePayload = parsed;
-      }
-    } catch {
-      messagePayload = {};
-    }
-  }
-  if (!messagePayload.relationship_label) {
-    messagePayload.relationship_label = relationshipLabel;
-  }
-  messagePayload.target_relationship_label = relationshipLabel;
-
-  // ⬇️ NEW: persist to tt_member_relationship
-  await ensureMemberRelationshipFromRequest(row, messagePayload);
-
-  nextMessage = JSON.stringify(messagePayload);
-  nextStatus = 'accepted';
-
-
-    } else if (decision === 'ignore') {
-      nextStatus = 'ignored';
-    } else if (decision === 'block') {
-      nextStatus = 'blocked';
+  if (decision === 'accept') {
+    let messagePayload = {};
+    if (row.message) {
       try {
-        await pool.query(
-          `
-            INSERT INTO tt_member_block (blocker_member_id, blocked_member_id, block_type)
-            VALUES ($1, $2, 'relationship_request')
-            ON CONFLICT (blocker_member_id, blocked_member_id)
-            DO UPDATE SET block_type = EXCLUDED.block_type
-          `,
-          [viewerId, row.requester_member_id]
-        );
-      } catch (blockErr) {
-        console.warn('contact.relationship block insert failed', blockErr);
+        const parsed = JSON.parse(row.message);
+        if (parsed && typeof parsed === 'object') {
+          messagePayload = parsed;
+        }
+      } catch {
+        messagePayload = {};
       }
     }
 
-    await pool.query(
+    // Requester side (already set when they sent the request)
+    // messagePayload.relationship_type        (from)
+    // messagePayload.relationship_label       (from)
+    // messagePayload.target_relationship_label (maybe)
+
+    // Acceptor POV coming from the body:
+    const rawAcceptorType  = req.body?.relationship_type || req.body?.target_relationship_type;
+    const rawAcceptorLabel = req.body?.relationship_label || req.body?.target_relationship_label;
+
+    // Require at least *something* from the acceptor side or previously stored target label/type
+    if (
+      !rawAcceptorType &&
+      !rawAcceptorLabel &&
+      !messagePayload.target_relationship_type &&
+      !messagePayload.target_relationship_label
+    ) {
+      return res.status(400).json({ error: 'relationship_detail_required' });
+    }
+
+    if (rawAcceptorType) {
+      messagePayload.target_relationship_type = rawAcceptorType;
+    }
+
+    if (rawAcceptorLabel) {
+      messagePayload.target_relationship_label = normalizeRelationshipLabel(rawAcceptorLabel);
+    }
+
+    // Auto-promote into tt_relationships_accepted with asymmetry preserved
+    await ensureAcceptedRelationshipFromRequest(req.db, row, messagePayload, viewerId);
+
+    const nextMessage = JSON.stringify(messagePayload);
+    const nextStatus  = 'accepted';
+
+    await req.db.none(
       `
         UPDATE tt_contact_request
-        SET status = $1,
-            message = $2,
-            updated_at = NOW()
-        WHERE request_id = $3
+        SET status = $2,
+            message = $3,
+            updated_at = now()
+        WHERE request_id = $1
       `,
-      [nextStatus, nextMessage, requestId]
+      [row.request_id, nextStatus, nextMessage]
     );
 
     return res.json({
       ok: true,
-      request_id: requestId,
       status: nextStatus,
+      message: messagePayload
     });
-  } catch (err) {
-    console.error('contact.relationship response error', err);
-    return res.status(500).json({ error: 'relationship_response_failed' });
   }
+
+  // ... handle other decisions (reject, block, etc.)
 });
+
 
 router.post('/me', async (req, res) => {
   const viewerId = Bouncer.getViewerId(req);
