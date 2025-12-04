@@ -1,16 +1,24 @@
 // src/services/UserOverviewService.js
 const { pool } = require('../src/db'); // adjust if your pool is elsewhere
 
+let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 let ffMemberHasAvatarUrl = true;
+let ffQuickhitterHasColorHex = true;
 
 async function loadMemberProfile(memberId) {
   const selectBits = ['member_id'];
 
   selectBits.push(
-    ffMemberHasDisplayName
+    ffMemberHasHandle
       ? 'handle'
       : "NULL::text AS handle"
+  );
+
+  selectBits.push(
+    ffMemberHasDisplayName
+      ? 'display_name'
+      : "NULL::text AS display_name"
   );
 
   selectBits.push(
@@ -34,7 +42,10 @@ async function loadMemberProfile(memberId) {
     const lowered = msg.toLowerCase();
     let retry = false;
 
-    if (ffMemberHasDisplayName && lowered.includes('handle')) {
+    if (ffMemberHasHandle && lowered.includes('handle')) {
+      ffMemberHasHandle = false;
+      retry = true;
+    } else if (ffMemberHasDisplayName && lowered.includes('display_name')) {
       ffMemberHasDisplayName = false;
       retry = true;
     } else if (ffMemberHasAvatarUrl && lowered.includes('avatar_url')) {
@@ -47,6 +58,33 @@ async function loadMemberProfile(memberId) {
     if (retry) {
       return loadMemberProfile(memberId);
     }
+    return null;
+  }
+}
+
+async function loadQuickhitterProfile(memberId) {
+  if (!ffQuickhitterHasColorHex) {
+    return null;
+  }
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT color_hex
+        FROM ff_quickhitter
+        WHERE member_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [memberId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    const lowered = (err?.message || '').toLowerCase();
+    if (ffQuickhitterHasColorHex && lowered.includes('color_hex')) {
+      ffQuickhitterHasColorHex = false;
+      return null;
+    }
+    console.warn('UserOverview: ff_quickhitter lookup failed', err?.message || err);
     return null;
   }
 }
@@ -72,6 +110,7 @@ class UserOverviewService {
 
     // Try to pull core member info from ff_member if it exists
 let member = await loadMemberProfile(memberId);
+let quickhitter = await loadQuickhitterProfile(memberId);
 
 // For now, only filter tt_photo by member_id.
 // tt_photo does NOT have a handle column.
@@ -125,7 +164,9 @@ const identifierParams = [memberId];
 
     return {
       member_id: memberId,
-      handle:  memberId,
+      handle:  (member && member.handle) ? member.handle : memberId,
+      display_name: member && member.display_name ? member.display_name : null,
+      color_hex: quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null,
       avatar_url: member && member.avatar_url ? member.avatar_url : null,
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
