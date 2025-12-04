@@ -16,6 +16,9 @@ function secureCookies() { return process.env.NODE_ENV === 'production'; }
 function cookieOpts(maxAgeMs) {
   return { httpOnly:true, sameSite:'Lax', secure:secureCookies(), path:'/', maxAge:maxAgeMs };
 }
+function clientCookieOpts(maxAgeMs) {
+  return { httpOnly:false, sameSite:'Lax', secure:secureCookies(), path:'/', maxAge:maxAgeMs };
+}
 function ipHash(req) {
   const ip = String(req.headers['cf-connecting-ip'] || req.ip || '');
   return crypto.createHash('sha256').update(ip).digest('hex');
@@ -167,6 +170,39 @@ router.post('/clear', async (req,res) => {
   try { await destroySession(req.cookies?.ff_sid||null); } catch {}
   clearAuthCookies(res);
   res.json({ ok:true });
+});
+
+router.post('/ghost-login', async (req, res) => {
+  try {
+    const handleRaw = (req.body?.handle || '').trim();
+    if (!handleRaw) {
+      return res.status(400).json({ ok: false, error: 'missing_handle' });
+    }
+
+    const handle = handleRaw.toLowerCase();
+    const publicHandle = (process.env.PUBLIC_VIEWER_HANDLE || 'PUBGHOST').toLowerCase();
+    if (handle !== publicHandle) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT member_id FROM ff_member WHERE LOWER(handle) = LOWER($1) LIMIT 1`,
+      [handleRaw]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'public_viewer_missing' });
+    }
+
+    const memberId = rows[0].member_id;
+    const sid = await createSession(memberId, req, 7);
+    setAuthCookies(res, memberId, sid);
+    res.cookie('ff_logged_in', '1', clientCookieOpts(30 * 24 * 60 * 60 * 1000));
+
+    return res.json({ ok: true, member_id: memberId });
+  } catch (err) {
+    console.error('[session.ghost-login]', err);
+    res.status(500).json({ ok: false, error: 'ghost_login_failed' });
+  }
 });
 
 // POST /api/session/login-by-descriptors { member_id, adj1, adj2, noun }
