@@ -5,6 +5,118 @@ let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 let ffMemberHasAvatarUrl = true;
 let ffQuickhitterHasColorHex = true;
+let ttUserThemeExists = true;
+
+const DEFAULT_THEME_STATE = {
+  map_hue: 214,
+  map_sat: 68,
+  map_light: 46,
+  motion_enabled: false,
+};
+
+function clamp(value, min, max, fallback) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return fallback;
+  }
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function hslToHex(h, s, l) {
+  if (
+    typeof h !== 'number' ||
+    typeof s !== 'number' ||
+    typeof l !== 'number'
+  ) {
+    return null;
+  }
+  const sat = s / 100;
+  const light = l / 100;
+
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const hp = (h % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (hp >= 0 && hp < 1) {
+    r = c;
+    g = x;
+  } else if (hp >= 1 && hp < 2) {
+    r = x;
+    g = c;
+  } else if (hp >= 2 && hp < 3) {
+    g = c;
+    b = x;
+  } else if (hp >= 3 && hp < 4) {
+    g = x;
+    b = c;
+  } else if (hp >= 4 && hp < 5) {
+    r = x;
+    b = c;
+  } else if (hp >= 5 && hp < 6) {
+    r = c;
+    b = x;
+  }
+
+  const m = light - c / 2;
+  const toHex = (channel) =>
+    Math.round((channel + m) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+
+async function loadUserTheme(memberId) {
+  if (!ttUserThemeExists || !memberId) {
+    return null;
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          map_hue,
+          map_sat,
+          map_light,
+          motion_enabled
+        FROM tt_user_theme
+        WHERE member_id = $1
+        LIMIT 1
+      `,
+      [memberId]
+    );
+
+    if (!rows.length) {
+      return null;
+    }
+
+    const row = rows[0];
+    const hue = clamp(row.map_hue, 0, 360, DEFAULT_THEME_STATE.map_hue);
+    const sat = clamp(row.map_sat, 10, 100, DEFAULT_THEME_STATE.map_sat);
+    const light = clamp(row.map_light, 10, 70, DEFAULT_THEME_STATE.map_light);
+    const accentHex = hslToHex(hue, sat, light);
+
+    return {
+      map_hue: hue,
+      map_sat: sat,
+      map_light: light,
+      motion_enabled: row.motion_enabled === true,
+      accent_hex: accentHex,
+    };
+  } catch (err) {
+    const lowered = (err?.message || '').toLowerCase();
+    if (ttUserThemeExists && lowered.includes('tt_user_theme')) {
+      ttUserThemeExists = false;
+      console.warn('UserOverview: tt_user_theme table missing, skipping theme load');
+      return null;
+    }
+    console.warn('UserOverview: tt_user_theme lookup failed', err?.message || err);
+    return null;
+  }
+}
 
 async function loadMemberProfile(memberId) {
   const selectBits = ['member_id'];
@@ -111,6 +223,7 @@ class UserOverviewService {
     // Try to pull core member info from ff_member if it exists
 let member = await loadMemberProfile(memberId);
 let quickhitter = await loadQuickhitterProfile(memberId);
+const theme = await loadUserTheme(memberId);
 
 // For now, only filter tt_photo by member_id.
 // tt_photo does NOT have a handle column.
@@ -162,12 +275,17 @@ const identifierParams = [memberId];
       identifierParams
     );
 
+    const accentFromTheme = theme && theme.accent_hex ? theme.accent_hex : null;
+    const accentFromQuickhitter =
+      quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null;
+
     return {
       member_id: memberId,
       handle:  (member && member.handle) ? member.handle : memberId,
       display_name: member && member.display_name ? member.display_name : null,
-      color_hex: quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null,
+      color_hex: accentFromTheme || accentFromQuickhitter,
       avatar_url: member && member.avatar_url ? member.avatar_url : null,
+      map_theme: theme,
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
       photo_bounds: hasGeo
