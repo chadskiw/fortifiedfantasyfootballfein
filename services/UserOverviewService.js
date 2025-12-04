@@ -4,12 +4,14 @@ const {
   appendVisibilityFilter,
   formatVisibilityRow,
 } = require('./photoVisibility');
+const { isInHomeZone } = require('../utils/homeZone');
 
 let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 let ffMemberHasAvatarUrl = true;
 let ffQuickhitterHasColorHex = true;
 let ttUserThemeExists = true;
+let ttMemberHomeZoneExists = true;
 
 const DEFAULT_THEME_STATE = {
   map_hue: 214,
@@ -205,6 +207,41 @@ async function loadQuickhitterProfile(memberId) {
   }
 }
 
+async function loadMemberHomeZone(memberId) {
+  if (!ttMemberHomeZoneExists || !memberId) {
+    return null;
+  }
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          member_id,
+          center_lat,
+          center_lon,
+          radius_m,
+          obscure_home,
+          label_city,
+          label_region,
+          label_country
+        FROM tt_member_home_zone
+        WHERE member_id = $1
+        LIMIT 1
+      `,
+      [memberId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    const lowered = (err?.message || '').toLowerCase();
+    if (ttMemberHomeZoneExists && lowered.includes('tt_member_home_zone')) {
+      ttMemberHomeZoneExists = false;
+      console.warn('UserOverview: tt_member_home_zone missing, skipping home zone load');
+      return null;
+    }
+    console.warn('UserOverview: home zone lookup failed', err?.message || err);
+    return null;
+  }
+}
+
 class UserOverviewService {
   /**
    * Return high-level overview of a user's Trash Talk activity.
@@ -292,6 +329,9 @@ const theme = await loadUserTheme(memberId);
     `;
 
     const { rows: recentPhotos } = await pool.query(recentSql, recentParams);
+    const homeZone = await loadMemberHomeZone(memberId);
+    const homePhotos = [];
+    const mapPhotos = [];
 
     const accentFromTheme = theme?.accent_hex || null;
     const handleColor =
@@ -318,15 +358,52 @@ const theme = await loadUserTheme(memberId);
             has_geo: true,
           }
         : { has_geo: false },
-      recent_photos: recentPhotos.map((row) => ({
-        photo_id: row.photo_id,
-        r2_key: row.r2_key,
-        lat: row.lat,
-        lon: row.lon,
-        taken_at: row.taken_at,
-        created_at: row.created_at,
-        visibility: formatVisibilityRow(row),
-      })),
+      recent_photos: recentPhotos.map((row) => {
+        const hideCoords =
+          homeZone &&
+          homeZone.obscure_home === true &&
+          row.lat != null &&
+          row.lon != null &&
+          isInHomeZone(row.lat, row.lon, homeZone);
+        const visibility = formatVisibilityRow({
+          ...row,
+          owner_member_id: memberId,
+        });
+        if (hideCoords) {
+          homePhotos.push({
+            photo_id: row.photo_id,
+            r2_key: row.r2_key,
+            taken_at: row.taken_at,
+            created_at: row.created_at,
+            visibility,
+            home_label_city: homeZone?.label_city || null,
+            home_label_region: homeZone?.label_region || null,
+            home_label_country: homeZone?.label_country || null,
+          });
+        } else if (row.lat != null && row.lon != null) {
+          mapPhotos.push({
+            photo_id: row.photo_id,
+            r2_key: row.r2_key,
+            lat: row.lat,
+            lon: row.lon,
+            taken_at: row.taken_at,
+            created_at: row.created_at,
+            visibility,
+          });
+        }
+
+        return {
+          photo_id: row.photo_id,
+          r2_key: row.r2_key,
+          lat: hideCoords ? null : row.lat,
+          lon: hideCoords ? null : row.lon,
+          taken_at: row.taken_at,
+          created_at: row.created_at,
+          visibility,
+        };
+      }),
+      map_photos: mapPhotos,
+      home_photos: homePhotos,
     };
   }
 }

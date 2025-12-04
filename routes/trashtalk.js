@@ -17,6 +17,7 @@ const {
 } = require('../services/photoVisibility');
 
 const { pool } = require('../src/db');
+const { isInHomeZone } = require('../utils/homeZone');
 
 // ...
 const router = express.Router();
@@ -962,11 +963,71 @@ router.get('/map', async (req, res) => {
     `;
 
     const { rows } = await pool.query(sql, params);
+    const ownerIds = Array.from(
+      new Set(
+        rows
+          .map((row) => row.member_id)
+          .filter((memberId) => typeof memberId === 'string' && memberId.trim().length)
+      )
+    );
+
+    let homeZonesByMember = new Map();
+    if (ownerIds.length) {
+      try {
+        const { rows: homeRows } = await pool.query(
+          `
+            SELECT
+              member_id,
+              center_lat,
+              center_lon,
+              radius_m,
+              obscure_home,
+              label_city,
+              label_region,
+              label_country
+            FROM tt_member_home_zone
+            WHERE member_id = ANY($1::text[])
+          `,
+          [ownerIds]
+        );
+        homeZonesByMember = new Map(homeRows.map((row) => [row.member_id, row]));
+      } catch (homeErr) {
+        console.warn('trashtalk.map home zone fetch failed', homeErr?.message || homeErr);
+      }
+    }
+
+    const photos = [];
+    const homePhotos = [];
+
+    for (const row of rows) {
+      const homeZone = homeZonesByMember.get(row.member_id);
+      const shouldHideCoords =
+        homeZone &&
+        homeZone.obscure_home === true &&
+        isInHomeZone(row.lat, row.lon, homeZone);
+
+      if (shouldHideCoords) {
+        homePhotos.push({
+          photo_id: row.photo_id,
+          member_id: row.member_id,
+          handle: row.handle,
+          r2_key: row.r2_key,
+          taken_at: row.taken_at,
+          created_at: row.created_at,
+          home_label_city: homeZone.label_city || null,
+          home_label_region: homeZone.label_region || null,
+          home_label_country: homeZone.label_country || null,
+        });
+      } else {
+        photos.push(row);
+      }
+    }
 
     return res.json({
       zoom,
-      count: rows.length,
-      photos: rows,
+      count: photos.length,
+      photos,
+      homePhotos,
     });
   } catch (err) {
     console.error('TrashTalk map error', err);

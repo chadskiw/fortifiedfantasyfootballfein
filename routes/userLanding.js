@@ -112,6 +112,9 @@ function maskOverviewForAccess(overview, decision) {
   if (Array.isArray(overview.map_photos)) {
     masked.map_photos = [];
   }
+  if (Array.isArray(overview.home_photos)) {
+    masked.home_photos = [];
+  }
 
   masked.photo_bounds = { has_geo: false };
   return masked;
