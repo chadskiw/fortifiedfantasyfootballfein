@@ -249,6 +249,32 @@ function normalizeStatusFilter(raw) {
   return 'pending';
 }
 
+function formatContactRequestRow(row) {
+  if (!row) return null;
+  const parsed = parseContactRequestMessage(row.message);
+  return {
+    request_id: row.request_id,
+    requester_member_id: row.requester_member_id,
+    target_member_id: row.target_member_id,
+    requester_handle: row.requester_handle || row.requester_member_id,
+    requester_name:
+      row.requester_name || row.requester_handle || row.requester_member_id,
+    requester_color_hex: row.requester_color_hex || null,
+    target_handle: row.target_handle || row.target_member_id,
+    target_name: row.target_name || row.target_handle || row.target_member_id,
+    target_color_hex: row.target_color_hex || null,
+    channel_type: row.channel_type,
+    message: row.message || '',
+    status: row.status,
+    guardian_reason: row.guardian_reason || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    viewed_at: row.viewed_at,
+    channel_value: row.channel_value || null,
+    ...parsed,
+  };
+}
+
 router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   const guard = req.contactGuard;
   if (!guard) {
@@ -675,30 +701,56 @@ router.get('/requests', async (req, res) => {
     const viewFilter = normalizeViewedFilter(req.query?.viewed);
     const statusFilter = normalizeStatusFilter(req.query?.status);
     const rows = await fetchContactRequests(targetId, { viewFilter, statusFilter });
-
-return res.json({
-  ok: true,
-  requests: rows.map((row) => ({
-    request_id: row.request_id,
-    requester_member_id: row.requester_member_id,
-    requester_handle: row.requester_handle || row.requester_member_id,
-    requester_name:
-      row.requester_name || row.requester_handle || row.requester_member_id,
-    channel_type: row.channel_type,
-    message: row.message || '',
-    status: row.status,
-    guardian_reason: row.guardian_reason || null,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-    viewed_at: row.viewed_at,
-    channel_value: row.channel_value || null,
-    requester_color_hex: row.requester_color_hex || null,
-    ...parseContactRequestMessage(row.message),
-  })),
+    return res.json({
+      ok: true,
+      requests: rows.map(formatContactRequestRow).filter(Boolean),
     });
   } catch (err) {
     console.error('contact.requests error', err);
     return res.status(500).json({ error: 'contact_requests_failed' });
+  }
+});
+
+router.get('/requests/sent', async (req, res) => {
+  const viewerId = Bouncer.getViewerId(req);
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+
+  try {
+    const statusFilter = normalizeStatusFilter(req.query?.status);
+    const rows = await fetchSentContactRequests(viewerId, { statusFilter });
+    return res.json({
+      ok: true,
+      requests: rows.map(formatContactRequestRow).filter(Boolean),
+    });
+  } catch (err) {
+    console.error('contact.sent_requests error', err);
+    return res.status(500).json({ error: 'sent_requests_fetch_failed' });
+  }
+});
+
+router.get('/relationships', async (req, res) => {
+  const viewerId = Bouncer.getViewerId(req);
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+
+  const targetId =
+    req.query?.member_id ||
+    req.query?.memberId ||
+    viewerId;
+
+  if (targetId !== viewerId) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const rows = await fetchAcceptedRelationshipsForMember(viewerId);
+    return res.json({ ok: true, relationships: rows });
+  } catch (err) {
+    console.error('contact.relationships error', err);
+    return res.status(500).json({ error: 'relationships_fetch_failed' });
   }
 });
 
@@ -708,6 +760,9 @@ async function fetchContactRequests(targetId, { viewFilter = 'unviewed', statusF
   const joinClause = ffMemberHasHandle || ffMemberHasDisplayName
     ? 'LEFT JOIN ff_member fm ON fm.member_id = r.requester_member_id'
     : '';
+  const selectTargetHandle = 'NULL::text AS target_handle';
+  const selectTargetName = 'NULL::text AS target_name';
+  const selectTargetColor = 'NULL::text AS target_color_hex';
   const whereClauses = ['r.target_member_id = $1'];
   const params = [targetId];
   if (statusFilter === 'pending') {
@@ -741,7 +796,10 @@ const sql = `
     r.channel_value,
     ${selectHandle},
     ${selectName},
-    qh.color_hex AS requester_color_hex
+    qh.color_hex AS requester_color_hex,
+    ${selectTargetHandle},
+    ${selectTargetName},
+    ${selectTargetColor}
   FROM tt_contact_request r
   ${joinClause}
   LEFT JOIN LATERAL (
@@ -773,6 +831,180 @@ const sql = `
     }
     if (retry) {
       return fetchContactRequests(targetId, { viewFilter });
+    }
+    throw err;
+  }
+}
+
+async function fetchSentContactRequests(requesterId, { statusFilter = 'all' } = {}) {
+  const requesterHandleSelect = ffMemberHasHandle ? 'fr.handle AS requester_handle' : 'NULL::text AS requester_handle';
+  const requesterNameSelect = ffMemberHasDisplayName ? 'fr.display_name AS requester_name' : 'NULL::text AS requester_name';
+  const targetHandleSelect = ffMemberHasHandle ? 'ft.handle AS target_handle' : 'NULL::text AS target_handle';
+  const targetNameSelect = ffMemberHasDisplayName ? 'ft.display_name AS target_name' : 'NULL::text AS target_name';
+
+  const requesterJoin = ffMemberHasHandle || ffMemberHasDisplayName
+    ? 'LEFT JOIN ff_member fr ON fr.member_id = r.requester_member_id'
+    : '';
+  const targetJoin = ffMemberHasHandle || ffMemberHasDisplayName
+    ? 'LEFT JOIN ff_member ft ON ft.member_id = r.target_member_id'
+    : '';
+
+  const whereClauses = ['r.requester_member_id = $1'];
+  const params = [requesterId];
+
+  if (statusFilter === 'pending') {
+    whereClauses.push("r.status = 'pending'");
+  } else if (statusFilter !== 'all') {
+    params.push(statusFilter);
+    whereClauses.push(`r.status = $${params.length}`);
+  }
+
+  const sql = `
+    SELECT
+      r.request_id,
+      r.requester_member_id,
+      r.target_member_id,
+      r.channel_type,
+      r.message,
+      r.status,
+      r.guardian_reason,
+      r.created_at,
+      r.updated_at,
+      r.viewed_at,
+      r.channel_value,
+      ${requesterHandleSelect},
+      ${requesterNameSelect},
+      qh_req.color_hex AS requester_color_hex,
+      ${targetHandleSelect},
+      ${targetNameSelect},
+      qh_tgt.color_hex AS target_color_hex
+    FROM tt_contact_request r
+    ${requesterJoin}
+    ${targetJoin}
+    LEFT JOIN LATERAL (
+      SELECT color_hex
+      FROM ff_quickhitter
+      WHERE member_id = r.requester_member_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) qh_req ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT color_hex
+      FROM ff_quickhitter
+      WHERE member_id = r.target_member_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) qh_tgt ON TRUE
+    WHERE ${whereClauses.join(' AND ')}
+    ORDER BY r.created_at DESC
+    LIMIT 100
+  `;
+
+  try {
+    const { rows } = await pool.query(sql, params);
+    return rows;
+  } catch (err) {
+    const msg = (err?.message || '').toLowerCase();
+    let retry = false;
+    if (ffMemberHasHandle && msg.includes('handle')) {
+      ffMemberHasHandle = false;
+      retry = true;
+    }
+    if (ffMemberHasDisplayName && msg.includes('display_name')) {
+      ffMemberHasDisplayName = false;
+      retry = true;
+    }
+    if (retry) {
+      return fetchSentContactRequests(requesterId, { statusFilter });
+    }
+    throw err;
+  }
+}
+
+async function fetchAcceptedRelationshipsForMember(memberId) {
+  const otherHandleSelect = ffMemberHasHandle ? 'fm.handle AS other_handle' : 'NULL::text AS other_handle';
+  const otherNameSelect = ffMemberHasDisplayName ? 'fm.display_name AS other_name' : 'NULL::text AS other_name';
+  const joinMember = ffMemberHasHandle || ffMemberHasDisplayName
+    ? `
+      LEFT JOIN ff_member fm
+        ON fm.member_id = CASE
+          WHEN r.member_id_from = $1 THEN r.member_id_to
+          ELSE r.member_id_from
+        END
+      `
+    : '';
+
+  const sql = `
+    SELECT
+      r.relationship_id,
+      r.member_id_from,
+      r.member_id_to,
+      r.relationship_type_from,
+      r.relationship_type_to,
+      r.relationship_label_from,
+      r.relationship_label_to,
+      r.status,
+      r.is_mutual,
+      r.source_request_id,
+      r.established_at,
+      r.last_modified_at,
+      CASE
+        WHEN r.member_id_from = $1 THEN r.member_id_to
+        ELSE r.member_id_from
+      END AS other_member_id,
+      CASE
+        WHEN r.member_id_from = $1 THEN r.relationship_type_to
+        ELSE r.relationship_type_from
+      END AS other_relationship_type,
+      CASE
+        WHEN r.member_id_from = $1 THEN r.relationship_label_to
+        ELSE r.relationship_label_from
+      END AS other_relationship_label,
+      CASE
+        WHEN r.member_id_from = $1 THEN r.relationship_type_from
+        ELSE r.relationship_type_to
+      END AS viewer_relationship_type,
+      CASE
+        WHEN r.member_id_from = $1 THEN r.relationship_label_from
+        ELSE r.relationship_label_to
+      END AS viewer_relationship_label,
+      ${otherHandleSelect},
+      ${otherNameSelect},
+      qh.color_hex AS other_color_hex
+    FROM tt_relationships_accepted r
+    ${joinMember}
+    LEFT JOIN LATERAL (
+      SELECT color_hex
+      FROM ff_quickhitter
+      WHERE member_id = CASE
+        WHEN r.member_id_from = $1 THEN r.member_id_to
+        ELSE r.member_id_from
+      END
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) qh ON TRUE
+    WHERE r.status = 'active'
+      AND (r.member_id_from = $1 OR r.member_id_to = $1)
+    ORDER BY r.established_at DESC NULLS LAST
+    LIMIT 200
+  `;
+
+  try {
+    const { rows } = await pool.query(sql, [memberId]);
+    return rows;
+  } catch (err) {
+    const msg = (err?.message || '').toLowerCase();
+    let retry = false;
+    if (ffMemberHasHandle && msg.includes('handle')) {
+      ffMemberHasHandle = false;
+      retry = true;
+    }
+    if (ffMemberHasDisplayName && msg.includes('display_name')) {
+      ffMemberHasDisplayName = false;
+      retry = true;
+    }
+    if (retry) {
+      return fetchAcceptedRelationshipsForMember(memberId);
     }
     throw err;
   }
