@@ -5,6 +5,7 @@
 
 const rawDb = require('../src/db');
 const pool = rawDb.pool || rawDb;
+const ALLOWED_REQUEST_CHANNELS = new Set(['phone_call', 'phone_text', 'email', 'relationship']);
 
 // -----------------------------
 // Basic helpers
@@ -400,9 +401,7 @@ async function evaluateContactRequest({ client, requesterId, targetId, requested
     };
   }
 
-  if (requestedChannelType !== 'phone_call' &&
-      requestedChannelType !== 'phone_text' &&
-      requestedChannelType !== 'email') {
+  if (!ALLOWED_REQUEST_CHANNELS.has(requestedChannelType)) {
     return {
       allowed: false,
       httpStatus: 400,
