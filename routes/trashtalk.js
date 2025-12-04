@@ -4,6 +4,17 @@ const multer = require('multer');
 const exifr = require('exifr'); // make sure this is installed: npm i exifr
 const { uploadToR2, headR2, deleteFromR2 } = require('../services/r2Client');
 const { getCurrentIdentity } = require('../services/identity');
+const {
+  appendVisibilityFilter,
+  normalizeAudienceMode,
+  normalizeRelationshipTiers,
+  normalizeAllowedMembers,
+  normalizeDate,
+  formatPolicyRow,
+  formatPhotoSetRow,
+  formatVisibilityRow,
+  DEFAULT_RELATIONSHIP_TIERS,
+} = require('../services/photoVisibility');
 
 const { pool } = require('../src/db');
 
@@ -87,6 +98,28 @@ function getCameraFingerprint(exifData) {
 
   return parts || null;
 }
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (Number.isNaN(num)) return fallback;
+  if (num < min) return min;
+  if (num > max) return max;
+  return num;
+}
+
+function parsePhotoIds(raw) {
+  if (!Array.isArray(raw)) return [];
+  return Array.from(
+    new Set(
+      raw
+        .map((val) => {
+          const num = Number(val);
+          return Number.isFinite(num) && num > 0 ? Math.floor(num) : null;
+        })
+        .filter((val) => val != null)
+    )
+  );
+}
 /**
  * Haversine distance calculation in SQL:
  * We'll inline the math in the query. This function just returns the snippet.
@@ -150,6 +183,33 @@ async function ensurePartyUploadAccess(partyId, handle) {
     party: partyRows[0],
     membership: membershipRows[0],
   };
+}
+
+async function getViewerContext(req, { requireAuth = false } = {}) {
+  try {
+    const identity = await getCurrentIdentity(req, pool);
+    const viewerId = identity?.memberId || identity?.member_id || null;
+    if (requireAuth && !viewerId) {
+      const err = new Error('not_authenticated');
+      err.statusCode = 401;
+      throw err;
+    }
+
+    return {
+      identity,
+      viewerId,
+      handle: identity?.handle || null,
+    };
+  } catch (err) {
+    if (requireAuth) {
+      throw err;
+    }
+    return {
+      identity: null,
+      viewerId: null,
+      handle: null,
+    };
+  }
 }
 
 function resolveAudience(requested, hasParty) {
@@ -319,6 +379,182 @@ async function requirePartyAccess(req, res, next) {
   } catch (err) {
     next(err);
   }
+}
+
+async function fetchMemberPolicy(memberId) {
+  if (!memberId) return formatPolicyRow(null);
+  const { rows } = await pool.query(
+    `
+      SELECT
+        member_id,
+        default_audience_mode,
+        default_relationship_tiers,
+        default_party_scope,
+        auto_share_current_party,
+        created_at,
+        updated_at
+      FROM tt_member_photo_policy
+      WHERE member_id = $1
+      LIMIT 1
+    `,
+    [memberId]
+  );
+  const formatted = rows.length ? formatPolicyRow(rows[0]) : formatPolicyRow({ member_id: memberId });
+  formatted.member_id = memberId;
+  return formatted;
+}
+
+async function fetchPhotoSets(memberId) {
+  if (!memberId) return [];
+  const { rows } = await pool.query(
+    `
+      SELECT
+        ps.*,
+        COUNT(psi.photo_id)::int AS photo_count
+      FROM tt_photo_set ps
+      LEFT JOIN tt_photo_set_item psi
+        ON psi.photo_set_id = ps.photo_set_id
+      WHERE ps.member_id = $1
+      GROUP BY ps.photo_set_id
+      ORDER BY ps.updated_at DESC NULLS LAST, ps.photo_set_id DESC
+    `,
+    [memberId]
+  );
+  return rows.map(formatPhotoSetRow).filter(Boolean);
+}
+
+async function fetchVisibilitySummary(memberId) {
+  if (!memberId) {
+    return {
+      total_photos: 0,
+      overridden_photos: 0,
+      public_photos: 0,
+      relationship_photos: 0,
+      party_photos: 0,
+      custom_photos: 0,
+    };
+  }
+
+  const { rows } = await pool.query(
+    `
+      SELECT
+        COUNT(*)::int AS total_photos,
+        COUNT(*) FILTER (WHERE pv.photo_id IS NOT NULL)::int AS overridden_photos,
+        COUNT(*) FILTER (WHERE vis.audience_mode = 'public')::int AS public_photos,
+        COUNT(*) FILTER (WHERE vis.audience_mode = 'relationships')::int AS relationship_photos,
+        COUNT(*) FILTER (WHERE vis.audience_mode = 'party')::int AS party_photos,
+        COUNT(*) FILTER (WHERE vis.audience_mode = 'custom_list')::int AS custom_photos
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
+      LEFT JOIN tt_photo_visibility pv
+        ON pv.photo_id = p.photo_id
+      WHERE p.member_id = $1
+    `,
+    [memberId]
+  );
+
+  return rows[0] || {
+    total_photos: 0,
+    overridden_photos: 0,
+    public_photos: 0,
+    relationship_photos: 0,
+    party_photos: 0,
+    custom_photos: 0,
+  };
+}
+
+async function fetchMemberPhotosWithVisibility({ memberId, viewerId, limit = 100, offset = 0 }) {
+  const safeLimit = clampNumber(limit, 1, 500, 100);
+  const safeOffset = clampNumber(offset, 0, 5000, 0);
+  const params = [memberId];
+  const visibilityClause = appendVisibilityFilter({ viewerId, alias: 'vis', params });
+
+  params.push(safeLimit);
+  const limitParam = `$${params.length}`;
+  params.push(safeOffset);
+  const offsetParam = `$${params.length}`;
+
+  const sql = `
+    SELECT
+      p.photo_id,
+      p.member_id,
+      p.handle,
+      p.r2_key,
+      p.original_filename,
+      p.mime_type,
+      p.lat,
+      p.lon,
+      p.taken_at,
+      p.created_at,
+      vis.audience_mode,
+      vis.relationship_tiers,
+      vis.party_id,
+      vis.allowed_member_ids,
+      vis.expires_at,
+      vis.policy_updated_at,
+      (pv.photo_id IS NOT NULL) AS has_override,
+      COALESCE(set_members.set_ids, ARRAY[]::bigint[]) AS set_ids,
+      COUNT(*) OVER()::int AS total_count
+    FROM tt_photo p
+    JOIN vw_photo_effective_visibility vis
+      ON vis.photo_id = p.photo_id
+    LEFT JOIN tt_photo_visibility pv
+      ON pv.photo_id = p.photo_id
+    LEFT JOIN LATERAL (
+      SELECT array_agg(photo_set_id) AS set_ids
+      FROM tt_photo_set_item
+      WHERE photo_id = p.photo_id
+    ) set_members ON TRUE
+    WHERE p.member_id = $1
+      AND ${visibilityClause}
+    ORDER BY p.taken_at DESC NULLS LAST, p.created_at DESC
+    LIMIT ${limitParam} OFFSET ${offsetParam};
+  `;
+
+  const { rows } = await pool.query(sql, params);
+  const total = rows.length ? rows[0].total_count : 0;
+  const photos = rows.map((row) => ({
+    photo_id: row.photo_id,
+    member_id: row.member_id,
+    handle: row.handle,
+    r2_key: row.r2_key,
+    original_filename: row.original_filename,
+    mime_type: row.mime_type,
+    lat: row.lat,
+    lon: row.lon,
+    taken_at: row.taken_at,
+    created_at: row.created_at,
+    visibility: formatVisibilityRow(row),
+    has_override: row.has_override === true,
+    set_ids: Array.isArray(row.set_ids) ? row.set_ids : [],
+  }));
+
+  return { photos, total, limit: safeLimit, offset: safeOffset };
+}
+
+async function ensurePhotosOwnedBy(memberId, photoIds) {
+  if (!memberId || !photoIds.length) return [];
+  const { rows } = await pool.query(
+    `
+      SELECT photo_id
+      FROM tt_photo
+      WHERE member_id = $1
+        AND photo_id = ANY($2::bigint[])
+    `,
+    [memberId, photoIds]
+  );
+
+  const ownedSet = new Set(rows.map((row) => Number(row.photo_id)));
+  const missing = photoIds.filter((id) => !ownedSet.has(Number(id)));
+  if (missing.length) {
+    const err = new Error('photo_not_owned');
+    err.statusCode = 403;
+    err.meta = { missing };
+    throw err;
+  }
+
+  return Array.from(ownedSet);
 }
 
 /**
@@ -526,31 +762,40 @@ router.get('/nearby', async (req, res) => {
       return res.status(400).json({ error: 'lat and lon query params required' });
     }
 
+    const { viewerId } = await getViewerContext(req).catch(() => ({ viewerId: null }));
     const distanceExpr = haversineSql('$1', '$2');
+    const params = [lat, lon, radiusMeters];
+    const visibilityClause = appendVisibilityFilter({ viewerId, alias: 'vis', params });
 
-const sql = `
-  SELECT
-    photo_id,
-    handle,
-    r2_key,
-    original_filename,
-    mime_type,
-    created_at,
-    taken_at,
-    lat,
-    lon,
-    ${distanceExpr} AS distance_m
-  FROM tt_photo
-  WHERE
-    lat IS NOT NULL
-    AND lon IS NOT NULL
-    AND ${distanceExpr} <= $3
-  ORDER BY distance_m, taken_at DESC
-  LIMIT 200;
-`;
+    const sql = `
+      SELECT
+        p.photo_id,
+        p.member_id,
+        p.handle,
+        p.r2_key,
+        p.original_filename,
+        p.mime_type,
+        p.created_at,
+        p.taken_at,
+        p.lat,
+        p.lon,
+        ${distanceExpr} AS distance_m,
+        vis.audience_mode,
+        vis.relationship_tiers,
+        vis.party_id
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
+      WHERE
+        p.lat IS NOT NULL
+        AND p.lon IS NOT NULL
+        AND ${distanceExpr} <= $3
+        AND ${visibilityClause}
+      ORDER BY distance_m, p.taken_at DESC NULLS LAST, p.created_at DESC
+      LIMIT 200;
+    `;
 
-
-    const { rows } = await pool.query(sql, [lat, lon, radiusMeters]);
+    const { rows } = await pool.query(sql, params);
 
     return res.json({
       lat,
@@ -680,34 +925,39 @@ router.get('/map', async (req, res) => {
     // Simple safety clamp: don’t blow up at world scale
     const MAX_RETURN = zoom <= 3 ? 300 : zoom <= 6 ? 800 : 2000;
 
-  const sql = `
+    const { viewerId } = await getViewerContext(req).catch(() => ({ viewerId: null }));
+    const params = [minLat, maxLat, minLon, maxLon, MAX_RETURN];
+    const visibilityClause = appendVisibilityFilter({ viewerId, alias: 'vis', params });
+
+    const sql = `
       SELECT
-        photo_id,
-        handle,
-        r2_key,
-        original_filename,
-        mime_type,
-        lat,
-        lon,
-        taken_at,
-        created_at
-      FROM tt_photo
+        p.photo_id,
+        p.member_id,
+        p.handle,
+        p.r2_key,
+        p.original_filename,
+        p.mime_type,
+        p.lat,
+        p.lon,
+        p.taken_at,
+        p.created_at,
+        vis.audience_mode,
+        vis.relationship_tiers,
+        vis.party_id
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
       WHERE
-        lat IS NOT NULL
-        AND lon IS NOT NULL
-        AND lat BETWEEN $1 AND $2
-        AND lon BETWEEN $3 AND $4
-      ORDER BY taken_at DESC NULLS LAST, created_at DESC
+        p.lat IS NOT NULL
+        AND p.lon IS NOT NULL
+        AND p.lat BETWEEN $1 AND $2
+        AND p.lon BETWEEN $3 AND $4
+        AND ${visibilityClause}
+      ORDER BY p.taken_at DESC NULLS LAST, p.created_at DESC
       LIMIT $5;
     `;
 
-    const { rows } = await pool.query(sql, [
-      minLat,
-      maxLat,
-      minLon,
-      maxLon,
-      MAX_RETURN,
-    ]);
+    const { rows } = await pool.query(sql, params);
 
     return res.json({
       zoom,
@@ -717,6 +967,557 @@ router.get('/map', async (req, res) => {
   } catch (err) {
     console.error('TrashTalk map error', err);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/photos', async (req, res) => {
+  try {
+    const context = await getViewerContext(req).catch(() => ({ viewerId: null }));
+    const viewerId = context.viewerId;
+    const targetMemberId =
+      req.query?.member_id ||
+      req.query?.memberId ||
+      viewerId;
+
+    if (!targetMemberId) {
+      return res.status(400).json({ error: 'member_id_required' });
+    }
+
+    const limit = clampNumber(req.query?.limit, 1, 500, 100);
+    const offset = clampNumber(req.query?.offset, 0, 5000, 0);
+    const { photos, total } = await fetchMemberPhotosWithVisibility({
+      memberId: targetMemberId,
+      viewerId,
+      limit,
+      offset,
+    });
+
+    return res.json({
+      ok: true,
+      member_id: targetMemberId,
+      owner: !!viewerId && viewerId === targetMemberId,
+      total,
+      count: photos.length,
+      pagination: { limit, offset },
+      photos,
+    });
+  } catch (err) {
+    console.error('trashtalk.photos error', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photos_fetch_failed' });
+  }
+});
+
+router.get('/photo/:photoId', async (req, res) => {
+  const photoId = Number(req.params.photoId);
+  if (!Number.isFinite(photoId)) {
+    return res.status(400).json({ error: 'invalid_photo_id' });
+  }
+
+  try {
+    const context = await getViewerContext(req).catch(() => ({ viewerId: null }));
+    const viewerId = context.viewerId;
+    const params = [photoId];
+    const visibilityClause = appendVisibilityFilter({ viewerId, alias: 'vis', params });
+
+    const sql = `
+      SELECT
+        p.photo_id,
+        p.member_id,
+        p.handle,
+        p.r2_key,
+        p.original_filename,
+        p.mime_type,
+        p.lat,
+        p.lon,
+        p.taken_at,
+        p.created_at,
+        vis.audience_mode,
+        vis.relationship_tiers,
+        vis.party_id,
+        vis.allowed_member_ids,
+        vis.expires_at,
+        vis.policy_updated_at
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
+      WHERE p.photo_id = $1
+        AND ${visibilityClause}
+      LIMIT 1;
+    `;
+
+    const { rows } = await pool.query(sql, params);
+    if (!rows.length) {
+      return res.status(404).json({ error: 'photo_not_found' });
+    }
+
+    const row = rows[0];
+    return res.json({
+      ok: true,
+      photo: {
+        photo_id: row.photo_id,
+        member_id: row.member_id,
+        handle: row.handle,
+        r2_key: row.r2_key,
+        original_filename: row.original_filename,
+        mime_type: row.mime_type,
+        lat: row.lat,
+        lon: row.lon,
+        taken_at: row.taken_at,
+        created_at: row.created_at,
+        visibility: formatVisibilityRow(row),
+      },
+    });
+  } catch (err) {
+    console.error('trashtalk.photo fetch failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_fetch_failed' });
+  }
+});
+
+router.get('/visibility/overview', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.query?.member_id ||
+      req.query?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const [policy, sets, summary] = await Promise.all([
+      fetchMemberPolicy(memberId),
+      fetchPhotoSets(memberId),
+      fetchVisibilitySummary(memberId),
+    ]);
+
+    return res.json({
+      ok: true,
+      member_id: memberId,
+      policy,
+      sets,
+      summary,
+    });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('visibility.overview error', err);
+    return res.status(status).json({ error: err.message || 'visibility_overview_failed' });
+  }
+});
+
+router.post('/visibility/policy', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const nextMode = normalizeAudienceMode(
+      req.body?.default_audience_mode || req.body?.defaultAudienceMode,
+      'public'
+    );
+    const nextTiers = normalizeRelationshipTiers(
+      req.body?.default_relationship_tiers || req.body?.defaultRelationshipTiers || DEFAULT_RELATIONSHIP_TIERS
+    );
+    const requestedScope =
+      typeof req.body?.default_party_scope === 'string'
+        ? req.body.default_party_scope.trim().toLowerCase()
+        : typeof req.body?.defaultPartyScope === 'string'
+        ? req.body.defaultPartyScope.trim().toLowerCase()
+        : 'attended';
+    const allowedScopes = new Set(['none', 'attended', 'hosted_only']);
+    const defaultPartyScope = allowedScopes.has(requestedScope)
+      ? requestedScope
+      : 'attended';
+    const autoShare = req.body?.auto_share_current_party !== false &&
+      req.body?.autoShareCurrentParty !== false;
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_member_photo_policy (
+          member_id,
+          default_audience_mode,
+          default_relationship_tiers,
+          default_party_scope,
+          auto_share_current_party,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (member_id)
+        DO UPDATE SET
+          default_audience_mode = EXCLUDED.default_audience_mode,
+          default_relationship_tiers = EXCLUDED.default_relationship_tiers,
+          default_party_scope = EXCLUDED.default_party_scope,
+          auto_share_current_party = EXCLUDED.auto_share_current_party,
+          updated_at = NOW()
+        RETURNING *
+      `,
+      [memberId, nextMode, nextTiers, defaultPartyScope, autoShare]
+    );
+
+    return res.json({ ok: true, policy: formatPolicyRow(rows[0]) });
+  } catch (err) {
+    console.error('visibility.policy save failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'policy_save_failed' });
+  }
+});
+
+router.post('/visibility/sets', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const rawLabel = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+    if (!rawLabel) {
+      return res.status(400).json({ error: 'label_required' });
+    }
+
+    const description =
+      typeof req.body?.description === 'string' ? req.body.description.trim() : null;
+    const defaultModeRaw =
+      req.body?.default_audience_mode ||
+      req.body?.defaultAudienceMode ||
+      null;
+    const defaultMode = defaultModeRaw ? normalizeAudienceMode(defaultModeRaw, 'public') : null;
+    const defaultTiers =
+      defaultMode === 'relationships'
+        ? normalizeRelationshipTiers(
+            req.body?.default_relationship_tiers || req.body?.defaultRelationshipTiers
+          )
+        : null;
+    const defaultPartyId = req.body?.default_party_id || req.body?.defaultPartyId || null;
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_photo_set (
+          member_id,
+          label,
+          description,
+          default_audience_mode,
+          default_relationship_tiers,
+          default_party_id,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::uuid, NOW(), NOW())
+        RETURNING *
+      `,
+      [memberId, rawLabel, description, defaultMode, defaultTiers, defaultPartyId]
+    );
+
+    return res.json({ ok: true, set: formatPhotoSetRow(rows[0]) });
+  } catch (err) {
+    console.error('visibility.sets create failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_set_create_failed' });
+  }
+});
+
+router.patch('/visibility/sets/:setId', async (req, res) => {
+  const setId = Number(req.params.setId);
+  if (!Number.isFinite(setId)) {
+    return res.status(400).json({ error: 'invalid_set_id' });
+  }
+
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const updates = [];
+    const params = [setId, memberId];
+
+    if (typeof req.body?.label === 'string') {
+      updates.push(`label = $${params.length + 1}`);
+      params.push(req.body.label.trim());
+    }
+
+    if (typeof req.body?.description === 'string') {
+      updates.push(`description = $${params.length + 1}`);
+      params.push(req.body.description.trim());
+    }
+
+    if ('default_audience_mode' in req.body || 'defaultAudienceMode' in req.body) {
+      const modeRaw = req.body?.default_audience_mode || req.body?.defaultAudienceMode;
+      updates.push(`default_audience_mode = $${params.length + 1}`);
+      params.push(modeRaw ? normalizeAudienceMode(modeRaw, 'public') : null);
+    }
+
+    if ('default_relationship_tiers' in req.body || 'defaultRelationshipTiers' in req.body) {
+      const tiersRaw =
+        req.body?.default_relationship_tiers || req.body?.defaultRelationshipTiers;
+      updates.push(`default_relationship_tiers = $${params.length + 1}`);
+      params.push(Array.isArray(tiersRaw) ? normalizeRelationshipTiers(tiersRaw) : null);
+    }
+
+    if ('default_party_id' in req.body || 'defaultPartyId' in req.body) {
+      const partyId = req.body?.default_party_id || req.body?.defaultPartyId || null;
+      updates.push(`default_party_id = $${params.length + 1}::uuid`);
+      params.push(partyId);
+    }
+
+    if (!updates.length) {
+      return res.status(400).json({ error: 'no_updates_provided' });
+    }
+
+    updates.push('updated_at = NOW()');
+
+    const sql = `
+      UPDATE tt_photo_set
+         SET ${updates.join(', ')}
+       WHERE photo_set_id = $1
+         AND member_id = $2
+       RETURNING *
+    `;
+
+    const { rows } = await pool.query(sql, params);
+    if (!rows.length) {
+      return res.status(404).json({ error: 'photo_set_not_found' });
+    }
+
+    return res.json({ ok: true, set: formatPhotoSetRow(rows[0]) });
+  } catch (err) {
+    console.error('visibility.sets update failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_set_update_failed' });
+  }
+});
+
+router.delete('/visibility/sets/:setId', async (req, res) => {
+  const setId = Number(req.params.setId);
+  if (!Number.isFinite(setId)) {
+    return res.status(400).json({ error: 'invalid_set_id' });
+  }
+
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const { rowCount } = await pool.query(
+      `
+        DELETE FROM tt_photo_set
+        WHERE photo_set_id = $1
+          AND member_id = $2
+      `,
+      [setId, memberId]
+    );
+
+    if (!rowCount) {
+      return res.status(404).json({ error: 'photo_set_not_found' });
+    }
+
+    return res.json({ ok: true, deleted: true });
+  } catch (err) {
+    console.error('visibility.sets delete failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_set_delete_failed' });
+  }
+});
+
+router.post('/visibility/sets/:setId/photos', async (req, res) => {
+  const setId = Number(req.params.setId);
+  if (!Number.isFinite(setId)) {
+    return res.status(400).json({ error: 'invalid_set_id' });
+  }
+
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const { rows: setRows } = await pool.query(
+      `
+        SELECT photo_set_id
+          FROM tt_photo_set
+         WHERE photo_set_id = $1
+           AND member_id = $2
+         LIMIT 1
+      `,
+      [setId, memberId]
+    );
+
+    if (!setRows.length) {
+      return res.status(404).json({ error: 'photo_set_not_found' });
+    }
+
+    const addIds = parsePhotoIds(req.body?.add || req.body?.photo_ids || []);
+    const removeIds = parsePhotoIds(req.body?.remove || []);
+    let added = 0;
+    let removed = 0;
+
+    if (addIds.length) {
+      await ensurePhotosOwnedBy(memberId, addIds);
+      const { rowCount } = await pool.query(
+        `
+          INSERT INTO tt_photo_set_item (photo_set_id, photo_id)
+          SELECT $1, unnest($2::bigint[])
+          ON CONFLICT DO NOTHING
+        `,
+        [setId, addIds]
+      );
+      added = rowCount;
+    }
+
+    if (removeIds.length) {
+      const { rowCount } = await pool.query(
+        `
+          DELETE FROM tt_photo_set_item
+          WHERE photo_set_id = $1
+            AND photo_id = ANY($2::bigint[])
+        `,
+        [setId, removeIds]
+      );
+      removed = rowCount;
+    }
+
+    return res.json({
+      ok: true,
+      added,
+      removed,
+    });
+  } catch (err) {
+    console.error('visibility.sets photos update failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_set_membership_failed' });
+  }
+});
+
+router.post('/photo/visibility', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId || viewerId !== memberId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const photoIds =
+      parsePhotoIds(req.body?.photo_ids || req.body?.photoIds) ||
+      [];
+
+    if (!photoIds.length) {
+      return res.status(400).json({ error: 'photo_ids_required' });
+    }
+
+    await ensurePhotosOwnedBy(memberId, photoIds);
+
+    const action = typeof req.body?.action === 'string'
+      ? req.body.action.trim().toLowerCase()
+      : 'set';
+
+    if (action === 'clear') {
+      const { rowCount } = await pool.query(
+        `
+          DELETE FROM tt_photo_visibility
+          WHERE photo_id = ANY($1::bigint[])
+            AND photo_id IN (
+              SELECT photo_id
+              FROM tt_photo
+              WHERE member_id = $2
+            )
+        `,
+        [photoIds, memberId]
+      );
+      return res.json({ ok: true, cleared: rowCount });
+    }
+
+    const audienceMode = normalizeAudienceMode(
+      req.body?.audience_mode || req.body?.audienceMode,
+      'public'
+    );
+    const relationshipTiers = normalizeRelationshipTiers(
+      req.body?.relationship_tiers || req.body?.relationshipTiers
+    );
+    const allowedMembers = normalizeAllowedMembers(
+      req.body?.allowed_member_ids || req.body?.allowedMemberIds
+    );
+    const partyId = req.body?.party_id || req.body?.partyId || null;
+    const expiresAt = normalizeDate(req.body?.expires_at || req.body?.expiresAt);
+
+    if (audienceMode === 'custom_list' && !allowedMembers.length) {
+      return res.status(400).json({ error: 'allowed_members_required' });
+    }
+
+    const { rows } = await pool.query(
+      `
+        INSERT INTO tt_photo_visibility (
+          photo_id,
+          audience_mode,
+          relationship_tiers,
+          party_id,
+          allowed_member_ids,
+          expires_at,
+          created_at,
+          updated_at
+        )
+        SELECT
+          photo_id,
+          $2,
+          $3,
+          $4::uuid,
+          $5,
+          $6,
+          NOW(),
+          NOW()
+        FROM tt_photo
+        WHERE member_id = $1
+          AND photo_id = ANY($7::bigint[])
+        ON CONFLICT (photo_id)
+        DO UPDATE SET
+          audience_mode = EXCLUDED.audience_mode,
+          relationship_tiers = EXCLUDED.relationship_tiers,
+          party_id = EXCLUDED.party_id,
+          allowed_member_ids = EXCLUDED.allowed_member_ids,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+        RETURNING photo_id
+      `,
+      [memberId, audienceMode, relationshipTiers, partyId, allowedMembers, expiresAt, photoIds]
+    );
+
+    return res.json({ ok: true, updated: rows.length });
+  } catch (err) {
+    console.error('photo.visibility bulk update failed', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'photo_visibility_update_failed' });
   }
 });
 

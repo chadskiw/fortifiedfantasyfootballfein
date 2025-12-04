@@ -1,5 +1,9 @@
 // src/services/UserOverviewService.js
 const { pool } = require('../src/db'); // adjust if your pool is elsewhere
+const {
+  appendVisibilityFilter,
+  formatVisibilityRow,
+} = require('./photoVisibility');
 
 let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
@@ -204,86 +208,95 @@ async function loadQuickhitterProfile(memberId) {
 class UserOverviewService {
   /**
    * Return high-level overview of a user's Trash Talk activity.
-   * Shape:
-   * {
-   *   member_id,
-   *   handle,
-   *   avatar_url,
-   *   photo_count,
-   *   last_taken_at,
-   *   photo_bounds: { has_geo, min_lat, max_lat, ... },
-   *   recent_photos: [{ photo_id, r2_key, lat, lon, taken_at, created_at }, ...]
-   * }
+   * viewerId (if provided) is used to filter photos based on visibility rules.
    */
-  async getOverview(memberId) {
+  async getOverview(memberId, options = {}) {
     if (!memberId) {
       throw new Error('memberId is required');
     }
+    const viewerId = options.viewerId || null;
 
     // Try to pull core member info from ff_member if it exists
 let member = await loadMemberProfile(memberId);
 let quickhitter = await loadQuickhitterProfile(memberId);
 const theme = await loadUserTheme(memberId);
 
-// For now, only filter tt_photo by member_id.
-// tt_photo does NOT have a handle column.
-const identifierClause = 'member_id = $1';
-const identifierParams = [memberId];
+    const statsParams = [memberId];
+    const statsClause = appendVisibilityFilter({
+      viewerId,
+      alias: 'vis',
+      params: statsParams,
+    });
 
-
-    // Geo stats from tt_photo
-    const { rows: statRows } = await pool.query(
-      `
+    const statsSql = `
       SELECT
         COUNT(*)::int AS photo_count,
-        MIN(lat)      AS min_lat,
-        MAX(lat)      AS max_lat,
-        MIN(lon)      AS min_lon,
-        MAX(lon)      AS max_lon,
-        AVG(lat)      AS center_lat,
-        AVG(lon)      AS center_lon,
-        MAX(taken_at) AS last_taken_at
-      FROM tt_photo
-      WHERE ${identifierClause}
-        AND lat IS NOT NULL
-        AND lon IS NOT NULL
-      `,
-      identifierParams
-    );
+        COUNT(*) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL)::int AS geo_count,
+        MIN(p.lat) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS min_lat,
+        MAX(p.lat) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS max_lat,
+        MIN(p.lon) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS min_lon,
+        MAX(p.lon) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS max_lon,
+        AVG(p.lat) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS center_lat,
+        AVG(p.lon) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS center_lon,
+        MAX(p.taken_at) AS last_taken_at
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
+      WHERE p.member_id = $1
+        AND ${statsClause}
+    `;
+
+    const { rows: statRows } = await pool.query(statsSql, statsParams);
 
     const stats = statRows[0] || {};
     const hasGeo =
-      (stats.photo_count || 0) > 0 &&
+      (stats.geo_count || 0) > 0 &&
       stats.center_lat !== null &&
       stats.center_lon !== null;
 
-    // Recent photos (for grid + optional markers)
-    const { rows: recentPhotos } = await pool.query(
-      `
-      SELECT
-        photo_id,
-        r2_key,
-        lat,
-        lon,
-        taken_at,
-        created_at
-      FROM tt_photo
-      WHERE ${identifierClause}
-      ORDER BY taken_at DESC NULLS LAST, created_at DESC
-      LIMIT 24
-      `,
-      identifierParams
-    );
+    const recentParams = [memberId];
+    const recentClause = appendVisibilityFilter({
+      viewerId,
+      alias: 'vis',
+      params: recentParams,
+    });
+    recentParams.push(24);
 
-    const accentFromTheme = theme && theme.accent_hex ? theme.accent_hex : null;
-    const accentFromQuickhitter =
+    const recentSql = `
+      SELECT
+        p.photo_id,
+        p.r2_key,
+        p.lat,
+        p.lon,
+        p.taken_at,
+        p.created_at,
+        vis.audience_mode,
+        vis.relationship_tiers,
+        vis.party_id,
+        vis.allowed_member_ids,
+        vis.expires_at,
+        vis.policy_updated_at
+      FROM tt_photo p
+      JOIN vw_photo_effective_visibility vis
+        ON vis.photo_id = p.photo_id
+      WHERE p.member_id = $1
+        AND ${recentClause}
+      ORDER BY p.taken_at DESC NULLS LAST, p.created_at DESC
+      LIMIT $2
+    `;
+
+    const { rows: recentPhotos } = await pool.query(recentSql, recentParams);
+
+    const accentFromTheme = theme?.accent_hex || null;
+    const handleColor =
       quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null;
 
     return {
       member_id: memberId,
       handle:  (member && member.handle) ? member.handle : memberId,
       display_name: member && member.display_name ? member.display_name : null,
-      color_hex: accentFromTheme || accentFromQuickhitter,
+      color_hex: handleColor,
+      accent_hex: accentFromTheme || handleColor,
       avatar_url: member && member.avatar_url ? member.avatar_url : null,
       map_theme: theme,
       photo_count: stats.photo_count || 0,
@@ -299,7 +312,15 @@ const identifierParams = [memberId];
             has_geo: true,
           }
         : { has_geo: false },
-      recent_photos: recentPhotos,
+      recent_photos: recentPhotos.map((row) => ({
+        photo_id: row.photo_id,
+        r2_key: row.r2_key,
+        lat: row.lat,
+        lon: row.lon,
+        taken_at: row.taken_at,
+        created_at: row.created_at,
+        visibility: formatVisibilityRow(row),
+      })),
     };
   }
 }

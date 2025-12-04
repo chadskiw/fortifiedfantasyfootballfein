@@ -140,9 +140,12 @@ function buildAccessPayload(decision = {}, req) {
 router.get('/api/users/:memberId/overview', Bouncer.guardMemberPage, async (req, res) => {
   const { memberId } = req.params;
   const accessDecision = req.accessDecision || null;
+  const viewerId = Bouncer.getViewerId(req);
 
   try {
-    const overview = await userOverviewService.getOverview(memberId);
+    const overview = await userOverviewService.getOverview(memberId, {
+      viewerId,
+    });
     if (!overview) {
       return res.status(404).json({ error: 'user_not_found' });
     }
