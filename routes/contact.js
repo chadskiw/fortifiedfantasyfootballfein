@@ -161,6 +161,15 @@ function normalizeViewedFilter(raw) {
   return 'unviewed';
 }
 
+function normalizeStatusFilter(raw) {
+  if (typeof raw !== 'string') return 'pending';
+  const value = raw.trim().toLowerCase();
+  if (!value) return 'pending';
+  if (['all', '*', 'any'].includes(value)) return 'all';
+  if (['pending', 'accepted', 'ignored', 'blocked'].includes(value)) return value;
+  return 'pending';
+}
+
 router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   const guard = req.contactGuard;
   if (!guard) {
@@ -550,7 +559,8 @@ router.get('/requests', async (req, res) => {
 
   try {
     const viewFilter = normalizeViewedFilter(req.query?.viewed);
-    const rows = await fetchContactRequests(targetId, { viewFilter });
+    const statusFilter = normalizeStatusFilter(req.query?.status);
+    const rows = await fetchContactRequests(targetId, { viewFilter, statusFilter });
 
 return res.json({
   ok: true,
@@ -578,16 +588,20 @@ return res.json({
   }
 });
 
-async function fetchContactRequests(targetId, { viewFilter = 'unviewed' } = {}) {
+async function fetchContactRequests(targetId, { viewFilter = 'unviewed', statusFilter = 'pending' } = {}) {
   const selectHandle = ffMemberHasHandle ? 'fm.handle AS requester_handle' : 'NULL::text AS requester_handle';
   const selectName = ffMemberHasDisplayName ? 'fm.display_name AS requester_name' : 'NULL::text AS requester_name';
   const joinClause = ffMemberHasHandle || ffMemberHasDisplayName
     ? 'LEFT JOIN ff_member fm ON fm.member_id = r.requester_member_id'
     : '';
-  const whereClauses = [
-    'r.target_member_id = $1',
-    "r.status = 'pending'",
-  ];
+  const whereClauses = ['r.target_member_id = $1'];
+  const params = [targetId];
+  if (statusFilter === 'pending') {
+    whereClauses.push("r.status = 'pending'");
+  } else if (statusFilter !== 'all') {
+    params.push(statusFilter);
+    whereClauses.push(`r.status = $${params.length}`);
+  }
   if (viewFilter === 'viewed') {
     whereClauses.push('r.viewed_at IS NOT NULL');
   } else if (viewFilter !== 'all') {
@@ -630,7 +644,7 @@ const sql = `
 
 
   try {
-    const { rows } = await pool.query(sql, [targetId]);
+  const { rows } = await pool.query(sql, params);
     return rows;
   } catch (err) {
     const msg = (err?.message || '').toLowerCase();
