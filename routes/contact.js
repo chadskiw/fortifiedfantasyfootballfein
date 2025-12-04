@@ -7,9 +7,7 @@ let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 const CONTACT_CHANNEL_TYPES = new Set(['phone_call', 'phone_text', 'email']);
 const RELATIONSHIP_CHANNEL_TYPE = 'relationship';
-const RELATIONSHIP_TYPE_MAX = 40;
 const RELATIONSHIP_LABEL_MAX = 80;
-const RELATIONSHIP_NOTE_MAX = 280;
 
 
 function normalizeChannelValue(row, channelType) {
@@ -59,18 +57,6 @@ async function fetchMemberContactValue(memberId, channelType) {
   return normalizeChannelValue(row, channelType);
 }
 
-function normalizeRelationshipType(raw) {
-  if (typeof raw !== 'string') return null;
-  const trimmed = raw.trim().toLowerCase();
-  if (!trimmed) return null;
-  const cleaned = trimmed
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/_{2,}/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!cleaned) return null;
-  return cleaned.slice(0, RELATIONSHIP_TYPE_MAX);
-}
-
 function normalizeRelationshipLabel(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
@@ -78,49 +64,40 @@ function normalizeRelationshipLabel(raw) {
   return trimmed.slice(0, RELATIONSHIP_LABEL_MAX);
 }
 
-function normalizeRelationshipNote(raw) {
-  if (typeof raw !== 'string') return '';
-  const trimmed = raw.trim();
-  if (!trimmed) return '';
-  return trimmed.slice(0, RELATIONSHIP_NOTE_MAX);
-}
-
 
 function buildContactRequestMessage({
   contactValue,
   note,
   isVerified,
-  relationshipType,
   relationshipLabel,
-  relationshipNote,
+  targetRelationshipLabel,
 }) {
   const payload = {};
   if (contactValue) payload.contact_value = contactValue;
   if (typeof isVerified === 'boolean') payload.is_verified = isVerified;
   if (note) payload.note = note;
-  if (relationshipType) payload.relationship_type = relationshipType;
   if (relationshipLabel) payload.relationship_label = relationshipLabel;
-  if (relationshipNote) payload.relationship_note = relationshipNote;
+  if (targetRelationshipLabel) payload.target_relationship_label = targetRelationshipLabel;
   if (!Object.keys(payload).length) return '';
   try {
     return JSON.stringify(payload);
   } catch {
-    return note || relationshipNote || relationshipLabel || '';
+    return note || relationshipLabel || '';
   }
 }
 
 
 function parseContactRequestMessage(raw) {
-  if (!raw) {
-    return {
-      note: '',
-      contact_value: null,
-      is_verified: null,
-      relationship_type: null,
-      relationship_label: null,
-      relationship_note: '',
-    };
-  }
+  const empty = {
+    note: '',
+    contact_value: null,
+    is_verified: null,
+    relationship_type: null,
+    relationship_label: null,
+    relationship_note: '',
+    target_relationship_label: null,
+  };
+  if (!raw) return empty;
   try {
     const parsed = JSON.parse(raw);
     return {
@@ -135,16 +112,13 @@ function parseContactRequestMessage(raw) {
         typeof parsed.relationship_label === 'string' ? parsed.relationship_label : null,
       relationship_note:
         typeof parsed.relationship_note === 'string' ? parsed.relationship_note : '',
+      target_relationship_label:
+        typeof parsed.target_relationship_label === 'string'
+          ? parsed.target_relationship_label
+          : null,
     };
   } catch {
-    return {
-      note: raw,
-      contact_value: null,
-      is_verified: null,
-      relationship_type: null,
-      relationship_label: null,
-      relationship_note: '',
-    };
+    return { ...empty, note: raw };
   }
 }
 
@@ -197,22 +171,13 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
 
   try {
     if (channelType === RELATIONSHIP_CHANNEL_TYPE) {
-      const relationshipType = normalizeRelationshipType(req.body?.relationship_type);
-      const relationshipLabel =
-        normalizeRelationshipLabel(req.body?.relationship_label) ||
-        (relationshipType ? relationshipType.replace(/_/g, ' ') : null);
-      const relationshipNote = normalizeRelationshipNote(req.body?.relationship_note);
-
-      if (!relationshipType && !relationshipLabel) {
+      const relationshipLabel = normalizeRelationshipLabel(req.body?.relationship_label);
+      if (!relationshipLabel) {
         return res.status(400).json({ error: 'relationship_detail_required' });
       }
 
-      const displayMessage = relationshipLabel || relationshipType || relationshipNote || '';
       const messagePayload = buildContactRequestMessage({
-        note: displayMessage,
-        relationshipType,
         relationshipLabel,
-        relationshipNote,
       });
 
       const { rows } = await pool.query(
@@ -232,7 +197,7 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
           guard.requesterId,
           guard.targetId,
           channelType,
-          messagePayload || displayMessage || null,
+          messagePayload || relationshipLabel,
         ]
       );
 
@@ -301,6 +266,120 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
   } catch (err) {
     console.error('contact.request insert failed', err);
     return res.status(500).json({ error: 'contact_request_failed' });
+  }
+});
+
+router.post('/request/:requestId/relationship', async (req, res) => {
+  const viewerId = Bouncer.getViewerId(req);
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+
+  const requestId = req.params.requestId;
+  if (!requestId) {
+    return res.status(400).json({ error: 'missing_request_id' });
+  }
+
+  const decision = (req.body?.decision || '').toLowerCase();
+  if (!['accept', 'ignore', 'block'].includes(decision)) {
+    return res.status(400).json({ error: 'invalid_relationship_decision' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          request_id,
+          requester_member_id,
+          target_member_id,
+          channel_type,
+          status,
+          message
+        FROM tt_contact_request
+        WHERE request_id = $1
+      `,
+      [requestId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'request_not_found' });
+    }
+
+    const row = rows[0];
+    if (row.target_member_id !== viewerId) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    if (row.channel_type !== RELATIONSHIP_CHANNEL_TYPE) {
+      return res.status(400).json({ error: 'not_relationship_request' });
+    }
+    if (row.status !== 'pending') {
+      return res.status(409).json({ error: 'request_already_completed' });
+    }
+
+    let nextStatus = row.status;
+    let nextMessage = row.message || '';
+
+    if (decision === 'accept') {
+      const relationshipLabel = normalizeRelationshipLabel(req.body?.relationship_label);
+      if (!relationshipLabel) {
+        return res.status(400).json({ error: 'relationship_detail_required' });
+      }
+
+      let messagePayload = {};
+      if (row.message) {
+        try {
+          const parsed = JSON.parse(row.message);
+          if (parsed && typeof parsed === 'object') {
+            messagePayload = parsed;
+          }
+        } catch {
+          messagePayload = {};
+        }
+      }
+      if (!messagePayload.relationship_label) {
+        messagePayload.relationship_label = relationshipLabel;
+      }
+      messagePayload.target_relationship_label = relationshipLabel;
+      nextMessage = JSON.stringify(messagePayload);
+      nextStatus = 'accepted';
+    } else if (decision === 'ignore') {
+      nextStatus = 'ignored';
+    } else if (decision === 'block') {
+      nextStatus = 'blocked';
+      try {
+        await pool.query(
+          `
+            INSERT INTO tt_member_block (blocker_member_id, blocked_member_id, block_type)
+            VALUES ($1, $2, 'relationship_request')
+            ON CONFLICT (blocker_member_id, blocked_member_id)
+            DO UPDATE SET block_type = EXCLUDED.block_type
+          `,
+          [viewerId, row.requester_member_id]
+        );
+      } catch (blockErr) {
+        console.warn('contact.relationship block insert failed', blockErr);
+      }
+    }
+
+    await pool.query(
+      `
+        UPDATE tt_contact_request
+        SET status = $1,
+            message = $2,
+            updated_at = NOW()
+        WHERE request_id = $3
+      `,
+      [nextStatus, nextMessage, requestId]
+    );
+
+    return res.json({
+      ok: true,
+      request_id: requestId,
+      status: nextStatus,
+    });
+  } catch (err) {
+    console.error('contact.relationship response error', err);
+    return res.status(500).json({ error: 'relationship_response_failed' });
   }
 });
 

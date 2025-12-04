@@ -130,7 +130,39 @@ async function fetchRelationship(client, memberA, memberB) {
     `,
     [memberA, memberB]
   );
-  return rows[0] || null;
+  if (rows[0]) {
+    return rows[0];
+  }
+  return fetchAcceptedRelationshipRequest(client, memberA, memberB);
+}
+
+async function fetchAcceptedRelationshipRequest(client, memberA, memberB) {
+  const { rows } = await client.query(
+    `
+    SELECT request_id
+    FROM tt_contact_request
+    WHERE
+      channel_type = 'relationship'
+      AND status = 'accepted'
+      AND (
+        (requester_member_id = $1 AND target_member_id = $2)
+        OR
+        (requester_member_id = $2 AND target_member_id = $1)
+      )
+    ORDER BY updated_at DESC
+    LIMIT 1
+    `,
+    [memberA, memberB]
+  );
+  if (!rows.length) return null;
+  return {
+    relationship_id: rows[0].request_id,
+    member_id_from: memberA,
+    member_id_to: memberB,
+    relationship_type: 'relationship_request',
+    status: 'active',
+    is_mutual: true,
+  };
 }
 
 async function fetchBlock(client, memberA, memberB) {
