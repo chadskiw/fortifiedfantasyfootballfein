@@ -104,20 +104,38 @@ async function fetchGuardianControl(client, childMemberId) {
 }
 
 async function fetchRelationship(client, memberA, memberB) {
+  // No IDs, no relationship
   if (!memberA || !memberB) return null;
+
+  // Self-relationship: don't hit the DB, just return a synthetic object
+  if (memberA === memberB) {
+    return {
+      relationship_id: null,           // no DB row
+      member_id_from: memberA,
+      member_id_to: memberB,
+      relationship_type: 'self',
+      role_from: 'Self',
+      role_to: 'Self',
+      status: 'active',
+      is_mutual: true,
+      created_at: new Date().toISOString(), // or null if you prefer
+    };
+  }
+
+  // Normal relationship lookup between two distinct members
   const { rows } = await client.query(
     `
     SELECT
       relationship_id,
       member_id_from,
       member_id_to,
-      relationship_type,
-      role_from,
-      role_to,
+      relationship_type_from AS relationship_type,
+      relationship_label_from AS role_from,
+      relationship_label_to   AS role_to,
       status,
       is_mutual,
-      created_at
-    FROM tt_member_relationship
+      established_at          AS created_at
+    FROM tt_relationships_accepted
     WHERE
       status = 'active'
       AND (
@@ -125,16 +143,20 @@ async function fetchRelationship(client, memberA, memberB) {
         OR
         (member_id_from = $2 AND member_id_to = $1)
       )
-    ORDER BY is_mutual DESC, created_at ASC
+    ORDER BY established_at DESC
     LIMIT 1
     `,
     [memberA, memberB]
   );
+
   if (rows[0]) {
     return rows[0];
   }
+
+  // Fallback: accepted-but-not-promoted contact request (optional)
   return fetchAcceptedRelationshipRequest(client, memberA, memberB);
 }
+
 
 async function fetchAcceptedRelationshipRequest(client, memberA, memberB) {
   const { rows } = await client.query(

@@ -356,50 +356,7 @@ router.post('/request', Bouncer.guardContactRequest, async (req, res) => {
     return res.status(500).json({ error: 'contact_request_failed' });
   }
 });
-async function ensureMemberRelationshipFromRequest(row, messagePayload) {
-  const memberFrom = row.requester_member_id;
-  const memberTo = row.target_member_id;
 
-  // Pull any type / labels we captured in the message
-  const relationshipType =
-    typeof messagePayload.relationship_type === 'string'
-      ? messagePayload.relationship_type
-      : 'relationship';
-
-  const roleFrom =
-    typeof messagePayload.relationship_label === 'string'
-      ? messagePayload.relationship_label
-      : relationshipType;
-
-  const roleTo =
-    typeof messagePayload.target_relationship_label === 'string'
-      ? messagePayload.target_relationship_label
-      : roleFrom;
-
-  // Create / reactivate the relationship
-  await pool.query(
-    `
-      INSERT INTO tt_member_relationship (
-        member_id_from,
-        member_id_to,
-        relationship_type,
-        role_from,
-        role_to,
-        status,
-        is_mutual
-      )
-      VALUES ($1, $2, $3, $4, $5, 'active', TRUE)
-      ON CONFLICT (member_id_from, member_id_to)
-      DO UPDATE SET
-        relationship_type = EXCLUDED.relationship_type,
-        role_from        = EXCLUDED.role_from,
-        role_to          = EXCLUDED.role_to,
-        status           = 'active',
-        is_mutual        = TRUE
-    `,
-    [memberFrom, memberTo, relationshipType, roleFrom, roleTo]
-  );
-}
 
 router.post('/request/:requestId/relationship', async (req, res) => {
   const viewerId = Bouncer.getViewerId(req);
@@ -502,8 +459,6 @@ router.post('/request/:requestId/relationship', async (req, res) => {
     // Promote into tt_relationships_accepted (asymmetric types supported)
     try {
       await ensureAcceptedRelationshipFromRequest(row, messagePayload, viewerId);
-      // Optional: also keep the old tt_member_relationship table in sync:
-      // await ensureMemberRelationshipFromRequest(row, messagePayload);
     } catch (err) {
       console.error('contact.relationship promote failed', err);
       return res.status(500).json({ error: 'relationship_promote_failed' });
