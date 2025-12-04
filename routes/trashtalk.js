@@ -107,16 +107,20 @@ function clampNumber(value, min, max, fallback) {
   return num;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function parsePhotoIds(raw) {
   if (!Array.isArray(raw)) return [];
   return Array.from(
     new Set(
       raw
         .map((val) => {
-          const num = Number(val);
-          return Number.isFinite(num) && num > 0 ? Math.floor(num) : null;
+          if (val == null) return null;
+          const str = String(val).trim();
+          if (!str) return null;
+          return UUID_PATTERN.test(str) ? str : null;
         })
-        .filter((val) => val != null)
+        .filter(Boolean)
     )
   );
 }
@@ -540,13 +544,13 @@ async function ensurePhotosOwnedBy(memberId, photoIds) {
       SELECT photo_id
       FROM tt_photo
       WHERE member_id = $1
-        AND photo_id = ANY($2::bigint[])
+        AND photo_id = ANY($2::uuid[])
     `,
     [memberId, photoIds]
   );
 
-  const ownedSet = new Set(rows.map((row) => Number(row.photo_id)));
-  const missing = photoIds.filter((id) => !ownedSet.has(Number(id)));
+  const ownedSet = new Set(rows.map((row) => String(row.photo_id)));
+  const missing = photoIds.filter((id) => !ownedSet.has(String(id)));
   if (missing.length) {
     const err = new Error('photo_not_owned');
     err.statusCode = 403;
@@ -1009,8 +1013,8 @@ router.get('/photos', async (req, res) => {
 });
 
 router.get('/photo/:photoId', async (req, res) => {
-  const photoId = Number(req.params.photoId);
-  if (!Number.isFinite(photoId)) {
+  const photoId = (req.params.photoId || '').trim();
+  if (!UUID_PATTERN.test(photoId)) {
     return res.status(400).json({ error: 'invalid_photo_id' });
   }
 
@@ -1384,8 +1388,8 @@ router.post('/visibility/sets/:setId/photos', async (req, res) => {
       await ensurePhotosOwnedBy(memberId, addIds);
       const { rowCount } = await pool.query(
         `
-          INSERT INTO tt_photo_set_item (photo_set_id, photo_id)
-          SELECT $1, unnest($2::bigint[])
+      INSERT INTO tt_photo_set_item (photo_set_id, photo_id)
+      SELECT $1, unnest($2::uuid[])
           ON CONFLICT DO NOTHING
         `,
         [setId, addIds]
@@ -1398,7 +1402,7 @@ router.post('/visibility/sets/:setId/photos', async (req, res) => {
         `
           DELETE FROM tt_photo_set_item
           WHERE photo_set_id = $1
-            AND photo_id = ANY($2::bigint[])
+      AND photo_id = ANY($2::uuid[])
         `,
         [setId, removeIds]
       );
@@ -1447,7 +1451,7 @@ router.post('/photo/visibility', async (req, res) => {
       const { rowCount } = await pool.query(
         `
           DELETE FROM tt_photo_visibility
-          WHERE photo_id = ANY($1::bigint[])
+        WHERE photo_id = ANY($1::uuid[])
             AND photo_id IN (
               SELECT photo_id
               FROM tt_photo
@@ -1499,7 +1503,7 @@ router.post('/photo/visibility', async (req, res) => {
           NOW()
         FROM tt_photo
         WHERE member_id = $1
-          AND photo_id = ANY($7::bigint[])
+          AND photo_id = ANY($7::uuid[])
         ON CONFLICT (photo_id)
         DO UPDATE SET
           audience_mode = EXCLUDED.audience_mode,
@@ -1523,8 +1527,8 @@ router.post('/photo/visibility', async (req, res) => {
 
 router.delete('/photo/:photoId', async (req, res) => {
   try {
-    const photoId = parseInt(req.params.photoId, 10);
-    if (!Number.isFinite(photoId)) {
+    const photoId = (req.params.photoId || '').trim();
+    if (!UUID_PATTERN.test(photoId)) {
       return res.status(400).json({ error: 'Invalid photo id.' });
     }
 
