@@ -33,7 +33,7 @@ function normalizeChannelValue(row, channelType) {
 
   return null;
 }
-async function ensureAcceptedRelationshipFromRequest(db, row, messagePayload, viewerId) {
+async function ensureAcceptedRelationshipFromRequest(row, messagePayload, viewerId) {
   const memberFrom = row.requester_member_id;  // sender
   const memberTo   = row.target_member_id;     // acceptor
 
@@ -64,7 +64,7 @@ async function ensureAcceptedRelationshipFromRequest(db, row, messagePayload, vi
       ? messagePayload.note
       : null;
 
-  await db.none(
+  await pool.query(
     `
       INSERT INTO tt_relationships_accepted (
         member_id_from,
@@ -107,6 +107,7 @@ async function ensureAcceptedRelationshipFromRequest(db, row, messagePayload, vi
 }
 
 
+
 async function fetchMemberContactValue(memberId, channelType) {
   if (!memberId || !channelType) return null;
   if (!CONTACT_CHANNEL_TYPES.has(channelType)) return null;
@@ -142,14 +143,18 @@ function buildContactRequestMessage({
   contactValue,
   note,
   isVerified,
+  relationshipType,
   relationshipLabel,
+  targetRelationshipType,
   targetRelationshipLabel,
 }) {
   const payload = {};
   if (contactValue) payload.contact_value = contactValue;
   if (typeof isVerified === 'boolean') payload.is_verified = isVerified;
   if (note) payload.note = note;
+  if (relationshipType) payload.relationship_type = relationshipType;
   if (relationshipLabel) payload.relationship_label = relationshipLabel;
+  if (targetRelationshipType) payload.target_relationship_type = targetRelationshipType;
   if (targetRelationshipLabel) payload.target_relationship_label = targetRelationshipLabel;
   if (!Object.keys(payload).length) return '';
   try {
@@ -158,6 +163,7 @@ function buildContactRequestMessage({
     return note || relationshipLabel || '';
   }
 }
+
 
 
 function parseContactRequestMessage(raw) {
@@ -397,33 +403,83 @@ async function ensureMemberRelationshipFromRequest(row, messagePayload) {
 
 router.post('/request/:requestId/relationship', async (req, res) => {
   const viewerId = Bouncer.getViewerId(req);
-  // ... load row, check permissions, etc.
+  if (!viewerId) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
 
-  const decision = req.body?.decision;
+  const requestId = parseInt(req.params.requestId, 10);
+  if (!requestId) {
+    return res.status(400).json({ error: 'missing_request_id' });
+  }
 
-  if (decision === 'accept') {
-    let messagePayload = {};
-    if (row.message) {
-      try {
-        const parsed = JSON.parse(row.message);
-        if (parsed && typeof parsed === 'object') {
-          messagePayload = parsed;
-        }
-      } catch {
-        messagePayload = {};
-      }
+  let row;
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          request_id,
+          requester_member_id,
+          target_member_id,
+          channel_type,
+          status,
+          message,
+          created_at,
+          updated_at,
+          viewed_at
+        FROM tt_contact_request
+        WHERE request_id = $1
+      `,
+      [requestId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'request_not_found' });
     }
 
-    // Requester side (already set when they sent the request)
-    // messagePayload.relationship_type        (from)
-    // messagePayload.relationship_label       (from)
-    // messagePayload.target_relationship_label (maybe)
+    row = rows[0];
+  } catch (err) {
+    console.error('contact.relationship fetch failed', err);
+    return res.status(500).json({ error: 'relationship_fetch_failed' });
+  }
 
+  if (row.channel_type !== RELATIONSHIP_CHANNEL_TYPE) {
+    return res.status(400).json({ error: 'not_relationship_request' });
+  }
+
+  // Only the target can decide on the relationship
+  if (row.target_member_id !== viewerId) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const decisionRaw = (req.body?.decision || '').trim().toLowerCase();
+  if (!decisionRaw) {
+    return res.status(400).json({ error: 'missing_decision' });
+  }
+
+  let messagePayload = {};
+  if (row.message) {
+    try {
+      const parsed = JSON.parse(row.message);
+      if (parsed && typeof parsed === 'object') {
+        messagePayload = parsed;
+      }
+    } catch {
+      // keep empty object
+    }
+  }
+
+  let nextStatus = row.status;
+  let nextMessage = row.message || null;
+
+  // Handle decisions
+  if (decisionRaw === 'accept') {
     // Acceptor POV coming from the body:
-    const rawAcceptorType  = req.body?.relationship_type || req.body?.target_relationship_type;
-    const rawAcceptorLabel = req.body?.relationship_label || req.body?.target_relationship_label;
+    const rawAcceptorType =
+      req.body?.relationship_type || req.body?.target_relationship_type;
+    const rawAcceptorLabel =
+      req.body?.relationship_label || req.body?.target_relationship_label;
 
-    // Require at least *something* from the acceptor side or previously stored target label/type
+    // Require at least something from the acceptor side or previously stored
     if (
       !rawAcceptorType &&
       !rawAcceptorLabel &&
@@ -438,35 +494,61 @@ router.post('/request/:requestId/relationship', async (req, res) => {
     }
 
     if (rawAcceptorLabel) {
-      messagePayload.target_relationship_label = normalizeRelationshipLabel(rawAcceptorLabel);
+      messagePayload.target_relationship_label = normalizeRelationshipLabel(
+        rawAcceptorLabel
+      );
     }
 
-    // Auto-promote into tt_relationships_accepted with asymmetry preserved
-    await ensureAcceptedRelationshipFromRequest(req.db, row, messagePayload, viewerId);
+    // Promote into tt_relationships_accepted (asymmetric types supported)
+    try {
+      await ensureAcceptedRelationshipFromRequest(row, messagePayload, viewerId);
+      // Optional: also keep the old tt_member_relationship table in sync:
+      // await ensureMemberRelationshipFromRequest(row, messagePayload);
+    } catch (err) {
+      console.error('contact.relationship promote failed', err);
+      return res.status(500).json({ error: 'relationship_promote_failed' });
+    }
 
-    const nextMessage = JSON.stringify(messagePayload);
-    const nextStatus  = 'accepted';
+    nextStatus = 'accepted';
+    nextMessage = JSON.stringify(messagePayload);
+  } else if (decisionRaw === 'reject' || decisionRaw === 'ignore') {
+    nextStatus = 'ignored';
+  } else if (decisionRaw === 'block') {
+    nextStatus = 'blocked';
+  } else {
+    return res.status(400).json({ error: 'invalid_decision' });
+  }
 
-    await req.db.none(
+  try {
+    const { rows: updated } = await pool.query(
       `
         UPDATE tt_contact_request
-        SET status = $2,
-            message = $3,
-            updated_at = now()
+        SET status     = $2,
+            message    = $3,
+            updated_at = NOW(),
+            viewed_at  = COALESCE(viewed_at, NOW())
         WHERE request_id = $1
+        RETURNING request_id, status, message, updated_at, viewed_at
       `,
-      [row.request_id, nextStatus, nextMessage]
+      [requestId, nextStatus, nextMessage]
     );
+
+    const updatedRow = updated[0];
 
     return res.json({
       ok: true,
-      status: nextStatus,
-      message: messagePayload
+      request_id: updatedRow.request_id,
+      status: updatedRow.status,
+      message: updatedRow.message ? JSON.parse(updatedRow.message) : null,
+      updated_at: updatedRow.updated_at,
+      viewed_at: updatedRow.viewed_at,
     });
+  } catch (err) {
+    console.error('contact.relationship update failed', err);
+    return res.status(500).json({ error: 'relationship_update_failed' });
   }
-
-  // ... handle other decisions (reject, block, etc.)
 });
+
 
 
 router.post('/me', async (req, res) => {
