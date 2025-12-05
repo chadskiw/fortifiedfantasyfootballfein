@@ -37,6 +37,9 @@ const LATE_ENTRY_DEFAULT_GRACE_MINUTES = 0;
 const PUBLIC_VIEWER_HANDLE = (
   process.env.PUBLIC_VIEWER_HANDLE || 'PUBGHOST'
 ).trim().toUpperCase();
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_PHOTO_CAPTION_LENGTH = 500;
 
 class PartyCheckinError extends Error {
   constructor(status, code, meta = null) {
@@ -2758,6 +2761,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
           m.member_id,
           u.handle,
           m.body,
+          NULL::text       AS caption,
           NULL::text        AS r2_key,
           NULL::timestamptz AS taken_at,
           m.created_at      AS event_time,
@@ -2780,6 +2784,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
           ph.member_id,
           u.handle,
           NULL::text       AS body,
+          ph.party_caption AS caption,
           ph.r2_key,
           ph.taken_at,
           COALESCE(ph.taken_at, ph.created_at) AS event_time,
@@ -3063,6 +3068,77 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
     return res.status(500).json({ ok: false, error: 'party_message_failed' });
   }
 });
+
+router.post(
+  '/:partyId/photo/:photoId/caption',
+  jsonParser,
+  requirePartyAccess,
+  async (req, res) => {
+    const { partyId, photoId } = req.params;
+    const rawCaption = typeof req.body?.caption === 'string' ? req.body.caption : '';
+    const caption = rawCaption.trim().slice(0, MAX_PHOTO_CAPTION_LENGTH);
+
+    if (!UUID_PATTERN.test(photoId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_photo_id' });
+    }
+
+    try {
+      const { rows } = await pool.query(
+        `
+          SELECT photo_id,
+                 member_id,
+                 handle,
+                 party_id,
+                 party_caption
+            FROM tt_photo
+           WHERE photo_id = $1
+             AND party_id = $2
+           LIMIT 1
+        `,
+        [photoId, partyId]
+      );
+
+      if (!rows.length) {
+        return res.status(404).json({ ok: false, error: 'photo_not_found' });
+      }
+
+      const photo = rows[0];
+      const viewerHandle = (req.member?.handle || '').trim().toLowerCase();
+      const viewerMemberId = (req.member?.member_id || '').trim();
+      const photoHandle = (photo.handle || '').trim().toLowerCase();
+      const photoMemberId = (photo.member_id || '').trim();
+      const isOwner =
+        (viewerHandle && photoHandle && viewerHandle === photoHandle) ||
+        (viewerMemberId && photoMemberId && viewerMemberId === photoMemberId);
+
+      if (!req.isPartyHost && !isOwner) {
+        return res.status(403).json({ ok: false, error: 'not_allowed' });
+      }
+
+      const nextCaption = caption.length ? caption : null;
+      const { rows: updateRows } = await pool.query(
+        `
+          UPDATE tt_photo
+             SET party_caption = $3
+           WHERE photo_id = $1
+             AND party_id = $2
+           RETURNING party_caption
+        `,
+        [photoId, partyId, nextCaption]
+      );
+
+      return res.json({
+        ok: true,
+        caption: updateRows[0]?.party_caption || '',
+      });
+    } catch (err) {
+      console.error('[party:photo_caption]', err);
+      return res
+        .status(500)
+        .json({ ok: false, error: 'photo_caption_update_failed' });
+    }
+  }
+);
 /**
  * Core redeem logic.
  *
