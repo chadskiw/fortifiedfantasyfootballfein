@@ -69,6 +69,30 @@ async function fetchIdentityByMemberId(memberId, db) {
   return buildIdentity(rows[0].handle, rows[0].member_id, rows[0].color_hex);
 }
 
+const PUBLIC_VIEWER_HANDLE = normalizeText(
+  process.env.PUBLIC_VIEWER_HANDLE || 'PUBGHOST'
+);
+
+function readPublicViewerOverride(req) {
+  const rawOverride =
+    req.headers?.['x-public-viewer'] ||
+    req.headers?.['x-public-viewer-id'] ||
+    req.query?.viewerId ||
+    req.query?.viewer_id ||
+    req.body?.viewerId ||
+    req.body?.viewer_id;
+
+  const normalized = normalizeText(rawOverride);
+  if (
+    normalized &&
+    PUBLIC_VIEWER_HANDLE &&
+    normalized.toUpperCase() === PUBLIC_VIEWER_HANDLE.toUpperCase()
+  ) {
+    return PUBLIC_VIEWER_HANDLE;
+  }
+  return '';
+}
+
 function pickMemberId(req) {
   const candidates = [
     req.identity?.member_id,
@@ -83,6 +107,12 @@ function pickMemberId(req) {
     const normalized = normalizeText(value);
     if (normalized) return normalized;
   }
+
+  const publicOverride = readPublicViewerOverride(req);
+  if (publicOverride) {
+    return publicOverride;
+  }
+
   return '';
 }
 
