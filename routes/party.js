@@ -426,20 +426,29 @@ if (!me) return res.status(401).json({ error: 'Not logged in' });
   return me;
 }
 
-async function fetchPartyById(partyId) {
-  if (!partyId) return null;
+async function fetchPartyRowByField(field, value) {
+  if (!value) return null;
+  const column = field === 'rty' ? 'rty' : 'party_id';
   const { rows } = await pool.query(
     `
       SELECT p.*,
              COALESCE(hq.color_hex, hq.color_hex) AS host_hue
         FROM tt_party p
         LEFT JOIN ff_quickhitter hq ON hq.handle = p.host_handle
-       WHERE p.party_id = $1
+       WHERE p.${column} = $1
        LIMIT 1
     `,
-    [partyId]
+    [value]
   );
   return rows[0] || null;
+}
+
+async function fetchPartyById(partyId) {
+  return fetchPartyRowByField('party_id', partyId);
+}
+
+async function fetchPartyByRouteKey(routeKey) {
+  return fetchPartyRowByField('rty', routeKey);
 }
 
 async function fetchMembership(partyId, handle) {
@@ -529,6 +538,7 @@ function serializeParty(row) {
       ? { handle: row.host_handle, hue: row.host_hue || null }
       : null,
     name: row.name,
+    rty: row.rty || null,
     description: row.description,
     center_lat: row.center_lat,
     center_lon: row.center_lon,
@@ -1210,6 +1220,38 @@ router.post('/', async (req, res) => {
   } catch (err) {
     console.error('[party:create] error:', err);
     return res.status(500).json({ error: 'Failed to create party' });
+  }
+});
+
+router.get('/resolve', async (req, res) => {
+  const routeKey = String(req.query?.rty || '').trim();
+  const partyIdParam = String(
+    req.query?.party_id || req.query?.partyId || ''
+  ).trim();
+  if (!routeKey && !partyIdParam) {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'party_lookup_param_required' });
+  }
+  try {
+    let partyRow = null;
+    if (routeKey) {
+      partyRow = await fetchPartyByRouteKey(routeKey);
+    } else {
+      if (partyIdParam && !UUID_PATTERN.test(partyIdParam)) {
+        return res
+          .status(400)
+          .json({ ok: false, error: 'invalid_party_id_format' });
+      }
+      partyRow = await fetchPartyById(partyIdParam);
+    }
+    if (!partyRow) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+    return res.json({ ok: true, party: serializeParty(partyRow) });
+  } catch (err) {
+    console.error('[party:resolve]', err);
+    return res.status(500).json({ ok: false, error: 'party_resolve_failed' });
   }
 });
 
