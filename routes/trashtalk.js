@@ -17,7 +17,11 @@ const {
 } = require('../services/photoVisibility');
 
 const { pool } = require('../src/db');
-const { isInHomeZone } = require('../utils/homeZone');
+const {
+  loadZonesForMembers,
+  loadViewerRelationshipTiers,
+  applyPrivacyZones,
+} = require('../utils/privacyZones');
 
 // ...
 const router = express.Router();
@@ -164,6 +168,64 @@ function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
       sin(radians(${latParam})) * sin(radians(${latCol}))
     )
   `;
+}
+
+function collectOwnerIds(rows = []) {
+  return Array.from(
+    new Set(
+      rows
+        .map((row) => {
+          if (!row) return '';
+          if (typeof row.member_id === 'string') return row.member_id;
+          if (typeof row.owner_member_id === 'string') return row.owner_member_id;
+          if (typeof row.memberId === 'string') return row.memberId;
+          return '';
+        })
+        .filter((id) => id && id.trim().length)
+    )
+  );
+}
+
+async function buildPrivacyContext(ownerIds = [], viewerId) {
+  if (!ownerIds.length) {
+    return {
+      zonesByMember: new Map(),
+      tiersByOwner: new Map(),
+    };
+  }
+
+  let zonesByMember = new Map();
+  let tiersByOwner = new Map();
+  try {
+    zonesByMember = await loadZonesForMembers(ownerIds, pool);
+  } catch (err) {
+    console.warn('privacyZones.load failed', err?.message || err);
+  }
+  try {
+    tiersByOwner = await loadViewerRelationshipTiers(viewerId, ownerIds, pool);
+  } catch (err) {
+    console.warn('privacyZones.viewerTiers failed', err?.message || err);
+  }
+
+  return { zonesByMember, tiersByOwner };
+}
+
+function rebuildRowsWithPrivacy(rows, visible, obscured) {
+  const byId = new Map();
+  visible.forEach((row) => {
+    if (row && row.photo_id) {
+      byId.set(String(row.photo_id), row);
+    }
+  });
+  obscured.forEach(({ item }) => {
+    if (item && item.photo_id) {
+      byId.set(String(item.photo_id), item);
+    }
+  });
+  return rows.map((row) => {
+    if (!row || !row.photo_id) return row;
+    return byId.get(String(row.photo_id)) || row;
+  });
 }
 
 async function ensurePartyUploadAccess(partyId, handle) {
@@ -561,7 +623,22 @@ async function fetchMemberPhotosWithVisibility({ memberId, viewerId, limit = 100
     set_ids: Array.isArray(row.set_ids) ? row.set_ids : [],
   }));
 
-  return { photos, total, limit: safeLimit, offset: safeOffset };
+  let sanitizedPhotos = photos;
+  if (photos.length) {
+    const ownerIds = collectOwnerIds(photos);
+    const { zonesByMember, tiersByOwner } = await buildPrivacyContext(
+      ownerIds,
+      viewerId
+    );
+    const { visible, obscured } = applyPrivacyZones(photos, {
+      viewerId,
+      zonesByMember,
+      tiersByOwner,
+    });
+    sanitizedPhotos = rebuildRowsWithPrivacy(photos, visible, obscured);
+  }
+
+  return { photos: sanitizedPhotos, total, limit: safeLimit, offset: safeOffset };
 }
 
 async function ensurePhotosOwnedBy(memberId, photoIds) {
@@ -988,72 +1065,50 @@ router.get('/map', async (req, res) => {
       LIMIT $5;
     `;
 
-    const { rows } = await pool.query(sql, params);
-    const ownerIds = Array.from(
-      new Set(
-        rows
-          .map((row) => row.member_id)
-          .filter((memberId) => typeof memberId === 'string' && memberId.trim().length)
-      )
+    const ownerIds = collectOwnerIds(rows);
+    const { zonesByMember, tiersByOwner } = await buildPrivacyContext(
+      ownerIds,
+      viewerId
     );
+    const { visible, obscured } = applyPrivacyZones(rows, {
+      viewerId,
+      zonesByMember,
+      tiersByOwner,
+    });
 
-    let homeZonesByMember = new Map();
-    if (ownerIds.length) {
-      try {
-        const { rows: homeRows } = await pool.query(
-          `
-            SELECT
-              member_id,
-              center_lat,
-              center_lon,
-              radius_m,
-              obscure_home,
-              label_city,
-              label_region,
-              label_country
-            FROM tt_member_home_zone
-            WHERE member_id = ANY($1::text[])
-          `,
-          [ownerIds]
-        );
-        homeZonesByMember = new Map(homeRows.map((row) => [row.member_id, row]));
-      } catch (homeErr) {
-        console.warn('trashtalk.map home zone fetch failed', homeErr?.message || homeErr);
-      }
-    }
-
-    const photos = [];
     const homePhotos = [];
-
-    for (const row of rows) {
-      const homeZone = homeZonesByMember.get(row.member_id);
-      const shouldHideCoords =
-        homeZone &&
-        homeZone.obscure_home === true &&
-        isInHomeZone(row.lat, row.lon, homeZone);
-
-      if (shouldHideCoords) {
-        homePhotos.push({
-          photo_id: row.photo_id,
-          member_id: row.member_id,
-          handle: row.handle,
-          r2_key: row.r2_key,
-          taken_at: row.taken_at,
-          created_at: row.created_at,
-          home_label_city: homeZone.label_city || null,
-          home_label_region: homeZone.label_region || null,
-          home_label_country: homeZone.label_country || null,
-        });
+    const zonePhotos = [];
+    obscured.forEach(({ item, zone }) => {
+      const payload = {
+        photo_id: item.photo_id,
+        member_id: item.member_id,
+        handle: item.handle,
+        r2_key: item.r2_key,
+        taken_at: item.taken_at,
+        created_at: item.created_at,
+        zone_id: zone.zone_id,
+        zone_label: zone.zone_label,
+        zone_kind: zone.zone_kind,
+        coarse_city: zone.coarse_city,
+        coarse_region: zone.coarse_region,
+        coarse_country: zone.coarse_country,
+      };
+      if (zone.zone_kind === 'home') {
+        payload.home_label_city = zone.coarse_city || null;
+        payload.home_label_region = zone.coarse_region || null;
+        payload.home_label_country = zone.coarse_country || null;
+        homePhotos.push(payload);
       } else {
-        photos.push(row);
+        zonePhotos.push(payload);
       }
-    }
+    });
 
     return res.json({
       zoom,
-      count: photos.length,
-      photos,
+      count: visible.length,
+      photos: visible,
       homePhotos,
+      zonePhotos,
     });
   } catch (err) {
     console.error('TrashTalk map error', err);
@@ -1142,21 +1197,36 @@ router.get('/photo/:photoId', async (req, res) => {
       return res.status(404).json({ error: 'photo_not_found' });
     }
 
-    const row = rows[0];
+    const ownerIds = collectOwnerIds(rows);
+    const { zonesByMember, tiersByOwner } = await buildPrivacyContext(
+      ownerIds,
+      viewerId
+    );
+    const { visible, obscured } = applyPrivacyZones(rows, {
+      viewerId,
+      zonesByMember,
+      tiersByOwner,
+    });
+    const sanitizedRow =
+      (obscured.length && obscured[0].item) ||
+      (visible.length && visible[0]) ||
+      rows[0];
+
     return res.json({
       ok: true,
       photo: {
-        photo_id: row.photo_id,
-        member_id: row.member_id,
-        handle: row.handle,
-        r2_key: row.r2_key,
-        original_filename: row.original_filename,
-        mime_type: row.mime_type,
-        lat: row.lat,
-        lon: row.lon,
-        taken_at: row.taken_at,
-        created_at: row.created_at,
-        visibility: formatVisibilityRow(row),
+        photo_id: sanitizedRow.photo_id,
+        member_id: sanitizedRow.member_id,
+        handle: sanitizedRow.handle,
+        r2_key: sanitizedRow.r2_key,
+        original_filename: sanitizedRow.original_filename,
+        mime_type: sanitizedRow.mime_type,
+        lat: sanitizedRow.lat,
+        lon: sanitizedRow.lon,
+        taken_at: sanitizedRow.taken_at,
+        created_at: sanitizedRow.created_at,
+        visibility: formatVisibilityRow(sanitizedRow),
+        obscured_zone: sanitizedRow.obscured_zone || null,
       },
     });
   } catch (err) {
