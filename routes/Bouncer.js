@@ -518,6 +518,11 @@ async function guardMemberPage(req, res, next) {
     }
 
     // Attach decision for downstream handlers (to decide what to show)
+    if (viewerId) {
+      if (!req.ff_member_id) req.ff_member_id = viewerId;
+      if (!req.ff_member) req.ff_member = viewerId;
+    }
+
     req.accessDecision = decision;
     return next();
   } catch (err) {
