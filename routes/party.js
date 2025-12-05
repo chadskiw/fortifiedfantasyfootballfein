@@ -34,6 +34,9 @@ const TICKET_OPEN_STATUSES = new Set(['issued', 'assigned', 'pending']);
 const TICKET_REDEEMED_STATUS = 'redeemed';
 const TICKET_VOID_STATUS = 'void';
 const LATE_ENTRY_DEFAULT_GRACE_MINUTES = 0;
+const PUBLIC_VIEWER_HANDLE = (
+  process.env.PUBLIC_VIEWER_HANDLE || 'PUBGHOST'
+).trim().toUpperCase();
 
 class PartyCheckinError extends Error {
   constructor(status, code, meta = null) {
@@ -161,6 +164,22 @@ function parseTicketUrl(rawUrl) {
   } catch (err) {
     return null;
   }
+}
+
+function matchesPublicViewer(value) {
+  if (!PUBLIC_VIEWER_HANDLE) return false;
+  if (value == null) return false;
+  return String(value).trim().toUpperCase() === PUBLIC_VIEWER_HANDLE;
+}
+
+function isPublicViewerRequest(req) {
+  if (!PUBLIC_VIEWER_HANDLE) return false;
+  const source =
+    req?.query?.viewerId ||
+    req?.query?.viewer_id ||
+    req?.headers?.['x-public-viewer'] ||
+    req?.headers?.['x-public-viewer-id'];
+  return matchesPublicViewer(source);
 }
 
 const GATE_ACCESS_LEVELS = new Set(['host', 'security', 'party_patrol']);
@@ -2815,6 +2834,152 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
     });
   } catch (err) {
     next(err);
+  } finally {
+    client.release();
+  }
+});
+
+router.get('/:partyId/public-feed', async (req, res) => {
+  const { partyId } = req.params;
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'party_id_required' });
+  }
+  if (!isPublicViewerRequest(req)) {
+    return res.status(403).json({ ok: false, error: 'public_access_denied' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const {
+      rows: [party],
+    } = await client.query(
+      `
+        SELECT
+          p.*,
+          host.handle AS host_handle
+        FROM tt_party p
+        JOIN ff_member host ON host.member_id = p.host_member_id
+        WHERE p.party_id = $1
+      `,
+      [partyId]
+    );
+
+    if (!party) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+    if ((party.state || '').toLowerCase() === 'cut') {
+      return res.status(410).json({ ok: false, error: 'party_cut' });
+    }
+
+    const hasPhotos = await client.query(
+      `SELECT 1 FROM tt_photo WHERE party_id = $1 LIMIT 1`,
+      [partyId]
+    );
+    if (!hasPhotos.rowCount) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'no_public_content' });
+    }
+
+    const { rows: posts } = await client.query(
+      `
+        WITH party_ctx AS (
+          SELECT
+            party_id,
+            host_member_id,
+            starts_at,
+            COALESCE(ends_at, starts_at + INTERVAL '12 hours') AS ends_at
+          FROM tt_party
+          WHERE party_id = $1
+        )
+
+        SELECT *
+        FROM (
+          SELECT
+            'message' AS kind,
+            m.message_id      AS id,
+            m.party_id,
+            m.member_id,
+            u.handle,
+            m.body,
+            NULL::text        AS r2_key,
+            NULL::timestamptz AS taken_at,
+            m.created_at      AS event_time,
+            CASE
+              WHEN m.created_at <  ctx.starts_at THEN 'preparty'
+              WHEN m.created_at >  ctx.ends_at   THEN 'recap'
+              ELSE 'live'
+            END AS phase
+          FROM tt_party_message m
+          JOIN party_ctx ctx ON ctx.party_id = m.party_id
+          JOIN ff_member u   ON u.member_id  = m.member_id
+
+          UNION ALL
+
+          SELECT
+            'photo'          AS kind,
+            ph.photo_id      AS id,
+            ph.party_id,
+            ph.member_id,
+            u.handle,
+            NULL::text       AS body,
+            ph.r2_key,
+            ph.taken_at,
+            COALESCE(ph.taken_at, ph.created_at) AS event_time,
+            CASE
+              WHEN COALESCE(ph.taken_at, ph.created_at) < ctx.starts_at THEN 'preparty'
+              WHEN COALESCE(ph.taken_at, ph.created_at) > ctx.ends_at   THEN 'recap'
+              ELSE 'live'
+            END AS phase
+          FROM tt_photo ph
+          JOIN party_ctx ctx ON ctx.party_id = ph.party_id
+          JOIN ff_member u   ON u.member_id  = ph.member_id
+        ) all_posts
+        WHERE party_id = $1
+        ORDER BY event_time ASC
+        LIMIT 512;
+      `,
+      [partyId]
+    );
+
+    const reactionKeys = [];
+    posts.forEach((row) => {
+      if (!isReactableKind(row.kind)) return;
+      row.entity_key = buildPartyEntityKey(row.kind, row.id);
+      reactionKeys.push(row.entity_key);
+    });
+
+    const reactionSnapshots = await fetchReactionSnapshots(
+      client,
+      reactionKeys,
+      null
+    );
+    posts.forEach((row) => {
+      if (row.entity_key) {
+        row.reactions =
+          reactionSnapshots.get(row.entity_key) || createReactionSnapshot();
+      }
+    });
+
+    const hype = posts.filter(
+      (p) => p.phase === 'preparty' && p.member_id === party.host_member_id
+    );
+    const live = posts.filter((p) => p.phase === 'live');
+    const recap = posts.filter((p) => p.phase === 'recap');
+
+    return res.json({
+      ok: true,
+      party,
+      membership: null,
+      hype,
+      feed: live,
+      recap,
+    });
+  } catch (err) {
+    console.error('[party:public_feed]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_public_feed_failed' });
   } finally {
     client.release();
   }
