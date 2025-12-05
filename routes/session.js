@@ -12,6 +12,9 @@ const router = express.Router();
 router.use(express.json({ limit: '1mb' }));
 
 /* ---------- helpers ---------- */
+const MEMBER_TTL_MS  = 365 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 30  * 24 * 60 * 60 * 1000;
+
 function secureCookies() { return process.env.NODE_ENV === 'production'; }
 function cookieOpts(maxAgeMs) {
   return { httpOnly:true, sameSite:'Lax', secure:secureCookies(), path:'/', maxAge:maxAgeMs };
@@ -79,15 +82,24 @@ async function touchSession(sessionId) {
 }
 
 function setAuthCookies(res, memberId, sid) {
-  // Long-lived member id cookie (other routes look for this)
-  res.cookie('ff_member', memberId, cookieOpts(365*24*60*60*1000));
-  // Session cookie
-  res.cookie('ff_sid', sid, cookieOpts(30*24*60*60*1000));
+  // Long-lived member cookies (legacy + client-readable)
+  res.cookie('ff_member', memberId, clientCookieOpts(MEMBER_TTL_MS));
+  res.cookie('ff_member_id', memberId, cookieOpts(MEMBER_TTL_MS));
+
+  // Session cookies the platform expects
+  res.cookie('ff_sid', sid, cookieOpts(SESSION_TTL_MS));              // HttpOnly trusted session
+  res.cookie('ff_session_id', sid, cookieOpts(SESSION_TTL_MS));       // legacy alias, HttpOnly
+  res.cookie('ff_session', sid, clientCookieOpts(SESSION_TTL_MS));    // readable alias for FE
+  res.cookie('ff_logged_in', '1', clientCookieOpts(SESSION_TTL_MS));  // boolean flag legacy flows use
 }
 
 function clearAuthCookies(res) {
-  res.cookie('ff_sid','',    cookieOpts(0));
-  res.cookie('ff_member','', cookieOpts(0));
+  res.cookie('ff_sid','',          cookieOpts(0));
+  res.cookie('ff_session_id','',   cookieOpts(0));
+  res.cookie('ff_session','',      clientCookieOpts(0));
+  res.cookie('ff_member','',       clientCookieOpts(0));
+  res.cookie('ff_member_id','',    cookieOpts(0));
+  res.cookie('ff_logged_in','',    clientCookieOpts(0));
 }
 
 /* ---------- routes ---------- */
