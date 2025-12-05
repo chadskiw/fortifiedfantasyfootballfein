@@ -372,7 +372,7 @@ async function applyReactionDelta(client, payload) {
           qty
         )
         VALUES ($1, $2, $3, $4, $5, $6, 1)
-        ON CONFLICT (kind, entity_key, member_id, reaction)
+        ON CONFLICT (entity_key, member_id, reaction)
         DO UPDATE SET
           qty = 1,
           updated_at = NOW()
@@ -392,7 +392,7 @@ async function applyReactionDelta(client, payload) {
         total
       )
       VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (kind, entity_key, reaction)
+      ON CONFLICT (entity_key, reaction)
       DO UPDATE SET
         total = GREATEST(tt_reaction_totals.total + $6, 0),
         updated_at = NOW()
