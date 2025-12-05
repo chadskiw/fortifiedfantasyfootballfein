@@ -24,6 +24,7 @@ const userLandingRoutes = require('./routes/userLanding');
 const partyLandingRoutes = require('./routes/partyLanding');
 const trashtalkUserRoutes = require('./routes/trashtalk-user');
 const specialsRouter = require('./routes/specials');
+const privacyZonesRouter = require('./routes/privacyZones');
 
 
 // Routers (only require what you actually have in your repo)
@@ -120,6 +121,7 @@ app.use(cookieParser());
 app.use('/api/trashtalk', trashtalkRouter);
 app.use('/api/party', partyRouter);
 app.use('/api/contact', contactRouter);
+app.use('/api/me/privacy-zones', privacyZonesRouter);
 app.use(userLandingRoutes);
 app.use(partyLandingRoutes);
 app.use(trashtalkUserRoutes);

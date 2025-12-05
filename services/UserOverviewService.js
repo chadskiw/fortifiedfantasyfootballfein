@@ -4,14 +4,18 @@ const {
   appendVisibilityFilter,
   formatVisibilityRow,
 } = require('./photoVisibility');
-const { isInHomeZone } = require('../utils/homeZone');
+const {
+  loadZonesForMembers,
+  loadViewerRelationshipTiers,
+  applyPrivacyZones,
+  shouldObscure,
+} = require('../utils/privacyZones');
 
 let ffMemberHasHandle = true;
 let ffMemberHasDisplayName = true;
 let ffMemberHasAvatarUrl = true;
 let ffQuickhitterHasColorHex = true;
 let ttUserThemeExists = true;
-let ttMemberHomeZoneExists = true;
 
 const DEFAULT_THEME_STATE = {
   map_hue: 214,
@@ -207,39 +211,72 @@ async function loadQuickhitterProfile(memberId) {
   }
 }
 
-async function loadMemberHomeZone(memberId) {
-  if (!ttMemberHomeZoneExists || !memberId) {
-    return null;
+async function loadMemberZoneContext(memberId, viewerId) {
+  if (!memberId) {
+    return {
+      zonesByMember: new Map(),
+      tiersByOwner: new Map(),
+      zones: [],
+      viewerTier: 'stranger',
+    };
+  }
+
+  let zonesByMember = new Map();
+  let tiersByOwner = new Map();
+  try {
+    zonesByMember = await loadZonesForMembers([memberId], pool);
+  } catch (err) {
+    console.warn('UserOverview: privacy zone fetch failed', err?.message || err);
   }
   try {
-    const { rows } = await pool.query(
-      `
-        SELECT
-          member_id,
-          center_lat,
-          center_lon,
-          radius_m,
-          obscure_home,
-          label_city,
-          label_region,
-          label_country
-        FROM tt_member_home_zone
-        WHERE member_id = $1
-        LIMIT 1
-      `,
-      [memberId]
-    );
-    return rows[0] || null;
+    tiersByOwner = await loadViewerRelationshipTiers(viewerId, [memberId], pool);
   } catch (err) {
-    const lowered = (err?.message || '').toLowerCase();
-    if (ttMemberHomeZoneExists && lowered.includes('tt_member_home_zone')) {
-      ttMemberHomeZoneExists = false;
-      console.warn('UserOverview: tt_member_home_zone missing, skipping home zone load');
-      return null;
-    }
-    console.warn('UserOverview: home zone lookup failed', err?.message || err);
-    return null;
+    console.warn('UserOverview: privacy tier fetch failed', err?.message || err);
   }
+
+  const zones = zonesByMember.get(memberId) || [];
+  const viewerTier =
+    viewerId && viewerId === memberId
+      ? 'self'
+      : tiersByOwner.get(memberId) || 'stranger';
+
+  return { zonesByMember, tiersByOwner, zones, viewerTier };
+}
+
+function rebuildPhotosWithPrivacy(rows, visible, obscured) {
+  const byId = new Map();
+  visible.forEach((row) => {
+    if (row && row.photo_id) {
+      byId.set(String(row.photo_id), row);
+    }
+  });
+  obscured.forEach(({ item }) => {
+    if (item && item.photo_id) {
+      byId.set(String(item.photo_id), item);
+    }
+  });
+  return rows.map((row) => {
+    if (!row || !row.photo_id) return row;
+    return byId.get(String(row.photo_id)) || row;
+  });
+}
+
+function buildZonePhotoPayload(row, zone, memberId) {
+  return {
+    photo_id: row.photo_id,
+    member_id: row.member_id || memberId,
+    handle: row.handle || null,
+    r2_key: row.r2_key,
+    taken_at: row.taken_at,
+    created_at: row.created_at,
+    visibility: formatVisibilityRow({ ...row, owner_member_id: memberId }),
+    zone_id: zone.zone_id,
+    zone_label: zone.zone_label,
+    zone_kind: zone.zone_kind,
+    coarse_city: zone.coarse_city,
+    coarse_region: zone.coarse_region,
+    coarse_country: zone.coarse_country,
+  };
 }
 
 class UserOverviewService {
@@ -329,13 +366,113 @@ const theme = await loadUserTheme(memberId);
     `;
 
     const { rows: recentPhotos } = await pool.query(recentSql, recentParams);
-    const homeZone = await loadMemberHomeZone(memberId);
+    const zoneContext = await loadMemberZoneContext(memberId, viewerId);
+    const { zonesByMember, tiersByOwner, zones, viewerTier } = zoneContext;
+    const { visible: recentVisible, obscured: recentObscured } = applyPrivacyZones(
+      recentPhotos,
+      {
+        viewerId,
+        zonesByMember,
+        tiersByOwner,
+      }
+    );
+    const orderedRecentRows = rebuildPhotosWithPrivacy(
+      recentPhotos,
+      recentVisible,
+      recentObscured
+    );
     const homePhotos = [];
-    const mapPhotos = [];
+    const zonePhotos = [];
+    recentObscured.forEach(({ item, zone }) => {
+      const payload = buildZonePhotoPayload(item, zone, memberId);
+      if (zone.zone_kind === 'home') {
+        homePhotos.push({
+          ...payload,
+          home_label_city: zone.coarse_city || null,
+          home_label_region: zone.coarse_region || null,
+          home_label_country: zone.coarse_country || null,
+        });
+      } else {
+        zonePhotos.push(payload);
+      }
+    });
+    const mapPhotos = recentVisible
+      .filter(
+        (row) => Number.isFinite(row?.lat) && Number.isFinite(row?.lon)
+      )
+      .map((row) => ({
+        photo_id: row.photo_id,
+        r2_key: row.r2_key,
+        lat: row.lat,
+        lon: row.lon,
+        taken_at: row.taken_at,
+        created_at: row.created_at,
+        visibility: formatVisibilityRow({ ...row, owner_member_id: memberId }),
+      }));
+
+    const hasSensitiveZones = zones.some((zone) =>
+      shouldObscure(zone, viewerTier)
+    );
+    let photoBounds = { has_geo: false };
+    if (!hasSensitiveZones) {
+      if (
+        (stats.geo_count || 0) > 0 &&
+        stats.center_lat != null &&
+        stats.center_lon != null
+      ) {
+        photoBounds = {
+          min_lat: stats.min_lat,
+          max_lat: stats.max_lat,
+          min_lon: stats.min_lon,
+          max_lon: stats.max_lon,
+          center_lat: stats.center_lat,
+          center_lon: stats.center_lon,
+          has_geo: true,
+        };
+      } else if (mapPhotos.length) {
+        const latVals = mapPhotos
+          .map((p) => Number(p.lat))
+          .filter((val) => Number.isFinite(val));
+        const lonVals = mapPhotos
+          .map((p) => Number(p.lon))
+          .filter((val) => Number.isFinite(val));
+        if (latVals.length && lonVals.length) {
+          const latMin = Math.min(...latVals);
+          const latMax = Math.max(...latVals);
+          const lonMin = Math.min(...lonVals);
+          const lonMax = Math.max(...lonVals);
+          photoBounds = {
+            min_lat: latMin,
+            max_lat: latMax,
+            min_lon: lonMin,
+            max_lon: lonMax,
+            center_lat: (latMin + latMax) / 2,
+            center_lon: (lonMin + lonMax) / 2,
+            has_geo: true,
+          };
+        }
+      }
+    }
 
     const accentFromTheme = theme?.accent_hex || null;
     const handleColor =
       quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null;
+
+    const recentPayload = orderedRecentRows.map((row) => {
+      const payload = {
+        photo_id: row.photo_id,
+        r2_key: row.r2_key,
+        lat: row.lat,
+        lon: row.lon,
+        taken_at: row.taken_at,
+        created_at: row.created_at,
+        visibility: formatVisibilityRow({ ...row, owner_member_id: memberId }),
+      };
+      if (row.obscured_zone) {
+        payload.obscured_zone = row.obscured_zone;
+      }
+      return payload;
+    });
 
     return {
       member_id: memberId,
@@ -347,63 +484,11 @@ const theme = await loadUserTheme(memberId);
       map_theme: theme,
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
-      photo_bounds: hasGeo
-        ? {
-            min_lat: stats.min_lat,
-            max_lat: stats.max_lat,
-            min_lon: stats.min_lon,
-            max_lon: stats.max_lon,
-            center_lat: stats.center_lat,
-            center_lon: stats.center_lon,
-            has_geo: true,
-          }
-        : { has_geo: false },
-      recent_photos: recentPhotos.map((row) => {
-        const hideCoords =
-          homeZone &&
-          homeZone.obscure_home === true &&
-          row.lat != null &&
-          row.lon != null &&
-          isInHomeZone(row.lat, row.lon, homeZone);
-        const visibility = formatVisibilityRow({
-          ...row,
-          owner_member_id: memberId,
-        });
-        if (hideCoords) {
-          homePhotos.push({
-            photo_id: row.photo_id,
-            r2_key: row.r2_key,
-            taken_at: row.taken_at,
-            created_at: row.created_at,
-            visibility,
-            home_label_city: homeZone?.label_city || null,
-            home_label_region: homeZone?.label_region || null,
-            home_label_country: homeZone?.label_country || null,
-          });
-        } else if (row.lat != null && row.lon != null) {
-          mapPhotos.push({
-            photo_id: row.photo_id,
-            r2_key: row.r2_key,
-            lat: row.lat,
-            lon: row.lon,
-            taken_at: row.taken_at,
-            created_at: row.created_at,
-            visibility,
-          });
-        }
-
-        return {
-          photo_id: row.photo_id,
-          r2_key: row.r2_key,
-          lat: hideCoords ? null : row.lat,
-          lon: hideCoords ? null : row.lon,
-          taken_at: row.taken_at,
-          created_at: row.created_at,
-          visibility,
-        };
-      }),
+      photo_bounds: photoBounds,
+      recent_photos: recentPayload,
       map_photos: mapPhotos,
       home_photos: homePhotos,
+      privacy_zone_photos: zonePhotos,
     };
   }
 }
