@@ -2820,6 +2820,45 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
   }
 });
 
+router.get('/:partyId/guests', requirePartyAccess, async (req, res) => {
+  const { partyId } = req.params;
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'party_id_required' });
+  }
+  if (!req.isPartyHost) {
+    return res.status(403).json({ ok: false, error: 'not_party_host' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          pm.*,
+          COALESCE(q.color_hex, q.color_hex) AS member_hue
+        FROM tt_party_member pm
+        LEFT JOIN ff_quickhitter q
+          ON q.handle = pm.handle
+        WHERE pm.party_id = $1
+        ORDER BY
+          pm.left_at IS NULL DESC,
+          pm.arrived_at DESC NULLS LAST,
+          pm.handle ASC
+      `,
+      [partyId]
+    );
+
+    const hostHandle = (req.party?.host_handle || '').toLowerCase();
+    const guests = rows
+      .filter((row) => (row.handle || '').toLowerCase() !== hostHandle)
+      .map(serializeMembership);
+
+    return res.json({ ok: true, guests });
+  } catch (err) {
+    console.error('[party:guests]', err);
+    return res.status(500).json({ ok: false, error: 'party_guests_failed' });
+  }
+});
+
 router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res) => {
   const { partyId } = req.params;
   const memberId = req.member.member_id;
