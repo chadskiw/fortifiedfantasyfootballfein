@@ -2870,6 +2870,13 @@ router.get('/:partyId/public-feed', async (req, res) => {
     if ((party.state || '').toLowerCase() === 'cut') {
       return res.status(410).json({ ok: false, error: 'party_cut' });
     }
+    const partyType = (party.party_type || '').toLowerCase();
+    const visibilityMode = (party.visibility_mode || '').toLowerCase();
+    const isPublicParty =
+      partyType === 'public' || visibilityMode === 'public_party';
+    if (!isPublicParty) {
+      return res.status(403).json({ ok: false, error: 'party_not_public' });
+    }
 
     const hasPhotos = await client.query(
       `SELECT 1 FROM tt_photo WHERE party_id = $1 LIMIT 1`,
