@@ -903,7 +903,8 @@ router.get('/nearby', async (req, res) => {
       LIMIT 200;
     `;
 
-    const { rows } = await pool.query(sql, params);
+    const queryResult = await pool.query(sql, params);
+    const rows = Array.isArray(queryResult?.rows) ? queryResult.rows : [];
 
     return res.json({
       lat,
@@ -1064,6 +1065,8 @@ router.get('/map', async (req, res) => {
       ORDER BY p.taken_at DESC NULLS LAST, p.created_at DESC
       LIMIT $5;
     `;
+
+    const { rows } = await pool.query(sql, params);
 
     const ownerIds = collectOwnerIds(rows);
     const { zonesByMember, tiersByOwner } = await buildPrivacyContext(
