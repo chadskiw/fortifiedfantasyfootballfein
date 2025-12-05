@@ -337,8 +337,8 @@ async function applyReactionDelta(client, payload) {
         FROM tt_reaction_user
        WHERE entity_key = $1
          AND kind = $2
-         AND user_id = $3
-         AND type = $4
+         AND member_id = $3
+         AND reaction = $4
        LIMIT 1
     `,
     [entityKey, kind, userKey, normalizedType]
@@ -354,8 +354,8 @@ async function applyReactionDelta(client, payload) {
                updated_at = NOW()
          WHERE entity_key = $1
            AND kind = $2
-           AND user_id = $3
-           AND type = $4
+           AND member_id = $3
+           AND reaction = $4
       `,
       [entityKey, kind, userKey, normalizedType]
     );
@@ -367,12 +367,12 @@ async function applyReactionDelta(client, payload) {
           kind,
           party_id,
           audience,
-          user_id,
-          type,
+          member_id,
+          reaction,
           qty
         )
         VALUES ($1, $2, $3, $4, $5, $6, 1)
-        ON CONFLICT (kind, entity_key, user_id, type)
+        ON CONFLICT (kind, entity_key, member_id, reaction)
         DO UPDATE SET
           qty = 1,
           updated_at = NOW()
@@ -388,11 +388,11 @@ async function applyReactionDelta(client, payload) {
         kind,
         party_id,
         audience,
-        type,
+        reaction,
         total
       )
       VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (kind, entity_key, type)
+      ON CONFLICT (kind, entity_key, reaction)
       DO UPDATE SET
         total = GREATEST(tt_reaction_totals.total + $6, 0),
         updated_at = NOW()
