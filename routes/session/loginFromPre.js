@@ -1,9 +1,16 @@
 const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../../src/db/pool');           // adjust if needed
-const { setSessionCookie } = require('../../lib/cookies'); // or inline res.cookie
+const { setSessionCookie, setMemberCookie } = require('../../lib/cookies'); // or inline res.cookie
 
 const router = express.Router();
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MEMBER_MAX_AGE_MS  = 365 * 24 * 60 * 60 * 1000;
+const baseCookie = {
+  sameSite: 'Lax',
+  secure: String(process.env.NODE_ENV).toLowerCase() === 'production',
+  path: '/',
+};
 
 /**
  * Body: { member_id?, handle?, hex?, email?, phone? }
@@ -78,19 +85,34 @@ router.post('/login-from-pre', async (req, res) => {
 
     // Set the whoami cookie
     if (typeof setSessionCookie === 'function') {
-      setSessionCookie(res, sid); // your helper sets httpOnly/Lax/etc.
+      setSessionCookie(res, sid, { maxAge: SESSION_MAX_AGE_MS }); // your helper sets httpOnly/Lax/etc.
     } else {
       res.cookie('ff_sid', sid, {
-        httpOnly: true, sameSite: 'Lax', secure: process.env.NODE_ENV === 'production', path: '/',
-        maxAge: 30*24*60*60*1000
+        httpOnly: true,
+        ...baseCookie,
+        maxAge: SESSION_MAX_AGE_MS,
       });
     }
 
-    // Nice-to-have: refresh the simple marker too
-    res.cookie('ff_member', memberId, {
-      httpOnly: true, sameSite: 'Lax', secure: process.env.NODE_ENV === 'production', path: '/',
-      maxAge: 365*24*60*60*1000
-    });
+    // Readable member cookie
+    if (typeof setMemberCookie === 'function') {
+      setMemberCookie(res, memberId, { maxAge: MEMBER_MAX_AGE_MS });
+    } else {
+      res.cookie('ff_member', memberId, {
+        httpOnly: false,
+        ...baseCookie,
+        maxAge: MEMBER_MAX_AGE_MS,
+      });
+    }
+
+    // Legacy cookies other services expect
+    const sessionCookieOpts = { ...baseCookie, maxAge: SESSION_MAX_AGE_MS };
+    const memberCookieOpts  = { ...baseCookie, maxAge: MEMBER_MAX_AGE_MS };
+
+    res.cookie('ff_member_id', memberId, { ...memberCookieOpts, httpOnly: true });
+    res.cookie('ff_session_id', sid,      { ...sessionCookieOpts, httpOnly: true });
+    res.cookie('ff_session', sid,         { ...sessionCookieOpts, httpOnly: false });
+    res.cookie('ff_logged_in', '1',       { ...sessionCookieOpts, httpOnly: false });
 
     return res.json({ ok:true, logged_in:true, member_id: memberId });
   } catch (e) {
