@@ -27,6 +27,32 @@ const EARTH_RADIUS_M = 6371000; // meters
 const VALID_AUDIENCES = new Set(['private', 'public', 'party']);
 const DEFAULT_AUDIENCE = 'private';
 
+function degToRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return null;
+  }
+
+  const dLat = degToRad(lat2 - lat1);
+  const dLon = degToRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(degToRad(lat1)) *
+      Math.cos(degToRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_M * c;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
