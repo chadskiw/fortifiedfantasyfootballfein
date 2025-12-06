@@ -577,6 +577,8 @@ app.use('/api/identity', require('./routes/identity/me'));
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
 app.use('/api/images', createImagesRouter());
+app.use('/api/images/convert', createImagesRouter());
+
 app.use('/api/identity', require('./routes/identity/logout'));
 // ===== FF points API =====
 app.use('/api/ff', ffPointsRouter({ pool }));
