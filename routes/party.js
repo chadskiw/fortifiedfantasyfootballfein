@@ -17,7 +17,7 @@ const DEFAULT_VIBE = Object.freeze({
   brightness: 55,
 });
 const REACTION_TYPES = new Set(['heart', 'fire']);
-const REACTION_ENTITY_KINDS = new Set(['photo', 'message']);
+const REACTION_ENTITY_KINDS = new Set(['photo', 'message', 'video']);
 const PARTY_TYPES = new Set(['public', 'private', 'arrival', 'ticket', 'business']);
 const LOCATION_REQUIRED_PARTY_TYPES = new Set(['arrival', 'ticket']);
 const CHECKIN_VIA_VALUES = new Set([
@@ -306,6 +306,29 @@ async function resolvePartyReactionTarget(client, partyId, targetKindRaw, target
       partyId: row.party_id,
       audience: 'party',
       targetId: row.message_id,
+    };
+  }
+
+  if (kind === 'video') {
+    const { rows } = await client.query(
+      `
+        SELECT stream_uid, party_id
+          FROM tt_video
+         WHERE stream_uid = $1
+           AND party_id = $2
+           AND (kind IS NULL OR kind = 'clip')
+         LIMIT 1
+      `,
+      [String(targetId), partyId]
+    );
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      entityKey: buildPartyEntityKey('video', row.stream_uid),
+      kind: 'video',
+      partyId: row.party_id,
+      audience: 'party',
+      targetId: row.stream_uid,
     };
   }
 
@@ -2837,7 +2860,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
       return res.status(404).json({ error: 'party_not_found' });
     }
 
-    // 2) Load posts: messages + photos, all as unified "posts"
+    // 2) Load posts: messages + photos + clips, all as unified "posts"
     const { rows: posts } = await client.query(`
       WITH party_ctx AS (
         SELECT
@@ -2854,7 +2877,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
         -- Text messages
         SELECT
           'message' AS kind,
-          m.message_id      AS id,
+          m.message_id::text AS id,
           m.party_id,
           m.member_id,
           u.handle,
@@ -2867,7 +2890,9 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
             WHEN m.created_at <  ctx.starts_at THEN 'preparty'
             WHEN m.created_at >  ctx.ends_at   THEN 'recap'
             ELSE 'live'
-          END AS phase
+          END AS phase,
+          NULL::text        AS stream_uid,
+          NULL::integer     AS video_duration_seconds
         FROM tt_party_message m
         JOIN party_ctx ctx ON ctx.party_id = m.party_id
         JOIN ff_member u   ON u.member_id  = m.member_id
@@ -2877,7 +2902,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
         -- Photos
         SELECT
           'photo'          AS kind,
-          ph.photo_id      AS id,
+          ph.photo_id::text AS id,
           ph.party_id,
           ph.member_id,
           u.handle,
@@ -2890,10 +2915,39 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
             WHEN COALESCE(ph.taken_at, ph.created_at) < ctx.starts_at THEN 'preparty'
             WHEN COALESCE(ph.taken_at, ph.created_at) > ctx.ends_at   THEN 'recap'
             ELSE 'live'
-          END AS phase
+          END AS phase,
+          NULL::text        AS stream_uid,
+          NULL::integer     AS video_duration_seconds
         FROM tt_photo ph
         JOIN party_ctx ctx ON ctx.party_id = ph.party_id
         JOIN ff_member u   ON u.member_id  = ph.member_id
+
+        UNION ALL
+
+        -- Video clips
+        SELECT
+          'video'          AS kind,
+          v.stream_uid::text AS id,
+          v.party_id,
+          v.owner_member_id AS member_id,
+          u.handle,
+          NULL::text        AS body,
+          NULL::text        AS caption,
+          NULL::text        AS r2_key,
+          NULL::timestamptz AS taken_at,
+          COALESCE(v.created_at, NOW()) AS event_time,
+          CASE
+            WHEN COALESCE(v.created_at, NOW()) < ctx.starts_at THEN 'preparty'
+            WHEN COALESCE(v.created_at, NOW()) > ctx.ends_at   THEN 'recap'
+            ELSE 'live'
+          END AS phase,
+          v.stream_uid      AS stream_uid,
+          COALESCE(v.duration_seconds, 0) AS video_duration_seconds
+        FROM tt_video v
+        JOIN party_ctx ctx ON ctx.party_id = v.party_id
+        JOIN ff_member u   ON u.member_id  = v.owner_member_id
+        WHERE v.party_id = $1
+          AND (v.kind IS NULL OR v.kind = 'clip')
       ) all_posts
       WHERE party_id = $1
       ORDER BY event_time ASC
@@ -3007,7 +3061,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
         FROM (
           SELECT
             'message' AS kind,
-            m.message_id      AS id,
+            m.message_id::text AS id,
             m.party_id,
             m.member_id,
             u.handle,
@@ -3019,7 +3073,9 @@ router.get('/:partyId/public-feed', async (req, res) => {
               WHEN m.created_at <  ctx.starts_at THEN 'preparty'
               WHEN m.created_at >  ctx.ends_at   THEN 'recap'
               ELSE 'live'
-            END AS phase
+            END AS phase,
+            NULL::text        AS stream_uid,
+            NULL::integer     AS video_duration_seconds
           FROM tt_party_message m
           JOIN party_ctx ctx ON ctx.party_id = m.party_id
           JOIN ff_member u   ON u.member_id  = m.member_id
@@ -3028,7 +3084,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
 
           SELECT
             'photo'          AS kind,
-            ph.photo_id      AS id,
+            ph.photo_id::text AS id,
             ph.party_id,
             ph.member_id,
             u.handle,
@@ -3040,10 +3096,37 @@ router.get('/:partyId/public-feed', async (req, res) => {
               WHEN COALESCE(ph.taken_at, ph.created_at) < ctx.starts_at THEN 'preparty'
               WHEN COALESCE(ph.taken_at, ph.created_at) > ctx.ends_at   THEN 'recap'
               ELSE 'live'
-            END AS phase
+            END AS phase,
+            NULL::text        AS stream_uid,
+            NULL::integer     AS video_duration_seconds
           FROM tt_photo ph
           JOIN party_ctx ctx ON ctx.party_id = ph.party_id
           JOIN ff_member u   ON u.member_id  = ph.member_id
+
+          UNION ALL
+
+          SELECT
+            'video'          AS kind,
+            v.stream_uid::text AS id,
+            v.party_id,
+            v.owner_member_id AS member_id,
+            u.handle,
+            NULL::text       AS body,
+            NULL::text       AS r2_key,
+            NULL::timestamptz AS taken_at,
+            COALESCE(v.created_at, NOW()) AS event_time,
+            CASE
+              WHEN COALESCE(v.created_at, NOW()) < ctx.starts_at THEN 'preparty'
+              WHEN COALESCE(v.created_at, NOW()) > ctx.ends_at   THEN 'recap'
+              ELSE 'live'
+            END AS phase,
+            v.stream_uid     AS stream_uid,
+            COALESCE(v.duration_seconds, 0) AS video_duration_seconds
+          FROM tt_video v
+          JOIN party_ctx ctx ON ctx.party_id = v.party_id
+          JOIN ff_member u   ON u.member_id  = v.owner_member_id
+          WHERE v.party_id = $1
+            AND (v.kind IS NULL OR v.kind = 'clip')
         ) all_posts
         WHERE party_id = $1
         ORDER BY event_time ASC
