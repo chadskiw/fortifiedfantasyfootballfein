@@ -16,6 +16,7 @@ const zeffyRoutes = require('./routes/zeffy');
 const wallet = require('./routes/wallet');
 const walletsRoutes = require('./routes/wallets');
 const poolsPreview = require('./routes/pools');
+const videoRouter = require('./routes/video');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -40,6 +41,8 @@ const pool              = require('./src/db/pool');
 const trashtalkRouter = require('./routes/trashtalk');
 const partyRouter = require('./routes/party');
 const contactRouter = require('./routes/contact');
+
+
 
 // Optional helpers used by Kona passthrough
 const { fetchFromEspnWithCandidates } = require('./routes/espn/espnCred');
@@ -120,6 +123,7 @@ app.use(cookieParser());
 
 app.use('/api/trashtalk', trashtalkRouter);
 app.use('/api/party', partyRouter);
+app.use('/api/video', videoRouter);
 app.use('/api/contact', contactRouter);
 app.use('/api/me/privacy-zones', privacyZonesRouter);
 app.use(userLandingRoutes);
