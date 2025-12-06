@@ -22,6 +22,7 @@ const {
   loadViewerRelationshipTiers,
   applyPrivacyZones,
 } = require('../utils/privacyZones');
+const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
 
 // ...
 const router = express.Router();
@@ -701,6 +702,7 @@ router.post(
       }
 
 
+      const manualMeta = parseManualMeta(req.body);
       const results = [];
 
       for (const file of req.files) {
@@ -709,6 +711,7 @@ router.post(
         let exifData = null;
         let lat = null;
         let lon = null;
+        let usedManualMeta = false;
 
         try {
         exifData = await exifr.parse(file.buffer);
@@ -720,7 +723,25 @@ router.post(
         console.warn('EXIF parse failed for', file.originalname, err.message);
         }
 
-        const timestamp = getImageTimestamp(exifData); // ← from metadata when possible
+                const timestamp = getImageTimestamp(exifData); // ← from metadata when possible
+        let takenAt = new Date(timestamp);
+        if ((lat == null || lon == null) && manualMeta) {
+        lat = manualMeta.lat;
+        lon = manualMeta.lon;
+        usedManualMeta = true;
+        }
+        if ((!takenAt || Number.isNaN(takenAt.getTime())) && manualMeta?.takenAt) {
+        takenAt = manualMeta.takenAt;
+        usedManualMeta = true;
+        }
+        if (!takenAt || Number.isNaN(takenAt.getTime())) {
+        takenAt = new Date(timestamp);
+        }
+        const locationSource = usedManualMeta
+          ? manualMeta?.source || 'user_input'
+          : Number.isFinite(lat) && Number.isFinite(lon)
+            ? 'exif'
+            : null;
         const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
         const r2Key = `trashtalk/${ownerHandle}/${timestamp}_${safeName}`;
 
@@ -731,8 +752,17 @@ router.post(
           contentType: file.mimetype,
         });
 
-const takenAt = new Date(timestamp);
-
+let exifPayload = exifData ? { ...exifData } : null;
+if (usedManualMeta && manualMeta) {
+if (!exifPayload) exifPayload = {};
+exifPayload.user_input = {
+lat: manualMeta.lat,
+lon: manualMeta.lon,
+taken_at: manualMeta.takenAt ? manualMeta.takenAt.toISOString() : null,
+source: manualMeta.source,
+};
+}
+const exifJson = exifPayload ? JSON.stringify(exifPayload) : null;
         let effectivePartyId = partyId;
         if (!effectivePartyId) {
           effectivePartyId = await findNearbyPartyForHandle(
@@ -747,19 +777,20 @@ const takenAt = new Date(timestamp);
           Boolean(effectivePartyId)
         );
 
-        const upsertValues = [
-          ownerHandle,           // $1
-          r2Key,                 // $2
-          ownerMemberId,         // $3
-          file.originalname,     // $4
-          file.mimetype,         // $5
-          exifData ? JSON.stringify(exifData) : null, // $6
-          lat,                   // $7
-          lon,                   // $8
-          takenAt,               // $9
-          cameraFingerprint,     // $10
-          effectivePartyId,      // $11
-          audience               // $12
+                const upsertValues = [
+          ownerHandle,           // 
+          r2Key,                 // 
+          ownerMemberId,         // 
+          file.originalname,     // 
+          file.mimetype,         // 
+          exifJson,              // 
+          lat,                   // 
+          lon,                   // 
+          takenAt,               // 
+          cameraFingerprint,     // 
+          effectivePartyId,      // 
+          audience,              // 
+          locationSource         // 
         ];
 
 const existing = await pool.query(
