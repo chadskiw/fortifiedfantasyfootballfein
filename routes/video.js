@@ -13,6 +13,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
+const { getCurrentIdentity } = require('../services/identity');
 
 const fetch =
   global.fetch ||
@@ -48,39 +49,6 @@ const STREAM_API_BASE = STREAM_ACCOUNT
 const hasNativeFormData =
   typeof FormData === 'function' && typeof Blob === 'function';
 const FormDataPolyfill = !hasNativeFormData ? require('form-data') : null;
-
-function parseCookies(req) {
-  if (req.cookies) return req.cookies;
-  const out = {};
-  const raw = req.headers?.cookie || '';
-  raw.split(';').forEach((pair) => {
-    const idx = pair.indexOf('=');
-    if (idx === -1) return;
-    const key = pair.slice(0, idx).trim();
-    if (!key) return;
-    out[key] = decodeURIComponent(pair.slice(idx + 1));
-  });
-  return out;
-}
-
-function getCurrentMemberId(req) {
-  if (req.member_id) return req.member_id;
-  const cookies = parseCookies(req);
-  if (
-    cookies.ff_member_id &&
-    (cookies.ff_logged_in === '1' ||
-      cookies.ff_logged_in === 'true' ||
-      cookies.ff_logged_in === 1)
-  ) {
-    return cookies.ff_member_id;
-  }
-  if (req.headers['x-ff-member-id']) {
-    return String(req.headers['x-ff-member-id']);
-  }
-  if (req.body?.memberId) return String(req.body.memberId);
-  if (req.query?.memberId) return String(req.query.memberId);
-  return null;
-}
 
 function ensureStreamConfig() {
   if (!STREAM_API_BASE || !STREAM_API_TOKEN) {
@@ -155,18 +123,24 @@ async function buildStreamUploadBody(filePath, filename) {
   return { body: form, headers: form.getHeaders() };
 }
 
-function requireMember(req, res) {
-  const memberId = getCurrentMemberId(req);
-  if (!memberId) {
-    res.status(401).json({ ok: false, error: 'unauthorized' });
-    return null;
+async function requireIdentity(req, res) {
+  try {
+    const identity = await getCurrentIdentity(req, pool);
+    const memberId = identity?.member_id || identity?.memberId || null;
+    if (memberId) {
+      return { ...identity, member_id: memberId, memberId };
+    }
+  } catch (err) {
+    console.error('[video:identity]', err);
   }
-  return memberId;
+  res.status(401).json({ ok: false, error: 'unauthorized' });
+  return null;
 }
 
 router.post('/work', async (req, res) => {
-  const memberId = requireMember(req, res);
-  if (!memberId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const memberId = identity.member_id || identity.memberId;
 
   const partyId = req.body?.party_id || req.body?.partyId || null;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -215,8 +189,9 @@ router.post('/work', async (req, res) => {
 });
 
 router.get('/work/:workId', async (req, res) => {
-  const memberId = requireMember(req, res);
-  if (!memberId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const memberId = identity.member_id || identity.memberId;
   const workId = Number(req.params.workId);
   if (!Number.isFinite(workId)) {
     return res.status(400).json({ ok: false, error: 'invalid_work_id' });
@@ -261,8 +236,9 @@ router.get('/work/:workId', async (req, res) => {
 });
 
 router.post('/work/:workId/clip', async (req, res) => {
-  const memberId = requireMember(req, res);
-  if (!memberId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const memberId = identity.member_id || identity.memberId;
   const workId = Number(req.params.workId);
   if (!Number.isFinite(workId)) {
     return res.status(400).json({ ok: false, error: 'invalid_work_id' });
