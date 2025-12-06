@@ -9,8 +9,8 @@ const {
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-const FormData = require('form-data');
 const fs = require('fs');
+const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
 
@@ -44,6 +44,10 @@ const STREAM_API_TOKEN = process.env.CF_STREAM_API_TOKEN || '';
 const STREAM_API_BASE = STREAM_ACCOUNT
   ? `https://api.cloudflare.com/client/v4/accounts/${STREAM_ACCOUNT}/stream`
   : '';
+
+const hasNativeFormData =
+  typeof FormData === 'function' && typeof Blob === 'function';
+const FormDataPolyfill = !hasNativeFormData ? require('form-data') : null;
 
 function parseCookies(req) {
   if (req.cookies) return req.cookies;
@@ -132,6 +136,23 @@ function normalizeClipWindow(startSeconds, endSeconds, options = {}) {
   const allowOverflow = options?.allowOverflow === true;
   const duration = allowOverflow ? rawDuration : Math.min(30, rawDuration);
   return { start, duration, rawDuration, targetEnd: start + rawDuration };
+}
+
+async function buildStreamUploadBody(filePath, filename) {
+  if (hasNativeFormData) {
+    const buffer = await fsp.readFile(filePath);
+    const blob = new Blob([buffer], { type: 'video/mp4' });
+    const form = new FormData();
+    form.append('file', blob, filename);
+    return { body: form, headers: {} };
+  }
+
+  const form = new FormDataPolyfill();
+  form.append('file', fs.createReadStream(filePath), {
+    filename,
+    contentType: 'video/mp4',
+  });
+  return { body: form, headers: form.getHeaders() };
 }
 
 function requireMember(req, res) {
@@ -337,19 +358,16 @@ router.post('/work/:workId/clip', async (req, res) => {
         .run();
     });
 
-    const form = new FormData();
-    form.append('file', fs.createReadStream(clipPath), {
-      filename: `party-clip-${workId}.mp4`,
-      contentType: 'video/mp4',
-    });
+    const { body: uploadBody, headers: uploadHeaders } =
+      await buildStreamUploadBody(clipPath, `party-clip-${workId}.mp4`);
 
     const streamResp = await fetch(STREAM_API_BASE, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${STREAM_API_TOKEN}`,
-        ...form.getHeaders(),
+        ...uploadHeaders,
       },
-      body: form,
+      body: uploadBody,
     });
     const streamData = await streamResp.json().catch(() => ({}));
     if (!streamResp.ok || streamData?.success === false) {
