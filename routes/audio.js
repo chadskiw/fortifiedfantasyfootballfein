@@ -25,6 +25,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const router = express.Router();
 const bucket = process.env.R2_BUCKET;
+const MAX_AUDIO_DURATION_SECONDS = 3 * 60 * 60; // 3 hours
 
 // --- Helper: get current member id (adjust if your auth is different) ---
 function getCurrentMemberId(req) {
@@ -172,6 +173,20 @@ router.post('/track/:audioId/finalize', async (req, res, next) => {
         resolve(dur ? Math.round(dur) : null);
       });
     });
+
+    if (
+      Number.isFinite(durationSeconds) &&
+      durationSeconds > MAX_AUDIO_DURATION_SECONDS
+    ) {
+      fs.unlink(rawPath, () => {});
+      fs.unlink(finalPath, () => {});
+      return res.status(422).json({
+        ok: false,
+        error: 'audio_too_long',
+        max_seconds: MAX_AUDIO_DURATION_SECONDS,
+        duration_seconds: durationSeconds,
+      });
+    }
 
     const finalKey = `trashtalk-audio/final/${audioId}.mp3`;
     const fileData = fs.readFileSync(finalPath);
