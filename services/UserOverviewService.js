@@ -16,6 +16,7 @@ let ffMemberHasDisplayName = true;
 let ffMemberHasAvatarUrl = true;
 let ffQuickhitterHasColorHex = true;
 let ttUserThemeExists = true;
+let ttVideoTableExists = true;
 
 const DEFAULT_THEME_STATE = {
   map_hue: 214,
@@ -243,6 +244,44 @@ async function loadMemberZoneContext(memberId, viewerId) {
   return { zonesByMember, tiersByOwner, zones, viewerTier };
 }
 
+async function loadRecentVideos(memberId, limit) {
+  if (!ttVideoTableExists || !memberId) {
+    return [];
+  }
+  const safeLimit = Math.min(
+    500,
+    Math.max(1, Number.parseInt(limit, 10) || 24)
+  );
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          stream_uid,
+          owner_member_id,
+          party_id,
+          kind,
+          duration_seconds,
+          created_at
+        FROM tt_video
+        WHERE owner_member_id = $1
+          AND (kind IS NULL OR kind IN ('clip', 'trashtalk'))
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT $2::int
+      `,
+      [memberId, safeLimit]
+    );
+    return rows || [];
+  } catch (err) {
+    const lowered = (err?.message || '').toLowerCase();
+    if (ttVideoTableExists && lowered.includes('tt_video')) {
+      ttVideoTableExists = false;
+      return [];
+    }
+    console.warn('UserOverview: recent video lookup failed', err?.message || err);
+    return [];
+  }
+}
+
 function rebuildPhotosWithPrivacy(rows, visible, obscured) {
   const byId = new Map();
   visible.forEach((row) => {
@@ -458,8 +497,9 @@ const theme = await loadUserTheme(memberId);
     const handleColor =
       quickhitter && quickhitter.color_hex ? quickhitter.color_hex : null;
 
-    const recentPayload = orderedRecentRows.map((row) => {
+    const photoEntries = orderedRecentRows.map((row) => {
       const payload = {
+        kind: 'photo',
         photo_id: row.photo_id,
         r2_key: row.r2_key,
         lat: row.lat,
@@ -471,8 +511,36 @@ const theme = await loadUserTheme(memberId);
       if (row.obscured_zone) {
         payload.obscured_zone = row.obscured_zone;
       }
-      return payload;
+      const sortSource =
+        row.taken_at || row.created_at || row.policy_updated_at || null;
+      return {
+        sortTs: sortSource ? Date.parse(sortSource) || 0 : 0,
+        data: payload,
+      };
     });
+
+    const videoRows = await loadRecentVideos(memberId, recentLimit);
+    const videoEntries = videoRows.map((row) => {
+      const createdAt = row.created_at || row.createdAt || null;
+      const payload = {
+        kind: 'video',
+        stream_uid: row.stream_uid,
+        video_uid: row.stream_uid,
+        party_id: row.party_id,
+        created_at: createdAt,
+        video_duration_seconds: row.duration_seconds || null,
+        video_kind: row.kind || null,
+      };
+      return {
+        sortTs: createdAt ? Date.parse(createdAt) || 0 : 0,
+        data: payload,
+      };
+    });
+
+    const combinedRecent = [...photoEntries, ...videoEntries]
+      .sort((a, b) => (b.sortTs || 0) - (a.sortTs || 0))
+      .slice(0, recentLimit)
+      .map((entry) => entry.data);
 
     return {
       member_id: memberId,
@@ -485,7 +553,7 @@ const theme = await loadUserTheme(memberId);
       photo_count: stats.photo_count || 0,
       last_taken_at: stats.last_taken_at || null,
       photo_bounds: photoBounds,
-      recent_photos: recentPayload,
+      recent_photos: combinedRecent,
       map_photos: mapPhotos,
       home_photos: homePhotos,
       privacy_zone_photos: zonePhotos,
