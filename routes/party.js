@@ -538,6 +538,7 @@ function serializeParty(row) {
       ? { handle: row.host_handle, hue: row.host_hue || null }
       : null,
     name: row.name,
+    party_photo_key: row.party_photo_key || null,
     rty: row.rty || null,
     description: row.description,
     center_lat: row.center_lat,
@@ -2102,6 +2103,61 @@ router.patch('/:partyId/vibe', jsonParser, async (req, res) => {
   } catch (err) {
     console.error('[party:vibe:update]', err);
     return res.status(500).json({ ok: false, error: 'party_vibe_update_failed' });
+  }
+});
+
+router.patch('/:partyId/image', jsonParser, async (req, res) => {
+  const me = await requireIdentity(req, res);
+  if (!me) return;
+
+  const { partyId } = req.params;
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'party_id_required' });
+  }
+
+  try {
+    const access = await resolvePartyAccess(partyId, me);
+    if (!access?.ok) {
+      return res
+        .status(access?.status || 403)
+        .json({ ok: false, error: access?.error || 'party_access_denied' });
+    }
+    if (!access.isHost) {
+      return res.status(403).json({ ok: false, error: 'not_party_host' });
+    }
+
+    const rawKey = req.body?.photoKey;
+    let normalizedKey = '';
+    if (rawKey == null || rawKey === '') {
+      normalizedKey = '';
+    } else if (typeof rawKey === 'string') {
+      normalizedKey = rawKey.trim();
+    } else {
+      return res.status(422).json({ ok: false, error: 'invalid_photo_key' });
+    }
+    if (normalizedKey.length > 512) {
+      return res.status(422).json({ ok: false, error: 'photo_key_too_long' });
+    }
+
+    const { rows } = await pool.query(
+      `
+        UPDATE tt_party
+           SET party_photo_key = $2,
+               updated_at      = NOW()
+         WHERE party_id = $1
+         RETURNING *
+      `,
+      [partyId, normalizedKey || null]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'party_not_found' });
+    }
+    return res.json({ ok: true, party: serializeParty(rows[0]) });
+  } catch (err) {
+    console.error('[party:image:update]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'party_image_update_failed' });
   }
 });
 
