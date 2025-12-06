@@ -27,6 +27,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const router = express.Router();
 const bucket = process.env.R2_BUCKET;
 const MAX_AUDIO_DURATION_SECONDS = 3 * 60 * 60; // 3 hours
+const MAX_QUEUE_LENGTH = 8;
 
 async function fetchPartySummary(partyId) {
   if (!partyId) return null;
@@ -180,6 +181,92 @@ async function serializeTracks(rows) {
     }
   }
   return hydrated;
+}
+
+function normalizeUuid(value) {
+  const normalized = String(value || '').trim();
+  return /^[0-9a-fA-F-]{10,}$/.test(normalized) ? normalized : '';
+}
+
+function extractMemberId(identity) {
+  if (!identity) return '';
+  const candidates = [
+    identity.memberId,
+    identity.member_id,
+    identity.memberID,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && String(candidate).trim()) {
+      return String(candidate).trim();
+    }
+  }
+  return '';
+}
+
+async function loadTracksByIds(audioIds) {
+  if (!Array.isArray(audioIds) || !audioIds.length) {
+    return [];
+  }
+  const order = [];
+  const seen = new Set();
+  for (const value of audioIds) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) continue;
+    if (seen.has(numeric)) continue;
+    seen.add(numeric);
+    order.push(numeric);
+    if (order.length >= MAX_QUEUE_LENGTH) break;
+  }
+  if (!order.length) return [];
+  const { rows } = await pool.query(
+    `
+      SELECT audio_id,
+             r2_key_final,
+             owner_member_id,
+             party_id,
+             duration_seconds,
+             format,
+             title,
+             description,
+             hero_kind,
+             hero_ref,
+             created_at,
+             updated_at
+        FROM tt_audio_track
+       WHERE audio_id = ANY($1::bigint[])
+         AND r2_key_final IS NOT NULL
+         AND r2_key_final <> 'pending'
+       ORDER BY array_position($1::bigint[], audio_id)
+    `,
+    [order]
+  );
+  return serializeTracks(rows);
+}
+
+async function ensurePartyAudioHost(partyId, identity) {
+  const access = await ensurePartyAudioAccess(partyId, identity);
+  const hostHandle = String(access.party?.host_handle || '')
+    .trim()
+    .toLowerCase();
+  const viewerHandle = String(identity?.handle || '').trim().toLowerCase();
+  const membershipLevel = String(
+    access.membership?.access_level || ''
+  ).toLowerCase();
+  const memberId = extractMemberId(identity);
+  if (!identity || !memberId) {
+    const err = new Error('host_only');
+    err.status = 403;
+    throw err;
+  }
+  if (viewerHandle && viewerHandle === hostHandle) {
+    return access;
+  }
+  if (membershipLevel === 'host') {
+    return access;
+  }
+  const err = new Error('host_only');
+  err.status = 403;
+  throw err;
 }
 
 // --- Helper: get current member id (adjust if your auth is different) ---
@@ -549,6 +636,145 @@ router.get('/tracks', async (req, res, next) => {
     return res.status(400).json({ ok: false, error: 'missing_scope' });
   } catch (err) {
     console.error('[audio:list] error', err);
+    next(err);
+  }
+});
+
+router.get('/party/:partyId/audio/queue', async (req, res, next) => {
+  const partyId = normalizeUuid(req.params.partyId);
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'invalid_party_id' });
+  }
+  try {
+    const identity = await getCurrentIdentity(req, pool);
+    await ensurePartyAudioAccess(partyId, identity);
+    const { rows } = await pool.query(
+      `
+        SELECT queue_ids,
+               autoplay,
+               loop,
+               updated_by,
+               updated_at
+          FROM tt_party_audio_selection
+         WHERE party_id = $1
+         LIMIT 1
+      `,
+      [partyId]
+    );
+    const selection = rows[0] || null;
+    const queueIds = Array.isArray(selection?.queue_ids)
+      ? selection.queue_ids
+      : [];
+    const tracks = await loadTracksByIds(queueIds);
+    res.json({
+      ok: true,
+      party_id: partyId,
+      queue: tracks,
+      queue_ids: queueIds,
+      autoplay: selection?.autoplay !== false,
+      loop: selection?.loop !== false,
+      updated_by: selection?.updated_by || null,
+      updated_at: selection?.updated_at || null,
+      max: MAX_QUEUE_LENGTH,
+    });
+  } catch (err) {
+    console.error('[audio:queue:get] error', err);
+    next(err);
+  }
+});
+
+router.post('/party/:partyId/audio/queue', async (req, res, next) => {
+  const partyId = normalizeUuid(req.params.partyId);
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'invalid_party_id' });
+  }
+  try {
+    const identity = await getCurrentIdentity(req, pool);
+    await ensurePartyAudioHost(partyId, identity);
+    const incoming = Array.isArray(req.body?.audio_ids)
+      ? req.body.audio_ids
+      : [];
+    const normalizedIds = [];
+    const seen = new Set();
+    for (const value of incoming) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) continue;
+      if (seen.has(numeric)) continue;
+      seen.add(numeric);
+      normalizedIds.push(numeric);
+      if (normalizedIds.length >= MAX_QUEUE_LENGTH) break;
+    }
+    if (!normalizedIds.length) {
+      return res.status(400).json({ ok: false, error: 'empty_queue' });
+    }
+    const { rows } = await pool.query(
+      `
+        SELECT audio_id,
+               owner_member_id,
+               r2_key_final
+          FROM tt_audio_track
+         WHERE audio_id = ANY($1::bigint[])
+      `,
+      [normalizedIds]
+    );
+    if (rows.length !== normalizedIds.length) {
+      return res.status(404).json({ ok: false, error: 'audio_not_found' });
+    }
+    const memberId = extractMemberId(identity).toUpperCase();
+    const invalidOwners = rows.filter((row) => {
+      if (!row?.owner_member_id) return true;
+      return String(row.owner_member_id).trim().toUpperCase() !== memberId;
+    });
+    if (invalidOwners.length) {
+      return res.status(403).json({ ok: false, error: 'not_owner' });
+    }
+    const missingR2 = rows.some(
+      (row) => !row.r2_key_final || row.r2_key_final === 'pending'
+    );
+    if (missingR2) {
+      return res.status(409).json({ ok: false, error: 'track_not_ready' });
+    }
+    const autoplay =
+      req.body && typeof req.body.autoplay === 'boolean'
+        ? req.body.autoplay
+        : true;
+    const loop =
+      req.body && typeof req.body.loop === 'boolean' ? req.body.loop : true;
+    const updatedBy = identity?.handle || identity?.memberId || null;
+    await pool.query(
+      `
+        INSERT INTO tt_party_audio_selection (
+          party_id,
+          queue_ids,
+          autoplay,
+          loop,
+          updated_by,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (party_id)
+        DO UPDATE SET
+          queue_ids = EXCLUDED.queue_ids,
+          autoplay = EXCLUDED.autoplay,
+          loop = EXCLUDED.loop,
+          updated_by = EXCLUDED.updated_by,
+          updated_at = NOW()
+      `,
+      [partyId, normalizedIds, autoplay, loop, updatedBy]
+    );
+    const tracks = await loadTracksByIds(normalizedIds);
+    res.json({
+      ok: true,
+      party_id: partyId,
+      queue: tracks,
+      queue_ids: normalizedIds,
+      autoplay,
+      loop,
+      updated_by: updatedBy,
+      max: MAX_QUEUE_LENGTH,
+    });
+  } catch (err) {
+    console.error('[audio:queue:set] error', err);
     next(err);
   }
 });
