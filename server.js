@@ -17,6 +17,7 @@ const wallet = require('./routes/wallet');
 const walletsRoutes = require('./routes/wallets');
 const poolsPreview = require('./routes/pools');
 const videoRouter = require('./routes/video');
+const audioRouter     = require('./routes/audio');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -131,6 +132,8 @@ app.use(partyLandingRoutes);
 app.use(trashtalkUserRoutes);
 // ...
 app.use(specialsRouter);
+app.use('/api/audio', audioRouter);
+
 // === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
 function normalizeSwid(raw){
   try{
