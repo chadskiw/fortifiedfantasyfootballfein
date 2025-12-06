@@ -88,14 +88,21 @@ async function getTeams({ season, leagueId, swid, s2 }) {
   return { season, leagueId, teams };
 }
 
-async function getRoster({ season, leagueId, teamId, week, swid, s2 }) {
-  const params = new URLSearchParams();
-  if (Number.isFinite(week)) params.set('scoringPeriodId', String(week));
-  const url = `${BASE_LEAGUE(season, leagueId)}?${params}&view=mRoster`;
+// Replace in src/api/platforms/espn.js
 
-  const data = await espnGET(url, { swid, s2 });
-  const team = (data.teams || []).find(t => t.id === Number(teamId));
-  if (!team) return { season, leagueId, teamId, week, players: [] };
+async function getRoster({ season, leagueId, teamId, week, swid, s2 }) {
+  const url = new URL(BASE_LEAGUE(season, leagueId));
+  if (Number.isFinite(Number(week))) {
+    url.searchParams.set('scoringPeriodId', String(Number(week)));
+  }
+  // Narrow response to just the team we need (faster, smaller payload)
+  if (teamId != null) url.searchParams.set('forTeamId', String(teamId));
+  url.searchParams.set('view', 'mRoster');
+
+  const data = await espnGET(url.toString(), { swid, s2 });
+
+  const team = (data.teams || []).find(t => String(t.id) === String(teamId));
+  if (!team) return { season, leagueId, teamId, week: Number(week) || undefined, players: [] };
 
   const entries = (team.roster?.entries || []).map(e => ({
     playerId: e.playerId,
@@ -113,6 +120,7 @@ async function getRoster({ season, leagueId, teamId, week, swid, s2 }) {
 
   return { season, leagueId, teamId, week: Number(week) || undefined, players: entries };
 }
+
 
 async function getMatchups({ season, leagueId, week, swid, s2 }) {
   const params = new URLSearchParams({ view: 'mMatchupScore' });

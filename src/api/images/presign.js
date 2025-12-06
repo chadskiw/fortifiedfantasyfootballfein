@@ -16,5 +16,5 @@ app.post('/api/images/presign', async (req, res) => {
     new PutObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key, ContentType: content_type }),
     { expiresIn: 60 }
   );
-  res.json({ ok: true, type: 'put', url, key, public_url: `https://img.fortifiedfantasy.com/${key}` });
+  res.json({ ok: true, type: 'put', url, key, public_url: `https://img.fortifiedfantasy.com/avatars/anon/${key}` });
 });

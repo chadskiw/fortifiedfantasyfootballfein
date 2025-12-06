@@ -4,10 +4,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const multer = require('multer');
+const sharp = require('sharp');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
-const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB cap
+const upload = multer({ limits: { fileSize: 16 * 1024 * 1024 } }); // 16MB cap
 
 // ---- env ----
 // R2 is S3-compatible (no region enforcement). Use 'auto' or 'us-east-1'.
@@ -59,11 +60,20 @@ function safeContentType(s) {
   return v;
 }
 
-function genKey({ kind='avatars', member_id=null, ext='webp' }) {
-  const ts = Date.now();
-  const rand = crypto.randomBytes(6).toString('hex');
-  const owner = member_id ? String(member_id) : 'anon';
-  return `${kind}/${owner}/${ts}-${rand}.${ext}`.replace(/\/{2,}/g,'/');
+function genKey({ kind='avatars', ext='webp' }) {
+  const ts   = Date.now().toString(36);
+  const rand = crypto.randomBytes(8).toString('hex').slice(0,12);
+  return `${kind}/${ts}-${rand}.${ext}`;   // e.g. avatars/lph0qo-7a3f1b2c3d.webp
+}
+
+function normalizeKind(value, fallback = 'avatars') {
+  const cleaned = String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
+  return cleaned || fallback;
 }
 
 module.exports = function createImagesRouter(){
@@ -121,7 +131,7 @@ router.post('/presign', async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
       const member_id = req.cookies?.ff_member || null;
-      const kind = (req.body?.kind || req.query?.kind || 'avatars').toString();
+      const kind = normalizeKind(req.body?.kind || req.query?.kind || 'avatars');
       const ext = (req.file.mimetype === 'image/png' ? 'png'
                 : req.file.mimetype === 'image/jpeg' ? 'jpg'
                 : 'webp');
@@ -139,6 +149,63 @@ router.post('/presign', async (req, res) => {
     } catch (e) {
       console.error('[images.upload] error:', e);
       return res.status(500).json({ ok:false, error:'upload_failed' });
+    }
+  });
+
+  // POST /api/images/convert
+  // Accepts a raw upload, converts to WebP, stores in R2, and returns the key/public URL.
+  router.post('/convert', upload.single('file'), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({ ok: false, error: 'file_required' });
+      }
+      if (!/^image\//i.test(file.mimetype || '')) {
+        return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
+      }
+
+      const kind = normalizeKind(req.body?.kind || req.query?.kind || 'party');
+      const maxDimRaw = Number(req.body?.max || req.query?.max);
+      const maxDimension = Number.isFinite(maxDimRaw)
+        ? Math.min(Math.max(320, maxDimRaw), 4096)
+        : 1600;
+
+      const webpBuffer = await sharp(file.buffer, { failOnError: false })
+        .rotate()
+        .resize({
+          width: maxDimension,
+          height: maxDimension,
+          fit: 'inside',
+          withoutEnlargement: true,
+          fastShrinkOnLoad: true,
+        })
+        .webp({ quality: 86, effort: 4 })
+        .toBuffer();
+
+      const key = genKey({ kind, ext: 'webp' });
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: key,
+          Body: webpBuffer,
+          ContentType: 'image/webp',
+          CacheControl: 'public, max-age=31536000, immutable',
+        })
+      );
+
+      res.set('Cache-Control', 'no-store');
+      return res.json({
+        ok: true,
+        key,
+        public_url: `${PUBLIC_BASE}/${key}`,
+        bytes: webpBuffer.length,
+      });
+    } catch (err) {
+      console.error('[images.convert] error', err);
+      if (err?.message && /unsupported image format/i.test(err.message)) {
+        return res.status(415).json({ ok: false, error: 'unsupported_media_type' });
+      }
+      return res.status(500).json({ ok: false, error: 'image_convert_failed' });
     }
   });
 
