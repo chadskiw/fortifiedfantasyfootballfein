@@ -21,6 +21,7 @@ const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const pool = require('../src/db/pool');
 const r2 = require('../src/r2');
 const { getCurrentIdentity } = require('../services/identity');
+const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -132,6 +133,10 @@ async function loadTracksForClause(whereClause, params, limit) {
            description,
            hero_kind,
            hero_ref,
+           lat,
+           lon,
+           recorded_at,
+           meta_source,
            created_at,
            updated_at
       FROM tt_audio_track
@@ -173,6 +178,10 @@ async function serializeTracks(rows) {
         description: row.description,
         hero_kind: row.hero_kind || 'none',
         hero_ref: row.hero_ref || null,
+        lat: row.lat,
+        lon: row.lon,
+        recorded_at: row.recorded_at,
+        meta_source: row.meta_source,
         created_at: row.created_at,
         updated_at: row.updated_at,
       });
@@ -301,6 +310,7 @@ router.post('/track', async (req, res, next) => {
     }
 
     const { party_id, title, description } = req.body || {};
+    const manualMeta = parseManualMeta(req.body);
 
     const row = await withPg(async (client) => {
       const { rows } = await client.query(
@@ -310,11 +320,24 @@ router.post('/track', async (req, res, next) => {
            r2_key_final,
            format,
            title,
-           description
+           description,
+           lat,
+           lon,
+           recorded_at,
+           meta_source
          )
-         VALUES ($1, $2, 'pending', 'mp3', $3, $4)
+         VALUES ($1, $2, 'pending', 'mp3', $3, $4, $5, $6, $7, $8)
          RETURNING audio_id`,
-        [memberId, party_id || null, title || null, description || null]
+        [
+          memberId,
+          party_id || null,
+          title || null,
+          description || null,
+          manualMeta?.lat ?? null,
+          manualMeta?.lon ?? null,
+          manualMeta?.takenAt ?? null,
+          manualMeta?.source ?? null,
+        ]
       );
       return rows[0];
     });
@@ -329,6 +352,16 @@ router.post('/track', async (req, res, next) => {
     });
 
     const uploadUrl = await getSignedUrl(r2, putCmd, { expiresIn: 3600 });
+
+    if (manualMeta && audioId) {
+      await recordManualMeta(
+        pool,
+        'audio',
+        String(audioId),
+        manualMeta,
+        memberId
+      );
+    }
 
     res.json({
       ok: true,
@@ -547,6 +580,10 @@ router.get('/track/:audioId', async (req, res, next) => {
                 description,
                 hero_kind,
                 hero_ref,
+                lat,
+                lon,
+                recorded_at,
+                meta_source,
                 created_at,
                 updated_at
          FROM tt_audio_track
@@ -582,6 +619,10 @@ router.get('/track/:audioId', async (req, res, next) => {
       description: track.description,
       hero_kind: track.hero_kind,
       hero_ref: track.hero_ref,
+      lat: track.lat,
+      lon: track.lon,
+      recorded_at: track.recorded_at,
+      meta_source: track.meta_source,
       created_at: track.created_at,
       updated_at: track.updated_at,
     });

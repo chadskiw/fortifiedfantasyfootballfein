@@ -14,6 +14,7 @@ const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
 const { getCurrentIdentity } = require('../services/identity');
+const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
 
 const fetch =
   global.fetch ||
@@ -144,15 +145,35 @@ router.post('/work', async (req, res) => {
 
   const partyId = req.body?.party_id || req.body?.partyId || null;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const manualMeta = parseManualMeta(req.body);
 
   try {
     const insert = await pool.query(
       `
-        INSERT INTO tt_video_work (member_id, party_id, r2_key_original, status, expires_at)
-        VALUES ($1, $2, $3, 'editing', $4)
+        INSERT INTO tt_video_work (
+          member_id,
+          party_id,
+          r2_key_original,
+          status,
+          expires_at,
+          manual_lat,
+          manual_lon,
+          manual_taken_at,
+          manual_meta_source
+        )
+        VALUES ($1, $2, $3, 'editing', $4, $5, $6, $7, $8)
         RETURNING work_id
       `,
-      [memberId, partyId || null, 'pending', expiresAt]
+      [
+        memberId,
+        partyId || null,
+        'pending',
+        expiresAt,
+        manualMeta?.lat ?? null,
+        manualMeta?.lon ?? null,
+        manualMeta?.takenAt ?? null,
+        manualMeta?.source ?? null,
+      ]
     );
 
     const workId = insert.rows[0]?.work_id;
@@ -199,7 +220,8 @@ router.get('/work/:workId', async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT work_id, member_id, party_id, r2_key_original, status, expires_at, duration_seconds
+      `SELECT work_id, member_id, party_id, r2_key_original, status, expires_at, duration_seconds,
+              manual_lat, manual_lon, manual_taken_at, manual_meta_source
          FROM tt_video_work
         WHERE work_id = $1`,
       [workId]
@@ -221,6 +243,18 @@ router.get('/work/:workId', async (req, res) => {
     });
     const playbackUrl = await getSignedUrl(s3, getCmd, { expiresIn: 3600 });
 
+    const manualMetaPayload =
+      work.manual_lat != null ||
+      work.manual_lon != null ||
+      work.manual_taken_at != null
+        ? {
+            lat: work.manual_lat,
+            lon: work.manual_lon,
+            taken_at: work.manual_taken_at,
+            source: work.manual_meta_source,
+          }
+        : null;
+
     return res.json({
       ok: true,
       work_id: work.work_id,
@@ -228,6 +262,7 @@ router.get('/work/:workId', async (req, res) => {
       status: work.status,
       expires_at: work.expires_at,
       duration_seconds: work.duration_seconds,
+      manual_meta: manualMetaPayload,
     });
   } catch (err) {
     console.error('[video:work:get]', err);
@@ -270,7 +305,14 @@ router.post('/work/:workId/clip', async (req, res) => {
   let work;
   try {
     const { rows } = await pool.query(
-      `SELECT work_id, member_id, party_id, r2_key_original
+      `SELECT work_id,
+              member_id,
+              party_id,
+              r2_key_original,
+              manual_lat,
+              manual_lon,
+              manual_taken_at,
+              manual_meta_source
          FROM tt_video_work
         WHERE work_id = $1`,
       [workId]
@@ -361,10 +403,50 @@ router.post('/work/:workId/clip', async (req, res) => {
       : Math.min(30, Math.max(1, Math.round(duration)));
 
     await pool.query(
-      `INSERT INTO tt_video (stream_uid, owner_member_id, party_id, kind, duration_seconds)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [streamUid, memberId, work.party_id, 'clip', finalDuration]
+      `INSERT INTO tt_video (
+         stream_uid,
+         owner_member_id,
+         party_id,
+         kind,
+         duration_seconds,
+         lat,
+         lon,
+         recorded_at,
+         meta_source
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        streamUid,
+        memberId,
+        work.party_id,
+        'clip',
+        finalDuration,
+        work.manual_lat ?? null,
+        work.manual_lon ?? null,
+        work.manual_taken_at ?? null,
+        work.manual_meta_source ?? null,
+      ]
     );
+
+    if (
+      (work.manual_lat != null ||
+        work.manual_lon != null ||
+        work.manual_taken_at != null) &&
+      streamUid
+    ) {
+      await recordManualMeta(
+        pool,
+        'video',
+        streamUid,
+        {
+          lat: work.manual_lat,
+          lon: work.manual_lon,
+          takenAt: work.manual_taken_at,
+          source: work.manual_meta_source || 'user_input',
+        },
+        memberId
+      );
+    }
 
     await pool.query(
       `UPDATE tt_video_work

@@ -778,20 +778,20 @@ const exifJson = exifPayload ? JSON.stringify(exifPayload) : null;
         );
 
                 const upsertValues = [
-          ownerHandle,           // 
-          r2Key,                 // 
-          ownerMemberId,         // 
-          file.originalname,     // 
-          file.mimetype,         // 
-          exifJson,              // 
-          lat,                   // 
-          lon,                   // 
-          takenAt,               // 
-          cameraFingerprint,     // 
-          effectivePartyId,      // 
-          audience,              // 
-          locationSource         // 
-        ];
+                  ownerHandle,           // 
+                  r2Key,                 // 
+                  ownerMemberId,         // 
+                  file.originalname,     // 
+                  file.mimetype,         // 
+                  exifJson,              // 
+                  lat,                   // 
+                  lon,                   // 
+                  takenAt,               // 
+                  cameraFingerprint,     // 
+                  effectivePartyId,      // 
+                  audience,              // 
+                  locationSource         // 
+                ];
 
 const existing = await pool.query(
   `
@@ -806,21 +806,22 @@ const existing = await pool.query(
 
 let row;
 if (existing.rows.length) {
-  const updateQuery = `
+  const updateQuery = 
     UPDATE tt_photo AS t
-       SET member_id          = COALESCE(t.member_id, $3),
-           original_filename  = COALESCE(t.original_filename, $4),
-           mime_type          = $5,
-           exif               = COALESCE(t.exif, $6),
-           lat                = $7,
-           lon                = $8,
-           taken_at           = COALESCE(t.taken_at, $9),
-           camera_fingerprint = COALESCE(t.camera_fingerprint, $10),
-           party_id           = COALESCE($11, t.party_id),
-           audience           = COALESCE($12, t.audience)
-     WHERE t.photo_id = $13
-       AND t.handle = $1
-       AND t.r2_key = $2
+       SET member_id          = COALESCE(t.member_id, ),
+           original_filename  = COALESCE(t.original_filename, ),
+           mime_type          = ,
+           exif               = COALESCE(, t.exif),
+           lat                = ,
+           lon                = ,
+           taken_at           = COALESCE(t.taken_at, ),
+           camera_fingerprint = COALESCE(t.camera_fingerprint, ),
+           party_id           = COALESCE(, t.party_id),
+           audience           = COALESCE(, t.audience),
+           location_source    = COALESCE(, t.location_source)
+     WHERE t.photo_id = 
+       AND t.handle = 
+       AND t.r2_key = 
      RETURNING photo_id,
               handle,
               r2_key,
@@ -831,13 +832,13 @@ if (existing.rows.length) {
               camera_fingerprint,
               party_id,
               audience;
-  `;
+  ;
 
   const updateValues = [...upsertValues, existing.rows[0].photo_id];
   const { rows } = await pool.query(updateQuery, updateValues);
   row = rows[0];
 } else {
-  const insertQuery = `
+  const insertQuery = 
     INSERT INTO tt_photo (
       handle,
       r2_key,
@@ -850,9 +851,10 @@ if (existing.rows.length) {
       taken_at, 
       camera_fingerprint,
       party_id,
-      audience
+      audience,
+      location_source
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    VALUES (, , , , , , , , , , , , )
     RETURNING photo_id,
               handle,
               r2_key,
@@ -863,11 +865,24 @@ if (existing.rows.length) {
               camera_fingerprint,
               party_id,
               audience;
-  `;
+  ;
 
   const { rows } = await pool.query(insertQuery, upsertValues);
   row = rows[0];
 }
+  const { rows } = await pool.query(insertQuery, upsertValues);
+  row = rows[0];
+}
+
+        if (row && usedManualMeta) {
+          await recordManualMeta(
+            pool,
+            'photo',
+            String(row.photo_id),
+            manualMeta,
+            ownerMemberId || ownerHandle
+          );
+        }
 
         if (row) {
           results.push(row);
