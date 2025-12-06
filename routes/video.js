@@ -99,20 +99,39 @@ async function downloadR2Object(key, destPath) {
   });
 }
 
+function buildAudioTempoFilters(speed) {
+  if (!Number.isFinite(speed) || speed <= 0) return [];
+  const filters = [];
+  let remaining = speed;
+  while (remaining > 2.0) {
+    filters.push('atempo=2.0');
+    remaining /= 2.0;
+  }
+  while (remaining < 0.5) {
+    filters.push('atempo=0.5');
+    remaining /= 0.5;
+  }
+  const finalTempo = Math.max(0.5, Math.min(2, remaining));
+  filters.push(`atempo=${finalTempo.toFixed(3)}`);
+  return filters;
+}
+
 function safeUnlink(filePath) {
   fs.unlink(filePath, () => {});
 }
 
-function normalizeClipWindow(startSeconds, endSeconds) {
+function normalizeClipWindow(startSeconds, endSeconds, options = {}) {
   const start = Math.max(0, Number(startSeconds) || 0);
   let targetEnd =
     typeof endSeconds === 'number' && Number.isFinite(endSeconds)
       ? endSeconds
       : start + 30;
   if (!Number.isFinite(targetEnd)) targetEnd = start + 30;
-  let duration = Math.min(30, targetEnd - start);
-  if (!Number.isFinite(duration) || duration <= 0) duration = 5;
-  return { start, duration, targetEnd: start + duration };
+  let rawDuration = targetEnd - start;
+  if (!Number.isFinite(rawDuration) || rawDuration <= 0) rawDuration = 5;
+  const allowOverflow = options?.allowOverflow === true;
+  const duration = allowOverflow ? rawDuration : Math.min(30, rawDuration);
+  return { start, duration, rawDuration, targetEnd: start + rawDuration };
 }
 
 function requireMember(req, res) {
@@ -234,7 +253,22 @@ router.post('/work/:workId/clip', async (req, res) => {
   }
 
   const { startSeconds, endSeconds } = req.body || {};
-  const { start, duration } = normalizeClipWindow(startSeconds, endSeconds);
+  const fitToThirty =
+    req.body?.fitToThirty === true ||
+    req.body?.fitToThirty === 'true' ||
+    req.body?.fitToThirty === 1 ||
+    req.body?.fitToThirty === '1' ||
+    req.body?.fit_to_thirty === true ||
+    req.body?.fit_to_thirty === 'true' ||
+    req.body?.fit_to_thirty === 1 ||
+    req.body?.fit_to_thirty === '1';
+  const { start, duration, rawDuration } = normalizeClipWindow(
+    startSeconds,
+    endSeconds,
+    { allowOverflow: fitToThirty }
+  );
+  const needsSpeedUp = Boolean(fitToThirty && rawDuration > 30.01);
+  const ffmpegDuration = needsSpeedUp ? rawDuration : duration;
 
   let work;
   try {
@@ -279,16 +313,24 @@ router.post('/work/:workId/clip', async (req, res) => {
     await downloadR2Object(work.r2_key_original, sourcePath);
 
     await new Promise((resolve, reject) => {
-      ffmpeg(sourcePath)
+      const command = ffmpeg(sourcePath)
         .setStartTime(start)
-        .duration(duration)
-        .outputOptions([
-          '-movflags faststart',
-          '-preset veryfast',
-        ])
+        .duration(ffmpegDuration)
+        .outputOptions(['-movflags faststart', '-preset veryfast'])
         .videoCodec('libx264')
         .audioCodec('aac')
-        .size('?x720')
+        .size('?x720');
+
+      if (needsSpeedUp) {
+        const speed = rawDuration / 30;
+        command.videoFilters(`setpts=(PTS-STARTPTS)/${speed.toFixed(6)}`);
+        const audioFilters = buildAudioTempoFilters(speed);
+        if (audioFilters.length) {
+          command.audioFilters(audioFilters.join(','));
+        }
+      }
+
+      command
         .output(clipPath)
         .on('end', resolve)
         .on('error', reject)
@@ -320,7 +362,9 @@ router.post('/work/:workId/clip', async (req, res) => {
       throw new Error('stream_uid_missing');
     }
 
-    const finalDuration = Math.min(30, Math.max(1, Math.round(duration)));
+    const finalDuration = needsSpeedUp
+      ? 30
+      : Math.min(30, Math.max(1, Math.round(duration)));
 
     await pool.query(
       `INSERT INTO tt_video (stream_uid, owner_member_id, party_id, kind, duration_seconds)
