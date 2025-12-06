@@ -20,12 +20,167 @@ const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 
 const pool = require('../src/db/pool');
 const r2 = require('../src/r2');
+const { getCurrentIdentity } = require('../services/identity');
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const router = express.Router();
 const bucket = process.env.R2_BUCKET;
 const MAX_AUDIO_DURATION_SECONDS = 3 * 60 * 60; // 3 hours
+
+async function fetchPartySummary(partyId) {
+  if (!partyId) return null;
+  const { rows } = await pool.query(
+    `
+      SELECT party_id,
+             host_handle,
+             visibility_mode,
+             party_type,
+             state
+        FROM tt_party
+       WHERE party_id = $1
+       LIMIT 1
+    `,
+    [partyId]
+  );
+  return rows[0] || null;
+}
+
+function isPartyPublic(party) {
+  if (!party) return false;
+  const visibility = String(party.visibility_mode || '').toLowerCase();
+  const type = String(party.party_type || '').toLowerCase();
+  return visibility === 'public_party' || type === 'public';
+}
+
+async function fetchPartyMembership(partyId, handle) {
+  if (!partyId || !handle) return null;
+  const { rows } = await pool.query(
+    `
+      SELECT access_level
+        FROM tt_party_member
+       WHERE party_id = $1
+         AND handle = $2
+       LIMIT 1
+    `,
+    [partyId, handle]
+  );
+  return rows[0] || null;
+}
+
+async function ensurePartyAudioAccess(partyId, identity) {
+  const party = await fetchPartySummary(partyId);
+  if (!party) {
+    const err = new Error('party_not_found');
+    err.status = 404;
+    throw err;
+  }
+  if (String(party.state || '').toLowerCase() === 'cut') {
+    const err = new Error('party_cut');
+    err.status = 410;
+    throw err;
+  }
+  const hostHandle = (party.host_handle || '').trim().toLowerCase();
+  const viewerHandle = (identity?.handle || '').trim().toLowerCase();
+  const isHost = hostHandle && viewerHandle && hostHandle === viewerHandle;
+  if (isHost) {
+    return { party, membership: { access_level: 'host' } };
+  }
+  const partyIsPublic = isPartyPublic(party);
+  if (!identity) {
+    if (partyIsPublic) {
+      return { party, membership: null };
+    }
+    const err = new Error('not_logged_in');
+    err.status = 401;
+    throw err;
+  }
+  const membership = await fetchPartyMembership(partyId, identity.handle);
+  if (!membership) {
+    if (partyIsPublic) {
+      return { party, membership: null };
+    }
+    const err = new Error('not_invited');
+    err.status = 403;
+    throw err;
+  }
+  const accessLevel = String(membership.access_level || '').toLowerCase();
+  if (accessLevel === 'declined') {
+    const err = new Error('party_declined');
+    err.status = 403;
+    throw err;
+  }
+  if (accessLevel === 'card') {
+    const err = new Error('not_checked_in');
+    err.status = 403;
+    throw err;
+  }
+  return { party, membership };
+}
+
+async function loadTracksForClause(whereClause, params, limit) {
+  const limitParamIndex = params.length + 1;
+  const query = `
+    SELECT audio_id,
+           r2_key_final,
+           owner_member_id,
+           party_id,
+           duration_seconds,
+           format,
+           title,
+           description,
+           hero_kind,
+           hero_ref,
+           created_at,
+           updated_at
+      FROM tt_audio_track
+     WHERE r2_key_final IS NOT NULL
+       AND r2_key_final <> 'pending'
+       AND ${whereClause}
+     ORDER BY created_at DESC
+     LIMIT $${limitParamIndex}
+  `;
+  const values = params.concat(limit);
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+async function serializeTracks(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return [];
+  }
+  const hydrated = [];
+  for (const row of rows) {
+    if (!row?.r2_key_final) continue;
+    try {
+      const playbackUrl = await getSignedUrl(
+        r2,
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: row.r2_key_final,
+        }),
+        { expiresIn: 3600 }
+      );
+      hydrated.push({
+        audio_id: row.audio_id,
+        playbackUrl,
+        owner_member_id: row.owner_member_id,
+        party_id: row.party_id,
+        duration_seconds: row.duration_seconds,
+        format: row.format,
+        title: row.title,
+        description: row.description,
+        hero_kind: row.hero_kind || 'none',
+        hero_ref: row.hero_ref || null,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      });
+    } catch (err) {
+      console.error('[audio:list] failed to sign playback url', err);
+    }
+  }
+  return hydrated;
+}
 
 // --- Helper: get current member id (adjust if your auth is different) ---
 function getCurrentMemberId(req) {
@@ -345,6 +500,55 @@ router.get('/track/:audioId', async (req, res, next) => {
     });
   } catch (err) {
     console.error('[audio/get] error', err);
+    next(err);
+  }
+});
+
+router.get('/tracks', async (req, res, next) => {
+  try {
+    const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 8));
+    const partyId = (req.query.party_id || '').trim();
+    const audience = String(req.query.audience || '').toLowerCase();
+    const ownerScope = String(req.query.owner || '').toLowerCase();
+
+    if (partyId) {
+      const identity = await getCurrentIdentity(req, pool);
+      try {
+        await ensurePartyAudioAccess(partyId, identity);
+      } catch (err) {
+        if (err?.status) {
+          return res
+            .status(err.status)
+            .json({ ok: false, error: err.message || 'party_access_denied' });
+        }
+        throw err;
+      }
+      const rows = await loadTracksForClause('party_id = $1', [partyId], limit);
+      const tracks = await serializeTracks(rows);
+      return res.json({ ok: true, scope: 'party', party_id: partyId, tracks });
+    }
+
+    if (audience === 'trashtalk') {
+      const rows = await loadTracksForClause('party_id IS NULL', [], limit);
+      const tracks = await serializeTracks(rows);
+      return res.json({ ok: true, scope: 'trashtalk', tracks });
+    }
+
+    if (ownerScope === 'me') {
+      const identity = await getCurrentIdentity(req, pool);
+      const memberId =
+        identity?.memberId || identity?.member_id || getCurrentMemberId(req);
+      if (!memberId) {
+        return res.status(401).json({ ok: false, error: 'not_logged_in' });
+      }
+      const rows = await loadTracksForClause('owner_member_id = $1', [memberId], limit);
+      const tracks = await serializeTracks(rows);
+      return res.json({ ok: true, scope: 'owner', tracks });
+    }
+
+    return res.status(400).json({ ok: false, error: 'missing_scope' });
+  } catch (err) {
+    console.error('[audio:list] error', err);
     next(err);
   }
 });
