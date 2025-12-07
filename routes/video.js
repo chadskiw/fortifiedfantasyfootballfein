@@ -14,7 +14,11 @@ const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
 const { getCurrentIdentity } = require('../services/identity');
-const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
+const {
+  parseManualMeta,
+  recordManualMeta,
+  updateQuickhitterLocation,
+} = require('../utils/manualMeta');
 
 const fetch =
   global.fetch ||
@@ -186,6 +190,14 @@ router.post('/work', async (req, res) => {
       `UPDATE tt_video_work SET r2_key_original = $2 WHERE work_id = $1`,
       [workId, r2Key]
     );
+
+    if (manualMeta && manualMeta.lat != null && manualMeta.lon != null) {
+      await updateQuickhitterLocation(pool, memberId, {
+        lat: manualMeta.lat,
+        lon: manualMeta.lon,
+        source: manualMeta.source || 'video',
+      });
+    }
 
     const putCmd = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,

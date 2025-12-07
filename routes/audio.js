@@ -21,7 +21,11 @@ const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const pool = require('../src/db/pool');
 const r2 = require('../src/r2');
 const { getCurrentIdentity } = require('../services/identity');
-const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
+const {
+  parseManualMeta,
+  recordManualMeta,
+  updateQuickhitterLocation,
+} = require('../utils/manualMeta');
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -361,6 +365,14 @@ router.post('/track', async (req, res, next) => {
         manualMeta,
         memberId
       );
+
+      if (manualMeta.lat != null && manualMeta.lon != null) {
+        await updateQuickhitterLocation(pool, memberId, {
+          lat: manualMeta.lat,
+          lon: manualMeta.lon,
+          source: manualMeta.source || 'audio',
+        });
+      }
     }
 
     res.json({

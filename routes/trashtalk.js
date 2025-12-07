@@ -22,7 +22,11 @@ const {
   loadViewerRelationshipTiers,
   applyPrivacyZones,
 } = require('../utils/privacyZones');
-const { parseManualMeta, recordManualMeta } = require('../utils/manualMeta');
+const {
+  parseManualMeta,
+  recordManualMeta,
+  updateQuickhitterLocation,
+} = require('../utils/manualMeta');
 
 // ...
 const router = express.Router();
@@ -742,6 +746,13 @@ router.post(
           : Number.isFinite(lat) && Number.isFinite(lon)
             ? 'exif'
             : null;
+        if (ownerMemberId && lat != null && lon != null) {
+          await updateQuickhitterLocation(pool, ownerMemberId, {
+            lat,
+            lon,
+            source: locationSource || 'photo',
+          });
+        }
         const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
         const r2Key = `trashtalk/${ownerHandle}/${timestamp}_${safeName}`;
 
