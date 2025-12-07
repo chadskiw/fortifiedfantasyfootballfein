@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const router = express.Router();
 const pool = require('../src/db/pool'); // <- this matches your pool.js
+const https = require('https'); // at top of file if not already
 
 // Hard-coded channel slug for now
 const ALLOWED_KYO_SLUG = 'KeigoMoriyama';
@@ -100,6 +101,117 @@ router.get('/t', (req, res) => {
 //   POST /api/t/links
 //   DELETE /api/t/links/:id
 //
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve(parsed);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      })
+      .on('error', reject);
+  });
+}
+
+// GET /api/t/weather?kyo=KeigoMoriyama
+router.get('/weather', async (req, res) => {
+  try {
+    const channelSlug = normalizeSlug(req.query?.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+
+    // Option A: use party center_lat/center_lon if present
+    const { rows: partyRows } = await pool.query(
+      `
+      SELECT center_lat, center_lon
+      FROM tt_party
+      WHERE host_handle = $1
+      ORDER BY (state = 'open') DESC, starts_at DESC
+      LIMIT 1
+      `,
+      [hostInfo.handle]
+    );
+
+    let lat = null;
+    let lon = null;
+    if (partyRows[0]) {
+      lat = Number(partyRows[0].center_lat);
+      lon = Number(partyRows[0].center_lon);
+    }
+
+    // Option B fallback: hard-code Shibuya if no party row
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      lat = 35.6595; // Shibuya
+      lon = 139.7005;
+    }
+
+    const apiKey = process.env.OPENWEATHER_API_KEY;
+    if (!apiKey) {
+      return res
+        .status(500)
+        .json({ ok: false, error: 'weather_not_configured' });
+    }
+
+    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${encodeURIComponent(
+      lat
+    )}&lon=${encodeURIComponent(lon)}&appid=${encodeURIComponent(
+      apiKey
+    )}&units=metric`;
+
+    const weatherRaw = await fetchJson(url);
+
+    // Normalize result for front-end
+    const firstWeather = (weatherRaw.weather && weatherRaw.weather[0]) || {};
+    const main = firstWeather.main || '';
+    const description = firstWeather.description || '';
+    const icon = firstWeather.icon || '';
+    const tempC = weatherRaw.main ? weatherRaw.main.temp : null;
+
+    const condition = main.toLowerCase();
+
+    // Map to a simple “Mu mode”
+    let muMode = 'clear';
+    if (condition.includes('rain') || condition.includes('drizzle')) {
+      muMode = 'rain';
+    } else if (condition.includes('snow')) {
+      muMode = 'snow';
+    } else if (condition.includes('thunder')) {
+      muMode = 'storm';
+    } else if (condition.includes('cloud')) {
+      muMode = 'cloudy';
+    }
+
+    return res.json({
+      ok: true,
+      weather: {
+        main,
+        description,
+        icon,
+        temp_c: tempC,
+        mu_mode: muMode,
+      },
+    });
+  } catch (err) {
+    console.error('/api/t/weather error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 /**
  * POST /api/t/kyo/login
@@ -216,46 +328,46 @@ router.get('/channel', async (req, res) => {
       [host.member_id]
     );
     const partyRow = partyRows[0] || null;
-// 3) Load photos for this member
-const { rows: photoRows } = await pool.query(
-  `
-  SELECT
-    photo_id,
-    member_id,
-    r2_key,
-    lat,
-    lon,
-    taken_at,
-    created_at,
-    exif
-  FROM tt_photo
-  WHERE member_id = $1
-  ORDER BY taken_at DESC NULLS LAST, created_at DESC
-  LIMIT 200
-  `,
-  [host.member_id]
-);
 
-// 4) Load studio notes for this channel (if any)
-const { rows: studioRows } = await pool.query(
-  `
-  SELECT
-    note_id,
-    payload,
-    sort_order,
-    is_active,
-    created_at
-  FROM tt_tokyo_studio_note
-  WHERE channel_slug = $1
-    AND is_active = TRUE
-  ORDER BY sort_order ASC, created_at ASC
-  `,
-  [host.handle]
-);
+    // 3) Load photos for this member
+    const { rows: photoRows } = await pool.query(
+      `
+      SELECT
+        photo_id,
+        member_id,
+        r2_key,
+        lat,
+        lon,
+        taken_at,
+        created_at,
+        exif
+      FROM tt_photo
+      WHERE member_id = $1
+      ORDER BY taken_at DESC NULLS LAST, created_at DESC
+      LIMIT 200
+      `,
+      [host.member_id]
+    );
 
-const studioNotes = studioRows.map(mapStudioNoteRow);
+    // 4) Load studio notes for this channel (if any)
+    const { rows: studioRows } = await pool.query(
+      `
+      SELECT
+        note_id,
+        payload,
+        sort_order,
+        is_active,
+        created_at
+      FROM tt_tokyo_studio_note
+      WHERE channel_slug = $1
+        AND is_active = TRUE
+      ORDER BY sort_order ASC, created_at ASC
+      `,
+      [host.handle]
+    );
+    const studioNotes = studioRows.map(mapStudioNoteRow);
 
-    // 4) Load links for this member
+    // 5) Load links for this member
     const { rows: linkRows } = await pool.query(
       `
       SELECT
@@ -273,7 +385,7 @@ const studioNotes = studioRows.map(mapStudioNoteRow);
       [host.member_id]
     );
 
-    // 5) Shape the channel payload exactly how t.js expects it
+    // 6) Shape the channel payload exactly how t.js expects it
 const channel = {
   kyo,
   viewerId: viewerId || null,
@@ -709,14 +821,14 @@ router.post('/notes', express.json(), async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-// PUT /api/t/notes
-// Body: { kyo, note_id, ...noteFields }
+// PUT /api/t/notes/:noteId
+// Body: { kyo, ...noteFields }
 // Returns: { ok, note }
-router.put('/notes', express.json(), async (req, res) => {
+router.put('/notes/:noteId', express.json(), async (req, res) => {
   try {
     const body = req.body || {};
-    const channelSlug = normalizeSlug(body.kyo);
-    const noteId = body.note_id;
+    const channelSlug = normalizeSlug(body.kyo || req.query?.kyo);
+    const noteId = req.params.noteId || body.note_id;
 
     if (!channelSlug) {
       return res.status(400).json({ ok: false, error: 'missing_kyo' });
@@ -791,14 +903,14 @@ router.put('/notes', express.json(), async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-// DELETE /api/t/notes
-// Body: { kyo, note_id }
+// DELETE /api/t/notes/:noteId
+// Query/body: kyo
 // Returns: { ok, note }
-router.delete('/notes', express.json(), async (req, res) => {
+router.delete('/notes/:noteId', express.json(), async (req, res) => {
   try {
     const body = req.body || {};
-    const channelSlug = normalizeSlug(body.kyo);
-    const noteId = body.note_id;
+    const channelSlug = normalizeSlug(req.query?.kyo || body.kyo);
+    const noteId = req.params.noteId || body.note_id;
 
     if (!channelSlug) {
       return res.status(400).json({ ok: false, error: 'missing_kyo' });
