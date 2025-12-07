@@ -2,7 +2,7 @@
 const express = require('express');
 const path = require('path');
 const router = express.Router();
-const pool = require('../db/pool'); // <- this matches your pool.js
+const pool = require('../src/db/pool'); // <- this matches your pool.js
 
 // Hard-coded channel slug for now
 const ALLOWED_KYO_SLUG = 'KeigoMoriyama';
