@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const path = require('path');
-const pool = require('../db'); // ⬅️ adjust if your db helper lives elsewhere
+const pool = require('../src/db'); // ⬅️ adjust if your db helper lives elsewhere
 
 // Helper: extract member_id from request
 function getMemberIdFromReq(req) {
