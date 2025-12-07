@@ -1,7 +1,7 @@
 // routes/adminConsole.js
 const express = require('express');
 const router = express.Router();
-const pool = require('../src/db'); // adjust if your db helper is in a different path
+const pool = require('../src/db/pool'); // adjust if your db helper is in a different path
 
 // Try to get member_id from the request
 function getMemberIdFromReq(req) {
