@@ -569,6 +569,15 @@ function toE164(raw){
   return null;
 }
 
+function cleanImageKey(raw) {
+  if (!raw) return null;
+  const cleaned = String(raw)
+    .replace(/[?#].*$/, '')
+    .replace(/^.*[\\/]/, '')
+    .trim();
+  return cleaned || null;
+}
+
 // POST /api/quickhitter/upsert
 // helpers (place near top)
 const readyForId = (handle, colorHex, email, phone) =>
@@ -601,12 +610,13 @@ const { emailVerified: emailVHint, phoneVerified: phoneVHint } =
 const emailVFinal = emailV || emailVHint;
 const phoneVFinal = phoneV || phoneVHint;
 
-    const image_key = b.image_key || (b.image_url ? stripCdn(b.image_url) : null);
+    const imageKeyInput = b.image_key || (b.image_url ? stripCdn(b.image_url) : null);
+    const image_key = cleanImageKey(imageKeyInput);
     const fb_groups = Array.isArray(b.fb_groups) ? b.fb_groups.map(String) : null;
 
     // choose/ensure member_id
     let member_id = b.member_id ? ensureMemberId(b.member_id) : null;
-    if (!member_id && readyForId(handle, hex, email, phone) && (emailV || phoneV)) {
+    if (!member_id && readyForId(handle, hex, email, phone) && (emailVFinal || phoneVFinal)) {
       member_id = ensureMemberId();
     }
 
@@ -620,58 +630,95 @@ const phoneVFinal = phoneV || phoneVHint;
 
     let row;
     if (member_id) {
-      const q = await pool.query(`
-  INSERT INTO ff_quickhitter (member_id, handle, image_key, color_hex, created_at, updated_at, ...)
-  VALUES ($1, $2,
-          NULLIF(regexp_replace(regexp_replace($3, '[?#].*$', ''), '^.*[\\/]', ''), ''),
-          $4, now(), now())
+      const q = await pool.query(
+        `
+        INSERT INTO ff_quickhitter (
+          member_id,
+          handle,
+          image_key,
+          color_hex,
+          email,
+          phone,
+          email_is_verified,
+          phone_is_verified,
+          fb_groups,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW()
+        )
         ON CONFLICT (member_id) DO UPDATE SET
           handle = COALESCE(EXCLUDED.handle, ff_quickhitter.handle),
           color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
           image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
           email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
           phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-email_is_verified =
-  COALESCE(ff_quickhitter.email_is_verified, false)
-  OR COALESCE(EXCLUDED.email_is_verified, false),
-
-phone_is_verified =
-  COALESCE(ff_quickhitter.phone_is_verified, false)
-  OR COALESCE(EXCLUDED.phone_is_verified, false),
-
+          email_is_verified =
+            COALESCE(ff_quickhitter.email_is_verified, false)
+            OR COALESCE(EXCLUDED.email_is_verified, false),
+          phone_is_verified =
+            COALESCE(ff_quickhitter.phone_is_verified, false)
+            OR COALESCE(EXCLUDED.phone_is_verified, false),
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
-      `,
-[member_id, handle, color_hex_db, image_key, email, phone, emailVFinal, phoneVFinal, fb_groups]
-);
+        `,
+        [
+          member_id,
+          handle,
+          image_key,
+          color_hex_db,
+          email,
+          phone,
+          emailVFinal,
+          phoneVFinal,
+          fb_groups,
+        ]
+      );
       row = q.rows[0];
     } else {
-      // stage without member_id (key off handle); member_id will be minted on a later write
-      const q = await pool.query(`
-        INSERT INTO ff_quickhitter
-          (handle, color_hex, image_key, email, phone,
-           email_is_verified, phone_is_verified, fb_groups, updated_at, created_at)
+      const q = await pool.query(
+        `
+        INSERT INTO ff_quickhitter (
+          handle,
+          color_hex,
+          image_key,
+          email,
+          phone,
+          email_is_verified,
+          phone_is_verified,
+          fb_groups,
+          created_at,
+          updated_at
+        )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
         ON CONFLICT (handle) DO UPDATE SET
           color_hex = COALESCE(EXCLUDED.color_hex, ff_quickhitter.color_hex),
           image_key = COALESCE(EXCLUDED.image_key, ff_quickhitter.image_key),
           email = COALESCE(EXCLUDED.email, ff_quickhitter.email),
           phone = COALESCE(EXCLUDED.phone, ff_quickhitter.phone),
-email_is_verified =
-  COALESCE(ff_quickhitter.email_is_verified, false)
-  OR COALESCE(EXCLUDED.email_is_verified, false),
-
-phone_is_verified =
-  COALESCE(ff_quickhitter.phone_is_verified, false)
-  OR COALESCE(EXCLUDED.phone_is_verified, false),
-
+          email_is_verified =
+            COALESCE(ff_quickhitter.email_is_verified, false)
+            OR COALESCE(EXCLUDED.email_is_verified, false),
+          phone_is_verified =
+            COALESCE(ff_quickhitter.phone_is_verified, false)
+            OR COALESCE(EXCLUDED.phone_is_verified, false),
           fb_groups = COALESCE(EXCLUDED.fb_groups, ff_quickhitter.fb_groups),
           updated_at = NOW()
         RETURNING *;
-      `, 
-[handle, color_hex_db, image_key, email, phone, emailVFinal, phoneVFinal, fb_groups]
-);
+        `,
+        [
+          handle,
+          color_hex_db,
+          image_key,
+          email,
+          phone,
+          emailVFinal,
+          phoneVFinal,
+          fb_groups,
+        ]
+      );
       row = q.rows[0];
     }
 
