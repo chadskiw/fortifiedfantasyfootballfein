@@ -84,6 +84,10 @@ router.get('/t', (req, res) => {
 //
 //   POST /api/t/kyo/login
 //   GET  /api/t/channel
+//   GET  /api/t/guestbook
+//   POST /api/t/guestbook
+//   POST /api/t/links
+//   DELETE /api/t/links/:id
 //
 
 /**
@@ -146,7 +150,6 @@ router.post('/kyo/login', express.json(), async (req, res) => {
 /**
  * GET /api/t/channel?kyo=KeigoMoriyama&viewerId=PUBGHOST
  */
-// GET /api/t/channel?kyo=KeigoMoriyama&viewerId=PUBGHOST
 router.get('/channel', async (req, res) => {
   try {
     const { kyo, viewerId } = req.query;
@@ -197,7 +200,6 @@ router.get('/channel', async (req, res) => {
       `,
       [host.member_id]
     );
-
     const partyRow = partyRows[0] || null;
 
     // 3) Load photos for this member
@@ -220,7 +222,25 @@ router.get('/channel', async (req, res) => {
       [host.member_id]
     );
 
-    // 4) Shape the channel payload exactly how t.js expects it
+    // 4) Load links for this member
+    const { rows: linkRows } = await pool.query(
+      `
+      SELECT
+        link_id,
+        platform,
+        url,
+        sort_order,
+        is_active,
+        created_at
+      FROM tt_member_link
+      WHERE member_id = $1
+        AND is_active = TRUE
+      ORDER BY sort_order ASC, created_at ASC
+      `,
+      [host.member_id]
+    );
+
+    // 5) Shape the channel payload exactly how t.js expects it
     const channel = {
       kyo,
       viewerId: viewerId || null,
@@ -228,7 +248,6 @@ router.get('/channel', async (req, res) => {
       handle: host.handle,
       color_hex: host.color_hex,
       photo_count: photoRows.length,
-      // NEW: active party info in the shapes t.js already looks at
       active_party_id: partyRow ? partyRow.party_id : null,
       party: partyRow
         ? {
@@ -243,7 +262,8 @@ router.get('/channel', async (req, res) => {
             visibility_mode: partyRow.visibility_mode,
             party_type: partyRow.party_type
           }
-        : null
+        : null,
+      links: linkRows
     };
 
     return res.json({
@@ -416,5 +436,152 @@ router.post('/guestbook', express.json(), async (req, res) => {
   }
 });
 
+/**
+ * POST /api/t/links
+ * Body: { kyo, platform, url }
+ * Only the host (Keigo) can add links.
+ *
+ * Frontend expects: { ok, link }
+ */
+router.post('/links', express.json(), async (req, res) => {
+  try {
+    const { kyo, platform, url } = req.body || {};
+
+    if (!kyo || !platform || !url) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'missing_fields', missing: { kyo: !kyo, platform: !platform, url: !url } });
+    }
+
+    const channelSlug = normalizeSlug(kyo);
+
+    // Find host by slug (case-insensitive)
+    const { rows: hostRows } = await pool.query(
+      `SELECT member_id, handle
+         FROM ff_quickhitter
+        WHERE lower(handle) = lower($1)
+        LIMIT 1`,
+      [channelSlug]
+    );
+    if (!hostRows.length) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const host = hostRows[0];
+
+    // Only host can add links
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== host.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const trimmedUrl = String(url).trim();
+    if (!/^https?:\/\//i.test(trimmedUrl)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'invalid_url',
+        message: 'URL must start with http:// or https://'
+      });
+    }
+
+    const trimmedPlatform = trimText(platform, 100);
+
+    const insertSql = `
+      INSERT INTO tt_member_link (
+        member_id,
+        platform,
+        url,
+        sort_order,
+        is_active
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        COALESCE(
+          (SELECT MAX(sort_order) + 1 FROM tt_member_link WHERE member_id = $1),
+          0
+        ),
+        TRUE
+      )
+      RETURNING link_id, platform, url, sort_order, is_active, created_at;
+    `;
+
+    const { rows: linkRows } = await pool.query(insertSql, [
+      host.member_id,
+      trimmedPlatform,
+      trimmedUrl
+    ]);
+
+    return res.json({
+      ok: true,
+      link: linkRows[0]
+    });
+  } catch (err) {
+    console.error('/api/t/links POST error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+/**
+ * DELETE /api/t/links/:id?kyo=...
+ * Soft-deletes a link (is_active = false) for this member.
+ *
+ * Frontend expects: { ok, link }
+ */
+router.delete('/links/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { kyo } = req.query;
+
+    if (!id || !kyo) {
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
+    const channelSlug = normalizeSlug(kyo);
+
+    // Find host by slug
+    const { rows: hostRows } = await pool.query(
+      `SELECT member_id, handle
+         FROM ff_quickhitter
+        WHERE lower(handle) = lower($1)
+        LIMIT 1`,
+      [channelSlug]
+    );
+    if (!hostRows.length) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const host = hostRows[0];
+
+    // Only host can delete links
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== host.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const { rows: deletedRows } = await pool.query(
+      `
+      UPDATE tt_member_link
+         SET is_active = FALSE,
+             updated_at = NOW()
+       WHERE link_id = $1
+         AND member_id = $2
+       RETURNING link_id, platform, url, sort_order, is_active, created_at;
+      `,
+      [id, host.member_id]
+    );
+
+    if (!deletedRows.length) {
+      return res.status(404).json({ ok: false, error: 'link_not_found' });
+    }
+
+    return res.json({
+      ok: true,
+      link: deletedRows[0]
+    });
+  } catch (err) {
+    console.error('/api/t/links DELETE error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 module.exports = router;
