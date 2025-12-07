@@ -2,27 +2,31 @@
 const express = require('express');
 const path = require('path');
 const router = express.Router();
-const pool = require('../db/pool'); // this is your pgPool
+const pool = require('../db/pool'); // <- this matches your pool.js
 
-// Hard-coded channel slug for now; adjust if you want to support more later
-const ALLOWED_KYO_SLUG = 'KeigoMoriyama'; // from ?kyo=KeigoMoriyama
+// Hard-coded channel slug for now
+const ALLOWED_KYO_SLUG = 'KeigoMoriyama';
 
-// Serve the channel page HTML
-// GET /t?kyo=KeigoMoriyama
+// --- PAGE ROUTE ---------------------------------------------------------
+// We want /t?kyo=KeigoMoriyama to serve t.html
+// NOTE: this route will be mounted at '/' in server.js
 router.get('/t', (req, res) => {
   const filePath = path.join(__dirname, '../public/trashtalk/t.html');
   return res.sendFile(filePath);
 });
 
+// --- API ROUTES ---------------------------------------------------------
+// THESE ARE RELATIVE to /api/t mount, so final paths are:
+//
+//   POST /api/t/kyo/login
+//   GET  /api/t/channel
+//
+
 /**
  * POST /api/t/kyo/login
  * Body: { kyo: "KeigoMoriyama" }
- *
- * If kyo matches ALLOWED_KYO_SLUG, we look up ff_quickhitter by handle
- * and set ff_member_id cookie to that member_id.
- * This is a TEMPORARY magic-login helper, not production security.
  */
-router.post('/api/t/kyo/login', express.json(), async (req, res) => {
+router.post('/kyo/login', express.json(), async (req, res) => {
   try {
     const { kyo } = req.body || {};
 
@@ -31,16 +35,15 @@ router.post('/api/t/kyo/login', express.json(), async (req, res) => {
     }
 
     if (kyo !== ALLOWED_KYO_SLUG) {
-      // For now, only allow magic login for this one slug
+      // Only allow this one slug for now
       return res.status(403).json({ ok: false, error: 'unauthorized_channel' });
     }
 
-    // Find the member by handle (you can flip to member_id if you prefer)
     const { rows } = await pool.query(
       `SELECT member_id, handle, color_hex
-       FROM ff_quickhitter
-       WHERE handle = $1
-       LIMIT 1`,
+         FROM ff_quickhitter
+        WHERE handle = $1
+        LIMIT 1`,
       [kyo]
     );
 
@@ -54,8 +57,7 @@ router.post('/api/t/kyo/login', express.json(), async (req, res) => {
 
     const { member_id, handle, color_hex } = rows[0];
 
-    // TEMPORARY: magic login via cookie
-    // This is convenient for onboarding but not secure for production.
+    // TEMP: magic login helper
     res.cookie('ff_member_id', member_id, {
       httpOnly: true,
       sameSite: 'lax',
@@ -79,11 +81,8 @@ router.post('/api/t/kyo/login', express.json(), async (req, res) => {
 
 /**
  * GET /api/t/channel?kyo=KeigoMoriyama&viewerId=PUBGHOST
- *
- * Returns channel metadata + photos for the host.
- * ViewerId is just passed through for now (you can use later for analytics / gating).
  */
-router.get('/api/t/channel', async (req, res) => {
+router.get('/channel', async (req, res) => {
   try {
     const { kyo, viewerId } = req.query;
 
@@ -93,9 +92,9 @@ router.get('/api/t/channel', async (req, res) => {
 
     const { rows: hostRows } = await pool.query(
       `SELECT member_id, handle, color_hex
-       FROM ff_quickhitter
-       WHERE handle = $1
-       LIMIT 1`,
+         FROM ff_quickhitter
+        WHERE handle = $1
+        LIMIT 1`,
       [kyo]
     );
 
@@ -109,7 +108,6 @@ router.get('/api/t/channel', async (req, res) => {
 
     const host = hostRows[0];
 
-    // Pull photos for that member_id – tweak ORDER / LIMIT as you like
     const { rows: photoRows } = await pool.query(
       `
       SELECT
