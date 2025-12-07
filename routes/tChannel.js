@@ -6,6 +6,58 @@ const pool = require('../src/db/pool'); // <- this matches your pool.js
 
 // Hard-coded channel slug for now
 const ALLOWED_KYO_SLUG = 'KeigoMoriyama';
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeSlug(value) {
+  return (value || '').toString().trim();
+}
+
+function trimText(value, max = 1024) {
+  if (!value) return '';
+  return value.toString().trim().slice(0, max);
+}
+
+function coerceNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function getViewerMemberId(req) {
+  return (
+    req.ff_member_id ||
+    req.cookies?.ff_member_id ||
+    req.cookies?.ff_member ||
+    req.user?.member_id ||
+    null
+  );
+}
+
+function mapGuestbookRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const normalized = { ...row };
+  if (normalized.lat != null) normalized.lat = Number(normalized.lat);
+  if (normalized.lon != null) normalized.lon = Number(normalized.lon);
+  if (normalized.location_accuracy_m != null) {
+    normalized.location_accuracy_m = Number(normalized.location_accuracy_m);
+  }
+  return normalized;
+}
+
+function generateGuestId() {
+  return `GUEST-${Date.now().toString(36).toUpperCase()}${Math.random()
+    .toString(36)
+    .slice(2, 6)
+    .toUpperCase()}`;
+}
+
+async function ensureChannelExists(slug) {
+  const { rows } = await pool.query(
+    `SELECT handle FROM ff_quickhitter WHERE handle = $1 LIMIT 1`,
+    [slug]
+  );
+  return rows[0] || null;
+}
 
 // --- PAGE ROUTE ---------------------------------------------------------
 // We want /t?kyo=KeigoMoriyama to serve t.html
@@ -189,6 +241,163 @@ router.get('/channel', async (req, res) => {
     });
   } catch (err) {
     console.error('/api/t/channel error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+/**
+ * GET /api/t/guestbook?kyo=KeigoMoriyama
+ */
+router.get('/guestbook', async (req, res) => {
+  try {
+    const channelSlug = normalizeSlug(req.query?.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    const host = await ensureChannelExists(channelSlug);
+    if (!host) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const limitParam = Number(req.query?.limit);
+    const limit = Number.isFinite(limitParam)
+      ? Math.min(Math.max(limitParam, 1), 100)
+      : 30;
+    const { rows } = await pool.query(
+      `
+      SELECT
+        entry_id,
+        channel_slug,
+        guest_id,
+        guest_label,
+        viewer_member_id,
+        party_id,
+        message,
+        email,
+        phone,
+        lat,
+        lon,
+        location_source,
+        location_accuracy_m,
+        created_at
+      FROM tt_tokyo_guestbook
+      WHERE channel_slug = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+      `,
+      [channelSlug, limit]
+    );
+    return res.json({
+      ok: true,
+      entries: rows.map(mapGuestbookRow),
+    });
+  } catch (err) {
+    console.error('/api/t/guestbook list error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+/**
+ * POST /api/t/guestbook
+ */
+router.post('/guestbook', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(body.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    const host = await ensureChannelExists(channelSlug);
+    if (!host) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const message = trimText(body.message, 2000);
+    if (!message) {
+      return res.status(400).json({ ok: false, error: 'missing_message' });
+    }
+    if (message.length < 2) {
+      return res.status(400).json({ ok: false, error: 'message_too_short' });
+    }
+    const viewerMemberId =
+      trimText(body.viewer_member_id || getViewerMemberId(req), 64) || null;
+    let guestId =
+      trimText(body.guest_id, 64) ||
+      viewerMemberId ||
+      trimText(req.cookies?.viewer_id, 64);
+    if (!guestId) {
+      guestId = generateGuestId();
+    }
+    const guestLabel =
+      trimText(body.guest_label, 80) || viewerMemberId || guestId;
+    const partyId =
+      typeof body.party_id === 'string' && UUID_REGEX.test(body.party_id)
+        ? body.party_id
+        : null;
+    const lat = coerceNumber(body.lat);
+    const lon = coerceNumber(body.lon);
+    const locationSource = trimText(body.location_source, 64) || null;
+    const locationAccuracy =
+      coerceNumber(body.location_accuracy ?? body.location_accuracy_m) || null;
+    const email = trimText(body.contact_email, 160) || null;
+    const phone = trimText(body.contact_phone, 40) || null;
+
+    const { rows } = await pool.query(
+      `
+      INSERT INTO tt_tokyo_guestbook (
+        channel_slug,
+        guest_id,
+        guest_label,
+        viewer_member_id,
+        party_id,
+        message,
+        email,
+        phone,
+        lat,
+        lon,
+        location_source,
+        location_accuracy_m
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      RETURNING
+        entry_id,
+        channel_slug,
+        guest_id,
+        guest_label,
+        viewer_member_id,
+        party_id,
+        message,
+        email,
+        phone,
+        lat,
+        lon,
+        location_source,
+        location_accuracy_m,
+        created_at
+      `,
+      [
+        channelSlug,
+        guestId,
+        guestLabel,
+        viewerMemberId,
+        partyId,
+        message,
+        email,
+        phone,
+        lat,
+        lon,
+        locationSource,
+        locationAccuracy,
+      ]
+    );
+    return res.status(201).json({
+      ok: true,
+      entry: mapGuestbookRow(rows[0]),
+    });
+  } catch (err) {
+    console.error('/api/t/guestbook create error:', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
