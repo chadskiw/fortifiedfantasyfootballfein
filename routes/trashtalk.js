@@ -16,7 +16,7 @@ const {
   DEFAULT_RELATIONSHIP_TIERS,
 } = require('../services/photoVisibility');
 
-const { pool } = require('../src/db');
+const { pool } = require('../src/db/pool');
 const {
   loadZonesForMembers,
   loadViewerRelationshipTiers,
