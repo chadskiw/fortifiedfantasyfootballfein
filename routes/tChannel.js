@@ -190,7 +190,11 @@ router.get('/channel', async (req, res) => {
         ends_at,
         state,
         visibility_mode,
-        party_type
+        party_type,
+        vibe_hue,
+        vibe_saturation,
+        vibe_brightness,
+        updated_at
       FROM tt_party
       WHERE host_member_id = $1
       ORDER BY
@@ -241,11 +245,11 @@ router.get('/channel', async (req, res) => {
     );
 
     // 5) Shape the channel payload exactly how t.js expects it
-    const channel = {
-      kyo,
-      viewerId: viewerId || null,
-      host_member_id: host.member_id,
-      handle: host.handle,
+  const channel = {
+    kyo,
+    viewerId: viewerId || null,
+    host_member_id: host.member_id,
+    handle: host.handle,
       color_hex: host.color_hex,
       photo_count: photoRows.length,
       active_party_id: partyRow ? partyRow.party_id : null,
@@ -260,17 +264,28 @@ router.get('/channel', async (req, res) => {
             ends_at: partyRow.ends_at,
             state: partyRow.state,
             visibility_mode: partyRow.visibility_mode,
-            party_type: partyRow.party_type
+            party_type: partyRow.party_type,
+            vibe_hue: partyRow.vibe_hue,
+            vibe_saturation: partyRow.vibe_saturation,
+            vibe_brightness: partyRow.vibe_brightness,
+            updated_at: partyRow.updated_at
           }
         : null,
-      links: linkRows
-    };
+    links: linkRows
+  };
 
-    return res.json({
-      ok: true,
-      channel,
-      photos: photoRows
-    });
+  return res.json({
+    ok: true,
+    channel,
+    vibe: partyRow
+      ? {
+          hue: partyRow.vibe_hue,
+          saturation: partyRow.vibe_saturation,
+          brightness: partyRow.vibe_brightness
+        }
+      : null,
+    photos: photoRows
+  });
   } catch (err) {
     console.error('/api/t/channel error:', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
