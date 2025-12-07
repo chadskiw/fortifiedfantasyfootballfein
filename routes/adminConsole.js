@@ -1,22 +1,21 @@
 // routes/adminConsole.js
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const pool = require('../src/db'); // ⬅️ adjust if your db helper lives elsewhere
+const pool = require('../src/db'); // adjust if your db helper is in a different path
 
-// Helper: extract member_id from request
+// Try to get member_id from the request
 function getMemberIdFromReq(req) {
-  // If you already attach member info in middleware, prefer that
+  // If you already attach member info somewhere, use that first
   if (req.member && req.member.member_id) return req.member.member_id;
   if (req.user && req.user.member_id) return req.user.member_id;
 
-  // Fallback: cookie (this matches your ff_member_id cookie usage)
+  // Fallback: your ff_member_id cookie
   if (req.cookies && req.cookies.ff_member_id) return req.cookies.ff_member_id;
 
   return null;
 }
 
-// Middleware: ensure this is BADASS01
+// Only allow BADASS01 to hit these routes
 function ensureAdmin(req, res, next) {
   const memberId = getMemberIdFromReq(req);
 
@@ -28,16 +27,15 @@ function ensureAdmin(req, res, next) {
     });
   }
 
-  req.adminMemberId = memberId;
   next();
 }
 
 /**
  * GET /api/admin/members/map
  *
- * Returns all members with a last known location, plus online/offline status
+ * Returns all members with last known location and online/offline status.
  */
-router.get('/admin/members/map', ensureAdmin, async (req, res) => {
+router.get('/members/map', ensureAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `
@@ -69,17 +67,6 @@ router.get('/admin/members/map', ensureAdmin, async (req, res) => {
       error: 'server_error'
     });
   }
-});
-
-/**
- * (Optional) Serve the admin console HTML from BE with check.
- * If you'd rather let Cloudflare serve the HTML, you can skip this
- * and only use the JSON endpoint above.
- */
-router.get('/admin/console', ensureAdmin, (req, res) => {
-  // Adjust path if you put the file elsewhere
-  const filePath = path.join(__dirname, '../public/trashtalk/admin-console.html');
-  res.sendFile(filePath);
 });
 
 module.exports = router;
