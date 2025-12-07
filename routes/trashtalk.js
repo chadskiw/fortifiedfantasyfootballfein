@@ -908,6 +908,63 @@ const exifJson = exifPayload ? JSON.stringify(exifPayload) : null;
   }
 );
 
+router.post('/location/ping', jsonParser, async (req, res) => {
+  try {
+    const identity = await getCurrentIdentity(req, pool).catch(() => null);
+    const memberId =
+      identity?.member_id ||
+      identity?.memberId ||
+      req.body?.member_id ||
+      req.body?.memberId ||
+      req.cookies?.ff_member_id ||
+      null;
+
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+
+    const lat = Number(req.body?.lat ?? req.body?.latitude);
+    const lon = Number(req.body?.lon ?? req.body?.longitude);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ ok: false, error: 'invalid_coordinates' });
+    }
+
+    const accuracy = Number(
+      req.body?.accuracy ??
+        req.body?.accuracy_m ??
+        req.body?.accuracyMeters ??
+        req.body?.accuracy_meters
+    );
+
+    await updateQuickhitterLocation(
+      pool,
+      memberId,
+      {
+        lat,
+        lon,
+        accuracy: Number.isFinite(accuracy) ? accuracy : null,
+        source: req.body?.source || req.body?.location_source || 'device',
+      },
+      {
+        location_state: req.body?.location_state || null,
+      }
+    );
+
+    await pool.query(
+      `UPDATE ff_quickhitter SET last_seen_at = NOW() WHERE member_id = $1`,
+      [memberId]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[trashtalk:location:pulse]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'location_update_failed' });
+  }
+});
+
 /**
  * GET /api/trashtalk/nearby?lat=..&lon=..&radiusMeters=..
  *
