@@ -255,26 +255,6 @@ const { rows: studioRows } = await pool.query(
 
 const studioNotes = studioRows.map(mapStudioNoteRow);
 
-    // 3) Load photos for this member
-    const { rows: photoRows } = await pool.query(
-      `
-      SELECT
-        photo_id,
-        member_id,
-        r2_key,
-        lat,
-        lon,
-        taken_at,
-        created_at,
-        exif
-      FROM tt_photo
-      WHERE member_id = $1
-      ORDER BY taken_at DESC NULLS LAST, created_at DESC
-      LIMIT 200
-      `,
-      [host.member_id]
-    );
-
     // 4) Load links for this member
     const { rows: linkRows } = await pool.query(
       `
