@@ -82,6 +82,7 @@ router.post('/kyo/login', express.json(), async (req, res) => {
 /**
  * GET /api/t/channel?kyo=KeigoMoriyama&viewerId=PUBGHOST
  */
+// GET /api/t/channel?kyo=KeigoMoriyama&viewerId=PUBGHOST
 router.get('/channel', async (req, res) => {
   try {
     const { kyo, viewerId } = req.query;
@@ -90,6 +91,7 @@ router.get('/channel', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'missing_kyo' });
     }
 
+    // 1) Look up host in ff_quickhitter
     const { rows: hostRows } = await pool.query(
       `SELECT member_id, handle, color_hex
          FROM ff_quickhitter
@@ -108,6 +110,33 @@ router.get('/channel', async (req, res) => {
 
     const host = hostRows[0];
 
+    // 2) Find an associated party for this host (latest OPEN party)
+    const { rows: partyRows } = await pool.query(
+      `
+      SELECT
+        party_id,
+        name,
+        description,
+        center_lat,
+        center_lon,
+        starts_at,
+        ends_at,
+        state,
+        visibility_mode,
+        party_type
+      FROM tt_party
+      WHERE host_member_id = $1
+      ORDER BY
+        (state = 'open') DESC,
+        starts_at DESC
+      LIMIT 1
+      `,
+      [host.member_id]
+    );
+
+    const partyRow = partyRows[0] || null;
+
+    // 3) Load photos for this member
     const { rows: photoRows } = await pool.query(
       `
       SELECT
@@ -127,16 +156,35 @@ router.get('/channel', async (req, res) => {
       [host.member_id]
     );
 
+    // 4) Shape the channel payload exactly how t.js expects it
+    const channel = {
+      kyo,
+      viewerId: viewerId || null,
+      host_member_id: host.member_id,
+      handle: host.handle,
+      color_hex: host.color_hex,
+      photo_count: photoRows.length,
+      // NEW: active party info in the shapes t.js already looks at
+      active_party_id: partyRow ? partyRow.party_id : null,
+      party: partyRow
+        ? {
+            party_id: partyRow.party_id,
+            name: partyRow.name,
+            description: partyRow.description,
+            center_lat: partyRow.center_lat,
+            center_lon: partyRow.center_lon,
+            starts_at: partyRow.starts_at,
+            ends_at: partyRow.ends_at,
+            state: partyRow.state,
+            visibility_mode: partyRow.visibility_mode,
+            party_type: partyRow.party_type
+          }
+        : null
+    };
+
     return res.json({
       ok: true,
-      channel: {
-        kyo,
-        viewerId: viewerId || null,
-        host_member_id: host.member_id,
-        handle: host.handle,
-        color_hex: host.color_hex,
-        photo_count: photoRows.length
-      },
+      channel,
       photos: photoRows
     });
   } catch (err) {
@@ -144,5 +192,6 @@ router.get('/channel', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
 
 module.exports = router;
