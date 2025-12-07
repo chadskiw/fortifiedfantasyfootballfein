@@ -32,6 +32,17 @@ function getViewerMemberId(req) {
     null
   );
 }
+function mapStudioNoteRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const payload = row.payload || {};
+  return {
+    note_id: row.note_id,
+    sort_order: row.sort_order,
+    is_active: row.is_active,
+    created_at: row.created_at,
+    ...payload,          // merges label, value, note_type, lat, lon, etc.
+  };
+}
 
 function mapGuestbookRow(row) {
   if (!row || typeof row !== 'object') return row;
@@ -205,6 +216,44 @@ router.get('/channel', async (req, res) => {
       [host.member_id]
     );
     const partyRow = partyRows[0] || null;
+// 3) Load photos for this member
+const { rows: photoRows } = await pool.query(
+  `
+  SELECT
+    photo_id,
+    member_id,
+    r2_key,
+    lat,
+    lon,
+    taken_at,
+    created_at,
+    exif
+  FROM tt_photo
+  WHERE member_id = $1
+  ORDER BY taken_at DESC NULLS LAST, created_at DESC
+  LIMIT 200
+  `,
+  [host.member_id]
+);
+
+// 4) Load studio notes for this channel (if any)
+const { rows: studioRows } = await pool.query(
+  `
+  SELECT
+    note_id,
+    payload,
+    sort_order,
+    is_active,
+    created_at
+  FROM tt_tokyo_studio_note
+  WHERE channel_slug = $1
+    AND is_active = TRUE
+  ORDER BY sort_order ASC, created_at ASC
+  `,
+  [host.handle]
+);
+
+const studioNotes = studioRows.map(mapStudioNoteRow);
 
     // 3) Load photos for this member
     const { rows: photoRows } = await pool.query(
@@ -245,32 +294,29 @@ router.get('/channel', async (req, res) => {
     );
 
     // 5) Shape the channel payload exactly how t.js expects it
-  const channel = {
-    kyo,
-    viewerId: viewerId || null,
-    host_member_id: host.member_id,
-    handle: host.handle,
-      color_hex: host.color_hex,
-      photo_count: photoRows.length,
-      active_party_id: partyRow ? partyRow.party_id : null,
-      party: partyRow
-        ? {
-            party_id: partyRow.party_id,
-            name: partyRow.name,
-            description: partyRow.description,
-            center_lat: partyRow.center_lat,
-            center_lon: partyRow.center_lon,
-            starts_at: partyRow.starts_at,
-            ends_at: partyRow.ends_at,
-            state: partyRow.state,
-            visibility_mode: partyRow.visibility_mode,
-            party_type: partyRow.party_type,
-            vibe_hue: partyRow.vibe_hue,
-            vibe_saturation: partyRow.vibe_saturation,
-            vibe_brightness: partyRow.vibe_brightness,
-            updated_at: partyRow.updated_at
-          }
-        : null,
+const channel = {
+  kyo,
+  viewerId: viewerId || null,
+  host_member_id: host.member_id,
+  handle: host.handle,
+  color_hex: host.color_hex,
+  photo_count: photoRows.length,
+  active_party_id: partyRow ? partyRow.party_id : null,
+  party: partyRow
+    ? {
+        party_id: partyRow.party_id,
+        name: partyRow.name,
+        description: partyRow.description,
+        center_lat: partyRow.center_lat,
+        center_lon: partyRow.center_lon,
+        starts_at: partyRow.starts_at,
+        ends_at: partyRow.ends_at,
+        state: partyRow.state,
+        visibility_mode: partyRow.visibility_mode,
+        party_type: partyRow.party_type
+      }
+    : null,
+  studio_notes: studioNotes,    // 🔴 NEW
     links: linkRows
   };
 
@@ -595,6 +641,238 @@ router.delete('/links/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('/api/t/links DELETE error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+// POST /api/t/notes
+// Body: { kyo, ...noteFields }  (no note_id for create)
+// Returns: { ok, note }
+router.post('/notes', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(body.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const channelKey = hostInfo.handle;
+
+    // Look up host member_id
+    const { rows: hostRows } = await pool.query(
+      `SELECT member_id, handle
+         FROM ff_quickhitter
+        WHERE lower(handle) = lower($1)
+        LIMIT 1`,
+      [channelKey]
+    );
+    if (!hostRows.length) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const host = hostRows[0];
+
+    // Only host can create notes
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== host.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    // Build payload from all other fields
+    const { kyo, note_id, ...payload } = body;
+    if (!payload || Object.keys(payload).length === 0) {
+      return res.status(400).json({ ok: false, error: 'empty_note' });
+    }
+
+    let sortOrder = null;
+    if (payload.sort_order != null) {
+      const n = Number(payload.sort_order);
+      if (Number.isFinite(n)) sortOrder = n;
+    }
+
+    const insertSql = `
+      INSERT INTO tt_tokyo_studio_note (
+        channel_slug,
+        payload,
+        sort_order,
+        is_active
+      )
+      VALUES (
+        $1,
+        $2,
+        COALESCE(
+          $3,
+          (SELECT MAX(sort_order) + 1 FROM tt_tokyo_studio_note WHERE channel_slug = $1),
+          0
+        ),
+        TRUE
+      )
+      RETURNING note_id, payload, sort_order, is_active, created_at;
+    `;
+
+    const { rows } = await pool.query(insertSql, [
+      channelKey,
+      payload,
+      sortOrder,
+    ]);
+
+    return res.json({
+      ok: true,
+      note: mapStudioNoteRow(rows[0]),
+    });
+  } catch (err) {
+    console.error('/api/t/notes POST error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+// PUT /api/t/notes
+// Body: { kyo, note_id, ...noteFields }
+// Returns: { ok, note }
+router.put('/notes', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(body.kyo);
+    const noteId = body.note_id;
+
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    if (!noteId) {
+      return res.status(400).json({ ok: false, error: 'missing_note_id' });
+    }
+
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const channelKey = hostInfo.handle;
+
+    const { rows: hostRows } = await pool.query(
+      `SELECT member_id, handle
+         FROM ff_quickhitter
+        WHERE lower(handle) = lower($1)
+        LIMIT 1`,
+      [channelKey]
+    );
+    if (!hostRows.length) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const host = hostRows[0];
+
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== host.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const { kyo, note_id, ...payload } = body;
+    if (!payload || Object.keys(payload).length === 0) {
+      return res.status(400).json({ ok: false, error: 'empty_note' });
+    }
+
+    let sortOrder = null;
+    if (payload.sort_order != null) {
+      const n = Number(payload.sort_order);
+      if (Number.isFinite(n)) sortOrder = n;
+    }
+
+    const updateSql = `
+      UPDATE tt_tokyo_studio_note
+         SET payload = $3,
+             sort_order = COALESCE($4, sort_order),
+             updated_at = NOW()
+       WHERE note_id = $1
+         AND channel_slug = $2
+       RETURNING note_id, payload, sort_order, is_active, created_at;
+    `;
+
+    const { rows } = await pool.query(updateSql, [
+      noteId,
+      channelKey,
+      payload,
+      sortOrder,
+    ]);
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'note_not_found' });
+    }
+
+    return res.json({
+      ok: true,
+      note: mapStudioNoteRow(rows[0]),
+    });
+  } catch (err) {
+    console.error('/api/t/notes PUT error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+// DELETE /api/t/notes
+// Body: { kyo, note_id }
+// Returns: { ok, note }
+router.delete('/notes', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(body.kyo);
+    const noteId = body.note_id;
+
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    if (!noteId) {
+      return res.status(400).json({ ok: false, error: 'missing_note_id' });
+    }
+
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const channelKey = hostInfo.handle;
+
+    const { rows: hostRows } = await pool.query(
+      `SELECT member_id, handle
+         FROM ff_quickhitter
+        WHERE lower(handle) = lower($1)
+        LIMIT 1`,
+      [channelKey]
+    );
+    if (!hostRows.length) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const host = hostRows[0];
+
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== host.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const deleteSql = `
+      UPDATE tt_tokyo_studio_note
+         SET is_active = FALSE,
+             updated_at = NOW()
+       WHERE note_id = $1
+         AND channel_slug = $2
+       RETURNING note_id, payload, sort_order, is_active, created_at;
+    `;
+
+    const { rows } = await pool.query(deleteSql, [noteId, channelKey]);
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'note_not_found' });
+    }
+
+    return res.json({
+      ok: true,
+      note: mapStudioNoteRow(rows[0]),
+    });
+  } catch (err) {
+    console.error('/api/t/notes DELETE error:', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
