@@ -19,6 +19,7 @@ const poolsPreview = require('./routes/pools');
 const videoRouter = require('./routes/video');
 const audioRouter     = require('./routes/audio');
 const adminConsoleRoutes = require('./routes/adminConsole');
+const tChannelRoutes = require('./routes/tChannel');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -134,6 +135,12 @@ app.use(trashtalkUserRoutes);
 // ...
 app.use(specialsRouter);
 app.use('/api/audio', audioRouter);
+// For the HTML page: /t?kyo=...
+app.use('/', tChannelRoutes);     // this makes GET /t work
+
+// For the API: /api/t/...
+app.use('/api/t', tChannelRoutes); // this makes POST /api/t/kyo/login and GET /api/t/channel work
+
 // ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
 
 // ... other app.use(...) lines
