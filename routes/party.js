@@ -2,6 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const pool = require('../src/db/pool');
+const { deleteFromR2 } = require('../services/r2Client');
 const { getCurrentIdentity } = require('../services/identity');
 const url = require('url');
 const querystring = require('querystring');
@@ -3249,6 +3250,161 @@ router.post('/:partyId/message', jsonParser, requirePartyAccess, async (req, res
     return res.status(500).json({ ok: false, error: 'party_message_failed' });
   }
 });
+
+router.delete(
+  '/:partyId/message/:messageId',
+  requirePartyAccess,
+  async (req, res) => {
+    const { partyId, messageId } = req.params;
+    if (!messageId) {
+      return res.status(400).json({ ok: false, error: 'invalid_message_id' });
+    }
+    try {
+      const { rows } = await pool.query(
+        `
+          SELECT message_id, member_id
+            FROM tt_party_message
+           WHERE message_id::text = $1::text
+             AND party_id = $2
+           LIMIT 1
+        `,
+        [String(messageId), partyId]
+      );
+      if (!rows.length) {
+        return res
+          .status(404)
+          .json({ ok: false, error: 'message_not_found' });
+      }
+      const row = rows[0];
+      const viewerId = req.member?.member_id;
+      const ownsMessage =
+        viewerId && row.member_id && viewerId === row.member_id;
+      if (!req.isPartyHost && !ownsMessage) {
+        return res.status(403).json({ ok: false, error: 'not_allowed' });
+      }
+      await pool.query(
+        `
+          DELETE FROM tt_party_message
+           WHERE message_id = $1
+             AND party_id = $2
+        `,
+        [row.message_id, partyId]
+      );
+      return res.json({
+        ok: true,
+        deleted: true,
+        message_id: row.message_id,
+      });
+    } catch (err) {
+      console.error('[party:message_delete]', err);
+      return res
+        .status(500)
+        .json({ ok: false, error: 'message_delete_failed' });
+    }
+  }
+);
+
+router.delete('/:partyId/photo/:photoId', requirePartyAccess, async (req, res) => {
+  const { partyId, photoId } = req.params;
+  if (!UUID_PATTERN.test(photoId)) {
+    return res.status(400).json({ ok: false, error: 'invalid_photo_id' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT photo_id, member_id, r2_key
+          FROM tt_photo
+         WHERE photo_id = $1
+           AND party_id = $2
+         LIMIT 1
+      `,
+      [photoId, partyId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'photo_not_found' });
+    }
+    const row = rows[0];
+    const viewerId = req.member?.member_id;
+    const ownsPhoto =
+      viewerId && row.member_id && viewerId.trim() === row.member_id.trim();
+    if (!req.isPartyHost && !ownsPhoto) {
+      return res.status(403).json({ ok: false, error: 'not_allowed' });
+    }
+    await pool.query(
+      `
+        DELETE FROM tt_photo
+         WHERE photo_id = $1
+           AND party_id = $2
+      `,
+      [photoId, partyId]
+    );
+    if (row.r2_key) {
+      deleteFromR2({ key: row.r2_key }).catch((err) => {
+        console.warn('[party:photo_delete:r2]', err?.message || err);
+      });
+    }
+    return res.json({ ok: true, deleted: true, photo_id: photoId });
+  } catch (err) {
+    console.error('[party:photo_delete]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'photo_delete_failed' });
+  }
+});
+
+router.delete(
+  '/:partyId/video/:streamUid',
+  requirePartyAccess,
+  async (req, res) => {
+    const { partyId, streamUid } = req.params;
+    if (!streamUid) {
+      return res.status(400).json({ ok: false, error: 'invalid_stream_uid' });
+    }
+    try {
+      const { rows } = await pool.query(
+        `
+          SELECT stream_uid, owner_member_id
+            FROM tt_video
+           WHERE stream_uid = $1
+             AND party_id = $2
+             AND (kind IS NULL OR kind = 'clip')
+           LIMIT 1
+        `,
+        [streamUid, partyId]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ ok: false, error: 'video_not_found' });
+      }
+      const row = rows[0];
+      const viewerId = req.member?.member_id;
+      const ownsClip =
+        viewerId &&
+        row.owner_member_id &&
+        viewerId.trim() === row.owner_member_id.trim();
+      if (!req.isPartyHost && !ownsClip) {
+        return res.status(403).json({ ok: false, error: 'not_allowed' });
+      }
+      await pool.query(
+        `
+          DELETE FROM tt_video
+           WHERE stream_uid = $1
+             AND party_id = $2
+        `,
+        [streamUid, partyId]
+      );
+      return res.json({
+        ok: true,
+        deleted: true,
+        stream_uid: streamUid,
+      });
+    } catch (err) {
+      console.error('[party:video_delete]', err);
+      return res
+        .status(500)
+        .json({ ok: false, error: 'video_delete_failed' });
+    }
+  }
+);
 
 router.post(
   '/:partyId/photo/:photoId/caption',
