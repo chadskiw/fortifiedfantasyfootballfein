@@ -18,6 +18,7 @@ const walletsRoutes = require('./routes/wallets');
 const poolsPreview = require('./routes/pools');
 const videoRouter = require('./routes/video');
 const audioRouter     = require('./routes/audio');
+const adminConsoleRoutes = require('./routes/adminConsole');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -133,7 +134,11 @@ app.use(trashtalkUserRoutes);
 // ...
 app.use(specialsRouter);
 app.use('/api/audio', audioRouter);
+// ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
+app.use('/api', adminConsoleRoutes);
 
+// Optional: if you want /admin/console guarded by BE instead of static
+app.use('/', adminConsoleRoutes);
 // === ESPN Fan API proxy (reads leagues straight from ESPN with SWID + s2) ===
 function normalizeSwid(raw){
   try{
