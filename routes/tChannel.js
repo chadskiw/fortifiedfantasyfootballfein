@@ -52,8 +52,9 @@ function generateGuestId() {
 }
 
 async function ensureChannelExists(slug) {
+  if (!slug) return null;
   const { rows } = await pool.query(
-    `SELECT handle FROM ff_quickhitter WHERE handle = $1 LIMIT 1`,
+    `SELECT handle FROM ff_quickhitter WHERE lower(handle) = lower($1) LIMIT 1`,
     [slug]
   );
   return rows[0] || null;
@@ -260,6 +261,7 @@ router.get('/guestbook', async (req, res) => {
         .status(404)
         .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
     }
+    const channelKey = host.handle;
     const limitParam = Number(req.query?.limit);
     const limit = Number.isFinite(limitParam)
       ? Math.min(Math.max(limitParam, 1), 100)
@@ -286,7 +288,7 @@ router.get('/guestbook', async (req, res) => {
       ORDER BY created_at DESC
       LIMIT $2
       `,
-      [channelSlug, limit]
+      [channelKey, limit]
     );
     return res.json({
       ok: true,
@@ -314,6 +316,7 @@ router.post('/guestbook', express.json(), async (req, res) => {
         .status(404)
         .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
     }
+    const channelKey = host.handle;
     const message = trimText(body.message, 2000);
     if (!message) {
       return res.status(400).json({ ok: false, error: 'missing_message' });
@@ -378,7 +381,7 @@ router.post('/guestbook', express.json(), async (req, res) => {
         created_at
       `,
       [
-        channelSlug,
+        channelKey,
         guestId,
         guestLabel,
         viewerMemberId,
