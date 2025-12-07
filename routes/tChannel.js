@@ -53,11 +53,22 @@ function generateGuestId() {
 
 async function ensureChannelExists(slug) {
   if (!slug) return null;
+  const normalized = slug.trim();
+  if (!normalized) return null;
   const { rows } = await pool.query(
     `SELECT handle FROM ff_quickhitter WHERE lower(handle) = lower($1) LIMIT 1`,
-    [slug]
+    [normalized]
   );
-  return rows[0] || null;
+  if (rows[0]) return rows[0];
+  const { rows: partyRows } = await pool.query(
+    `SELECT host_handle AS handle FROM tt_party WHERE lower(host_handle) = lower($1) LIMIT 1`,
+    [normalized]
+  );
+  if (partyRows[0]) return partyRows[0];
+  if (normalized.toLowerCase() === ALLOWED_KYO_SLUG.toLowerCase()) {
+    return { handle: ALLOWED_KYO_SLUG };
+  }
+  return null;
 }
 
 // --- PAGE ROUTE ---------------------------------------------------------
