@@ -4,11 +4,11 @@ const path = require('path');
 const router = express.Router();
 const pool = require('../src/db/pool'); // <- this matches your pool.js
 const https = require('https'); // at top of file if not already
-
 // Hard-coded channel slug for now
 const ALLOWED_KYO_SLUG = 'KeigoMoriyama';
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WEATHER_MODES = new Set(['clear', 'rain', 'snow', 'storm', 'cloudy']);
 
 function normalizeSlug(value) {
   return (value || '').toString().trim();
@@ -83,6 +83,104 @@ async function ensureChannelExists(slug) {
   return null;
 }
 
+async function fetchHostMemberRecord(handle) {
+  if (!handle) return null;
+  const { rows } = await pool.query(
+    `SELECT member_id, handle
+       FROM ff_quickhitter
+      WHERE lower(handle) = lower($1)
+      LIMIT 1`,
+    [handle]
+  );
+  return rows[0] || null;
+}
+
+function sanitizeWeatherMode(mode) {
+  const candidate = (mode || '').toString().trim().toLowerCase();
+  return WEATHER_MODES.has(candidate) ? candidate : null;
+}
+
+function shapeOverridePayload(row) {
+  if (!row) return null;
+  return {
+    mu_mode: row.mu_mode,
+    label: row.label || 'Artist cue',
+    description: row.description || '',
+    source: 'override',
+    updated_by_member_id: row.updated_by_member_id || null,
+    updated_at: row.updated_at,
+    expires_at: row.expires_at,
+  };
+}
+
+async function selectWeatherOverride(channelHandle) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      channel_slug,
+      mu_mode,
+      label,
+      description,
+      updated_by_member_id,
+      updated_at,
+      expires_at
+    FROM tt_tokyo_weather_override
+    WHERE channel_slug = $1
+    LIMIT 1
+    `,
+    [channelHandle]
+  );
+  if (!rows.length) {
+    return null;
+  }
+  const override = rows[0];
+  if (override.expires_at && new Date(override.expires_at) < new Date()) {
+    return null;
+  }
+  return shapeOverridePayload(override);
+}
+
+async function upsertWeatherOverride(channelHandle, payload) {
+  const { rows } = await pool.query(
+    `
+    INSERT INTO tt_tokyo_weather_override (
+      channel_slug,
+      mu_mode,
+      label,
+      description,
+      updated_by_member_id,
+      expires_at,
+      updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    ON CONFLICT (channel_slug)
+    DO UPDATE SET
+      mu_mode = EXCLUDED.mu_mode,
+      label = EXCLUDED.label,
+      description = EXCLUDED.description,
+      updated_by_member_id = EXCLUDED.updated_by_member_id,
+      expires_at = EXCLUDED.expires_at,
+      updated_at = NOW()
+    RETURNING channel_slug, mu_mode, label, description, updated_by_member_id, updated_at, expires_at;
+    `,
+    [
+      channelHandle,
+      payload.mu_mode,
+      payload.label || null,
+      payload.description || null,
+      payload.updated_by_member_id || null,
+      payload.expires_at || null,
+    ]
+  );
+  return shapeOverridePayload(rows[0]);
+}
+
+async function deleteWeatherOverride(channelHandle) {
+  await pool.query(`DELETE FROM tt_tokyo_weather_override WHERE channel_slug = $1`, [
+    channelHandle,
+  ]);
+}
+
 // --- PAGE ROUTE ---------------------------------------------------------
 // We want /t?kyo=KeigoMoriyama to serve t.html
 // NOTE: this route will be mounted at '/' in server.js
@@ -134,6 +232,12 @@ router.get('/weather', async (req, res) => {
       return res
         .status(404)
         .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const channelHandle = hostInfo.handle;
+
+    const override = await selectWeatherOverride(channelHandle);
+    if (override) {
+      return res.json({ ok: true, weather: override });
     }
 
     // Option A: use party center_lat/center_lon if present
@@ -205,10 +309,92 @@ router.get('/weather', async (req, res) => {
         icon,
         temp_c: tempC,
         mu_mode: muMode,
+        source: 'live',
       },
     });
   } catch (err) {
     console.error('/api/t/weather error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+router.post('/weather/override', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(body.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const hostRecord = await fetchHostMemberRecord(hostInfo.handle);
+    if (!hostRecord) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== hostRecord.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    const safeMode = sanitizeWeatherMode(body.mu_mode);
+    if (!safeMode) {
+      return res.status(400).json({ ok: false, error: 'invalid_mode' });
+    }
+    let expiresAt = null;
+    if (body.expires_at) {
+      const ts = new Date(body.expires_at);
+      if (!Number.isNaN(ts.valueOf())) {
+        expiresAt = ts;
+      }
+    } else if (body.ttl_minutes != null) {
+      const ttl = Number(body.ttl_minutes);
+      if (Number.isFinite(ttl)) {
+        const clamped = Math.min(Math.max(ttl, 5), 24 * 60);
+        expiresAt = new Date(Date.now() + clamped * 60 * 1000);
+      }
+    }
+    const override = await upsertWeatherOverride(hostRecord.handle, {
+      mu_mode: safeMode,
+      label: trimText(body.label, 140),
+      description: trimText(body.description, 400),
+      updated_by_member_id: requesterId,
+      expires_at: expiresAt,
+    });
+    return res.json({ ok: true, weather: override });
+  } catch (err) {
+    console.error('/api/t/weather/override POST error:', err);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+router.delete('/weather/override', express.json(), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const channelSlug = normalizeSlug(req.query?.kyo || body.kyo);
+    if (!channelSlug) {
+      return res.status(400).json({ ok: false, error: 'missing_kyo' });
+    }
+    const hostInfo = await ensureChannelExists(channelSlug);
+    if (!hostInfo) {
+      return res
+        .status(404)
+        .json({ ok: false, error: 'channel_not_found', kyo: channelSlug });
+    }
+    const hostRecord = await fetchHostMemberRecord(hostInfo.handle);
+    if (!hostRecord) {
+      return res.status(404).json({ ok: false, error: 'host_not_found' });
+    }
+    const requesterId = getViewerMemberId(req);
+    if (!requesterId || requesterId !== hostRecord.member_id) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    await deleteWeatherOverride(hostRecord.handle);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/t/weather/override DELETE error:', err);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
