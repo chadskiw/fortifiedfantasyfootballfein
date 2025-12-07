@@ -135,7 +135,13 @@ app.use(trashtalkUserRoutes);
 app.use(specialsRouter);
 app.use('/api/audio', audioRouter);
 // ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
-app.use('/api', adminConsoleRoutes);
+
+// ... other app.use(...) lines
+
+// This line is what makes /api/admin/members/map REAL
+app.use('/api/admin', adminConsoleRoutes);
+
+// ... your other routes and final not_found / error handlers
 
 // Optional: if you want /admin/console guarded by BE instead of static
 app.use('/', adminConsoleRoutes);
