@@ -267,9 +267,15 @@ router.get('/weather', async (req, res) => {
 
     const apiKey = process.env.OPENWEATHER_API_KEY;
     if (!apiKey) {
-      return res
-        .status(500)
-        .json({ ok: false, error: 'weather_not_configured' });
+      return res.json({
+        ok: true,
+        weather: {
+          mu_mode: 'clear',
+          label: 'Default clear',
+          description: 'Live weather not configured; showing default cue.',
+          source: 'system',
+        },
+      });
     }
 
     const url = `https://api.openweathermap.org/data/2.5/weather?lat=${encodeURIComponent(
