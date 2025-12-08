@@ -45,6 +45,7 @@ const MAX_PHOTO_CAPTION_LENGTH = 500;
 const {
   fetchPartyAudioPermissions,
 } = require('../services/audioPermissions');
+const RoomService = require('../services/roomService');
 
 class PartyCheckinError extends Error {
   constructor(status, code, meta = null) {
@@ -84,6 +85,76 @@ function buildPartyEntityKey(kind, id) {
   if (safeKind === 'message') return `ttmsg:${safeId}`;
   if (safeKind === 'party') return `ttparty:${safeId}`;
   return `${safeKind}:${safeId}`;
+}
+
+const laneMaskCache = new Map();
+
+async function fetchLaneMaskForLane(lane) {
+  const normalizedLane = String(lane || '').trim().toLowerCase();
+  if (!normalizedLane) return null;
+  if (laneMaskCache.has(normalizedLane)) {
+    return laneMaskCache.get(normalizedLane);
+  }
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT mask
+          FROM tt_room_type
+         WHERE lane = $1
+         ORDER BY room_type ASC
+         LIMIT 1
+      `,
+      [normalizedLane]
+    );
+    const mask = rows[0]?.mask || null;
+    laneMaskCache.set(normalizedLane, mask);
+    return mask;
+  } catch (err) {
+    console.error('[party:laneMask] lookup failed', {
+      lane: normalizedLane,
+      error: err.message,
+    });
+    laneMaskCache.set(normalizedLane, null);
+    return null;
+  }
+}
+
+async function ensureVanityRoomBinding({
+  lane,
+  slug,
+  partyId,
+  hostMemberId,
+}) {
+  const normalizedSlug = String(slug || '').trim();
+  if (!normalizedSlug) return null;
+  const mask = await fetchLaneMaskForLane(lane);
+  if (!mask) {
+    return null;
+  }
+  try {
+    const room = await RoomService.resolveFromVanity({
+      lane,
+      mask,
+      slug: normalizedSlug,
+      memberId: hostMemberId || null,
+      autoCreate: true,
+    });
+    if (room?.room_id && partyId) {
+      await RoomService.ensureBinding(room.room_id, {
+        bindingKind: 'party',
+        bindingId: partyId,
+      });
+    }
+    return room;
+  } catch (err) {
+    console.error('[party:vanityRoom] ensure failed', {
+      lane,
+      mask,
+      slug: normalizedSlug,
+      error: err.message,
+    });
+    return null;
+  }
 }
 
 function normalizeReactionType(value) {
@@ -1269,7 +1340,14 @@ router.post('/', async (req, res) => {
     ];
 
     const { rows } = await pool.query(sql, params);
-    return res.json(rows[0]);
+    const createdParty = rows[0];
+    await ensureVanityRoomBinding({
+      lane: vanityLane,
+      slug: routeKey,
+      partyId: createdParty?.party_id,
+      hostMemberId: me.memberId,
+    });
+    return res.json(createdParty);
   } catch (err) {
     console.error('[party:create] error:', err);
     return res.status(500).json({ error: 'Failed to create party' });
