@@ -1313,7 +1313,7 @@ router.post('/:partyId/invite', jsonParser, async (req, res) => {
         resolved AS (
           SELECT
             $1::uuid AS party_id,
-            COALESCE(q.member_id, incoming.raw_handle) AS member_id,
+            q.member_id AS member_id,
             COALESCE(q.handle, incoming.raw_handle)    AS handle
           FROM incoming
           LEFT JOIN ff_quickhitter q
