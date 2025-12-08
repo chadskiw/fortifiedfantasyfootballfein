@@ -11,7 +11,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-
+const jsonParser = express.json();
 const { PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
