@@ -41,6 +41,9 @@ const PUBLIC_VIEWER_HANDLE = (
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PHOTO_CAPTION_LENGTH = 500;
+const {
+  fetchPartyAudioPermissions,
+} = require('../services/audioPermissions');
 
 class PartyCheckinError extends Error {
   constructor(status, code, meta = null) {
@@ -2983,12 +2986,14 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
     const live = posts.filter(p => p.phase === 'live');
     const recap = posts.filter(p => p.phase === 'recap');
 
+    const audioPermissions = await fetchPartyAudioPermissions(partyId);
     res.json({
       party,
       membership: serializeMembership(req.membership),
       hype,
       feed: live,
       recap,
+      audio_permissions: audioPermissions,
     });
   } catch (err) {
     next(err);
@@ -3164,6 +3169,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
     const live = posts.filter((p) => p.phase === 'live');
     const recap = posts.filter((p) => p.phase === 'recap');
 
+    const audioPermissions = await fetchPartyAudioPermissions(partyId);
     return res.json({
       ok: true,
       party,
@@ -3171,6 +3177,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
       hype,
       feed: live,
       recap,
+      audio_permissions: audioPermissions,
     });
   } catch (err) {
     console.error('[party:public_feed]', err);

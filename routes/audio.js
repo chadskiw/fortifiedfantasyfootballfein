@@ -26,6 +26,12 @@ const {
   recordManualMeta,
   updateQuickhitterLocation,
 } = require('../utils/manualMeta');
+const {
+  normalizeHandle,
+  normalizeHandleList,
+  fetchPartyAudioPermissions,
+  upsertPartyAudioPermissions,
+} = require('../services/audioPermissions');
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -283,6 +289,38 @@ async function ensurePartyAudioHost(partyId, identity) {
   throw err;
 }
 
+async function ensurePartyAudioContributor(partyId, identity) {
+  if (!identity) {
+    const err = new Error('host_only');
+    err.status = 403;
+    throw err;
+  }
+  const access = await ensurePartyAudioAccess(partyId, identity);
+  const policy = await fetchPartyAudioPermissions(partyId);
+  const hostHandle = normalizeHandle(access.party?.host_handle);
+  const viewerHandle = normalizeHandle(identity?.handle);
+  const membershipLevel = String(
+    access.membership?.access_level || ''
+  ).toLowerCase();
+  if (viewerHandle && hostHandle && viewerHandle === hostHandle) {
+    return { access, policy };
+  }
+  if (membershipLevel === 'host') {
+    return { access, policy };
+  }
+  if (policy.mode === 'all') {
+    return { access, policy };
+  }
+  if (policy.mode === 'handles' && viewerHandle) {
+    if (policy.handles.includes(viewerHandle)) {
+      return { access, policy };
+    }
+  }
+  const err = new Error('host_only');
+  err.status = 403;
+  throw err;
+}
+
 // --- Helper: get current member id (adjust if your auth is different) ---
 function getCurrentMemberId(req) {
   // If you have a centralized auth middleware, mirror what trashtalk/party routes do.
@@ -309,13 +347,25 @@ async function withPg(fn) {
 // Create a row and return a presigned PUT URL for the raw upload.
 router.post('/track', async (req, res, next) => {
   try {
-    const memberId = getCurrentMemberId(req);
+    let identity = await getCurrentIdentity(req, pool).catch(() => null);
+    const memberId =
+      extractMemberId(identity) || getCurrentMemberId(req);
     if (!memberId) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
 
     const { party_id, title, description } = req.body || {};
     const manualMeta = parseManualMeta(req.body);
+
+    if (party_id) {
+      if (!identity) {
+        identity = await getCurrentIdentity(req, pool).catch(() => null);
+      }
+      if (!identity) {
+        return res.status(401).json({ ok: false, error: 'unauthorized' });
+      }
+      await ensurePartyAudioContributor(party_id, identity);
+    }
 
     const row = await withPg(async (client) => {
       const { rows } = await client.query(
@@ -903,5 +953,72 @@ router.post('/party/:partyId/audio/queue', async (req, res, next) => {
     next(err);
   }
 });
+
+router.get('/party/:partyId/contributors', async (req, res, next) => {
+  const partyId = normalizeUuid(req.params.partyId);
+  if (!partyId) {
+    return res.status(400).json({ ok: false, error: 'invalid_party_id' });
+  }
+  try {
+    const identity = await getCurrentIdentity(req, pool).catch(() => null);
+    await ensurePartyAudioAccess(partyId, identity);
+    const permissions = await fetchPartyAudioPermissions(partyId);
+    return res.json({ ok: true, permissions });
+  } catch (err) {
+    const status = err?.status || err?.statusCode || 500;
+    console.error('[audio:contributors:get]', err);
+    return res
+      .status(status)
+      .json({ ok: false, error: err?.message || 'contributors_fetch_failed' });
+  }
+});
+
+router.post(
+  '/party/:partyId/contributors',
+  jsonParser,
+  async (req, res, next) => {
+    const partyId = normalizeUuid(req.params.partyId);
+    if (!partyId) {
+      return res.status(400).json({ ok: false, error: 'invalid_party_id' });
+    }
+    try {
+      const identity = await getCurrentIdentity(req, pool);
+      await ensurePartyAudioHost(partyId, identity);
+
+      const rawMode = String(req.body?.mode || '').toLowerCase();
+      const mode = rawMode || 'host';
+      let handlesInput = req.body?.handles;
+      if (
+        handlesInput == null &&
+        typeof req.body?.handle_list === 'string'
+      ) {
+        handlesInput = req.body.handle_list;
+      }
+      const handles =
+        mode === 'handles' ? normalizeHandleList(handlesInput || []) : [];
+      if (mode === 'handles' && !handles.length) {
+        return res
+          .status(422)
+          .json({ ok: false, error: 'handles_required' });
+      }
+      const permissions = await upsertPartyAudioPermissions(partyId, {
+        mode,
+        handles,
+        updatedBy:
+          identity?.handle ||
+          extractMemberId(identity) ||
+          getCurrentMemberId(req) ||
+          null,
+      });
+      return res.json({ ok: true, permissions });
+    } catch (err) {
+      const status = err?.status || err?.statusCode || 500;
+      console.error('[audio:contributors:save]', err);
+      return res
+        .status(status)
+        .json({ ok: false, error: err?.message || 'contributors_save_failed' });
+    }
+  }
+);
 
 module.exports = router;
