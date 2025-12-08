@@ -33,6 +33,7 @@ const router = express.Router();
 const bucket = process.env.R2_BUCKET;
 const MAX_AUDIO_DURATION_SECONDS = 3 * 60 * 60; // 3 hours
 const MAX_QUEUE_LENGTH = 8;
+const MAX_AUDIO_CAPTION_LENGTH = 600;
 
 async function fetchPartySummary(partyId) {
   if (!partyId) return null;
@@ -567,6 +568,77 @@ router.post('/track/:audioId/hero', async (req, res, next) => {
     res.json({ ok: true, audio_id: audioId, ...updated });
   } catch (err) {
     console.error('[audio/hero] error', err);
+    next(err);
+  }
+});
+
+router.post('/track/:audioId/caption', async (req, res, next) => {
+  const audioId = Number(req.params.audioId);
+  if (!Number.isFinite(audioId)) {
+    return res.status(400).json({ ok: false, error: 'invalid_audio_id' });
+  }
+
+  try {
+    const identity = await getCurrentIdentity(req, pool).catch(() => null);
+    const memberId = extractMemberId(identity);
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+
+    const rawCaption =
+      typeof req.body?.caption === 'string' ? req.body.caption : '';
+    const caption = rawCaption.trim().slice(0, MAX_AUDIO_CAPTION_LENGTH);
+
+    const updated = await withPg(async (client) => {
+      const { rows } = await client.query(
+        `SELECT audio_id,
+                owner_member_id,
+                party_id
+           FROM tt_audio_track
+          WHERE audio_id = $1`,
+        [audioId]
+      );
+      const track = rows[0];
+      if (!track) return null;
+      const isOwner =
+        track.owner_member_id &&
+        track.owner_member_id.trim() === memberId.trim();
+      let hostAllowed = false;
+      if (!isOwner && track.party_id) {
+        try {
+          await ensurePartyAudioHost(track.party_id, identity);
+          hostAllowed = true;
+        } catch {
+          hostAllowed = false;
+        }
+      }
+      if (!isOwner && !hostAllowed) {
+        return 'forbidden';
+      }
+      await client.query(
+        `UPDATE tt_audio_track
+            SET description = $2,
+                updated_at = NOW()
+          WHERE audio_id = $1`,
+        [audioId, caption.length ? caption : null]
+      );
+      return caption;
+    });
+
+    if (!updated) {
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+    if (updated === 'forbidden') {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    res.json({
+      ok: true,
+      description: updated || '',
+      caption: updated || '',
+    });
+  } catch (err) {
+    console.error('[audio/caption] error', err);
     next(err);
   }
 });

@@ -51,6 +51,8 @@ const STREAM_API_BASE = STREAM_ACCOUNT
   ? `https://api.cloudflare.com/client/v4/accounts/${STREAM_ACCOUNT}/stream`
   : '';
 
+const VIDEO_AUDIENCES = new Set(['party', 'public', 'private']);
+
 const hasNativeFormData =
   typeof FormData === 'function' && typeof Blob === 'function';
 const FormDataPolyfill = !hasNativeFormData ? require('form-data') : null;
@@ -111,6 +113,15 @@ function normalizeClipWindow(startSeconds, endSeconds, options = {}) {
   return { start, duration, rawDuration, targetEnd: start + rawDuration };
 }
 
+function normalizeVideoAudience(value, fallback = null) {
+  if (value == null) return fallback;
+  const normalized = String(value).toLowerCase();
+  if (VIDEO_AUDIENCES.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
 async function buildStreamUploadBody(filePath, filename) {
   if (hasNativeFormData) {
     const buffer = await fsp.readFile(filePath);
@@ -148,6 +159,13 @@ router.post('/work', async (req, res) => {
   const memberId = identity.member_id || identity.memberId;
 
   const partyId = req.body?.party_id || req.body?.partyId || null;
+  const requestedAudienceRaw =
+    req.body?.audience || req.body?.audience_mode || req.body?.audienceMode;
+  const defaultAudience = partyId ? 'party' : 'public';
+  const requestedAudience = normalizeVideoAudience(
+    requestedAudienceRaw,
+    defaultAudience
+  );
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   const manualMeta = parseManualMeta(req.body);
 
@@ -163,9 +181,10 @@ router.post('/work', async (req, res) => {
           manual_lat,
           manual_lon,
           manual_taken_at,
-          manual_meta_source
+          manual_meta_source,
+          audience_override
         )
-        VALUES ($1, $2, $3, 'editing', $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, 'editing', $4, $5, $6, $7, $8, $9)
         RETURNING work_id
       `,
       [
@@ -177,6 +196,7 @@ router.post('/work', async (req, res) => {
         manualMeta?.lon ?? null,
         manualMeta?.takenAt ?? null,
         manualMeta?.source ?? null,
+        requestedAudience,
       ]
     );
 
@@ -414,6 +434,15 @@ router.post('/work/:workId/clip', async (req, res) => {
       ? 30
       : Math.min(30, Math.max(1, Math.round(duration)));
 
+    const audienceFromBody = normalizeVideoAudience(req.body?.audience, null);
+    const storedAudience = normalizeVideoAudience(
+      work.audience_override,
+      null
+    );
+    const defaultAudience = work.party_id ? 'party' : 'public';
+    const videoAudience =
+      audienceFromBody || storedAudience || defaultAudience;
+
     await pool.query(
       `INSERT INTO tt_video (
          stream_uid,
@@ -424,9 +453,10 @@ router.post('/work/:workId/clip', async (req, res) => {
          lat,
          lon,
          recorded_at,
-         meta_source
+         meta_source,
+         audience
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         streamUid,
         memberId,
@@ -437,6 +467,7 @@ router.post('/work/:workId/clip', async (req, res) => {
         work.manual_lon ?? null,
         work.manual_taken_at ?? null,
         work.manual_meta_source ?? null,
+        videoAudience,
       ]
     );
 

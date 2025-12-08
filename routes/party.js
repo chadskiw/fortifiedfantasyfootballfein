@@ -313,7 +313,7 @@ async function resolvePartyReactionTarget(client, partyId, targetKindRaw, target
   if (kind === 'video') {
     const { rows } = await client.query(
       `
-        SELECT stream_uid, party_id
+        SELECT stream_uid, party_id, audience
           FROM tt_video
          WHERE stream_uid = $1
            AND party_id = $2
@@ -328,7 +328,7 @@ async function resolvePartyReactionTarget(client, partyId, targetKindRaw, target
       entityKey: buildPartyEntityKey('video', row.stream_uid),
       kind: 'video',
       partyId: row.party_id,
-      audience: 'party',
+      audience: row.audience || 'party',
       targetId: row.stream_uid,
     };
   }
@@ -2933,7 +2933,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
           v.owner_member_id AS member_id,
           u.handle,
           NULL::text        AS body,
-          NULL::text        AS caption,
+          v.caption         AS caption,
           NULL::text        AS r2_key,
           NULL::timestamptz AS taken_at,
           COALESCE(v.created_at, NOW()) AS event_time,
@@ -3067,6 +3067,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
             m.member_id,
             u.handle,
             m.body,
+            NULL::text        AS caption,
             NULL::text        AS r2_key,
             NULL::timestamptz AS taken_at,
             m.created_at      AS event_time,
@@ -3090,6 +3091,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
             ph.member_id,
             u.handle,
             NULL::text       AS body,
+            ph.party_caption AS caption,
             ph.r2_key,
             ph.taken_at,
             COALESCE(ph.taken_at, ph.created_at) AS event_time,
@@ -3113,6 +3115,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
             v.owner_member_id AS member_id,
             u.handle,
             NULL::text       AS body,
+            v.caption        AS caption,
             NULL::text       AS r2_key,
             NULL::timestamptz AS taken_at,
             COALESCE(v.created_at, NOW()) AS event_time,
@@ -3684,5 +3687,74 @@ router.post('/api/party/:partyId/redeem', requirePartyAccess, async (req, res) =
     });
   }
 });
+
+router.post(
+  '/:partyId/video/:streamUid/caption',
+  jsonParser,
+  requirePartyAccess,
+  async (req, res) => {
+    const { partyId, streamUid } = req.params;
+    const rawCaption =
+      typeof req.body?.caption === 'string' ? req.body.caption : '';
+    const caption = rawCaption.trim().slice(0, MAX_PHOTO_CAPTION_LENGTH);
+
+    if (!streamUid) {
+      return res.status(400).json({ ok: false, error: 'invalid_stream_uid' });
+    }
+
+    try {
+      const { rows } = await pool.query(
+        `
+          SELECT stream_uid,
+                 owner_member_id,
+                 party_id
+            FROM tt_video
+           WHERE stream_uid = $1
+             AND party_id = $2
+             AND (kind IS NULL OR kind = 'clip')
+           LIMIT 1
+        `,
+        [streamUid, partyId]
+      );
+
+      if (!rows.length) {
+        return res.status(404).json({ ok: false, error: 'video_not_found' });
+      }
+
+      const video = rows[0];
+      const viewerMemberId = (req.member?.member_id || '').trim();
+      const ownsClip =
+        viewerMemberId &&
+        video.owner_member_id &&
+        viewerMemberId === video.owner_member_id;
+
+      if (!req.isPartyHost && !ownsClip) {
+        return res.status(403).json({ ok: false, error: 'not_allowed' });
+      }
+
+      const nextCaption = caption.length ? caption : null;
+      const { rows: updateRows } = await pool.query(
+        `
+          UPDATE tt_video
+             SET caption = $3
+           WHERE stream_uid = $1
+             AND party_id = $2
+           RETURNING caption
+        `,
+        [streamUid, partyId, nextCaption]
+      );
+
+      return res.json({
+        ok: true,
+        caption: updateRows[0]?.caption || '',
+      });
+    } catch (err) {
+      console.error('[party:video_caption]', err);
+      return res
+        .status(500)
+        .json({ ok: false, error: 'video_caption_update_failed' });
+    }
+  }
+);
 
 module.exports = router;

@@ -311,10 +311,16 @@ async function getViewerContext(req, { requireAuth = false } = {}) {
 }
 
 function resolveAudience(requested, hasParty) {
-  if (hasParty) return 'party';
-  if (!requested) return DEFAULT_AUDIENCE;
-  const normalized = String(requested).toLowerCase();
-  if (normalized === 'party') return hasParty ? 'party' : DEFAULT_AUDIENCE;
+  const normalized = requested ? String(requested).toLowerCase() : '';
+  if (hasParty) {
+    if (normalized === 'public' || normalized === 'private') {
+      return normalized;
+    }
+    if (normalized === 'party') return 'party';
+    return 'party';
+  }
+  if (!normalized) return DEFAULT_AUDIENCE;
+  if (normalized === 'party') return DEFAULT_AUDIENCE;
   if (VALID_AUDIENCES.has(normalized)) return normalized;
   return DEFAULT_AUDIENCE;
 }
