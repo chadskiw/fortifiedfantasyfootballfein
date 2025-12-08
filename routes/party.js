@@ -1163,6 +1163,7 @@ router.post('/', async (req, res) => {
   const {
     name,
     description,
+    rty,
     centerLat,
     centerLon,
     radiusM,
@@ -1186,6 +1187,18 @@ router.post('/', async (req, res) => {
   if (graceMinutes != null) {
     graceMinutes = clampNumber(graceMinutes, 0, 720);
   }
+  let routeKey = null;
+  if (rty) {
+    const candidate = String(rty).trim().toLowerCase();
+    if (!HANDLE_RE.test(candidate)) {
+      return res.status(422).json({ error: 'invalid_rty' });
+    }
+    const existing = await fetchPartyByRouteKey(candidate);
+    if (existing) {
+      return res.status(409).json({ error: 'rty_taken' });
+    }
+    routeKey = candidate;
+  }
 
   try {
     const sql = `
@@ -1194,6 +1207,7 @@ router.post('/', async (req, res) => {
         host_handle,        -- new hotness
         name,
         description,
+        rty,
         center_lat,
         center_lon,
         radius_m,
@@ -1211,17 +1225,18 @@ router.post('/', async (req, res) => {
         $2,  -- host_handle
         $3,  -- name
         $4,  -- description
-        $5,  -- center_lat
-        $6,  -- center_lon
-        COALESCE($7, 75),  -- radius_m
-        $8,  -- starts_at
-        $9,  -- ends_at
-        $10,
-        'live',
+        $5,  -- rty
+        $6,  -- center_lat
+        $7,  -- center_lon
+        COALESCE($8, 75),  -- radius_m
+        $9,  -- starts_at
+        $10,  -- ends_at
         $11,
+        'live',
         $12,
         $13,
-        $14
+        $14,
+        $15
       )
       RETURNING *;
     `;
@@ -1231,16 +1246,17 @@ router.post('/', async (req, res) => {
       me.handle,        // $2
       name,             // $3
       description,      // $4
-      centerLat,        // $5
-      centerLon,        // $6
-      radiusM,          // $7
-      startsAt,         // $8
-      endsAt,           // $9
-      visibilityMode,   // $10
-      normalizedPartyType, // $11
-      noLateEntryFlag,  // $12
-      noReentryFlag,    // $13
-      graceMinutes,     // $14
+      routeKey,         // $5
+      centerLat,        // $6
+      centerLon,        // $7
+      radiusM,          // $8
+      startsAt,         // $9
+      endsAt,           // $10
+      visibilityMode,   // $11
+      normalizedPartyType, // $12
+      noLateEntryFlag,  // $13
+      noReentryFlag,    // $14
+      graceMinutes,     // $15
     ];
 
     const { rows } = await pool.query(sql, params);
