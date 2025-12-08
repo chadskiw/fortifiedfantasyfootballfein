@@ -20,6 +20,7 @@ const DEFAULT_VIBE = Object.freeze({
 const REACTION_TYPES = new Set(['heart', 'fire']);
 const REACTION_ENTITY_KINDS = new Set(['photo', 'message', 'video']);
 const PARTY_TYPES = new Set(['public', 'private', 'arrival', 'ticket', 'business']);
+const VANITY_LANES = new Set(['p', 'c', 's', 'b', 't', 'g', 'o']);
 const LOCATION_REQUIRED_PARTY_TYPES = new Set(['arrival', 'ticket']);
 const CHECKIN_VIA_VALUES = new Set([
   'manual',
@@ -567,6 +568,7 @@ function serializeParty(row) {
     name: row.name,
     party_photo_key: row.party_photo_key || null,
     rty: row.rty || null,
+    vanity_lane: row.vanity_lane || 'p',
     description: row.description,
     center_lat: row.center_lat,
     center_lon: row.center_lon,
@@ -1199,6 +1201,10 @@ router.post('/', async (req, res) => {
     }
     routeKey = candidate;
   }
+  let vanityLane = String(req.body?.vanityLane || '').trim().toLowerCase();
+  if (!VANITY_LANES.has(vanityLane)) {
+    vanityLane = 'p';
+  }
 
   try {
     const sql = `
@@ -1208,6 +1214,7 @@ router.post('/', async (req, res) => {
         name,
         description,
         rty,
+        vanity_lane,
         center_lat,
         center_lon,
         radius_m,
@@ -1226,17 +1233,18 @@ router.post('/', async (req, res) => {
         $3,  -- name
         $4,  -- description
         $5,  -- rty
-        $6,  -- center_lat
-        $7,  -- center_lon
-        COALESCE($8, 75),  -- radius_m
-        $9,  -- starts_at
-        $10,  -- ends_at
-        $11,
-        'live',
+        $6,  -- vanity_lane
+        $7,  -- center_lat
+        $8,  -- center_lon
+        COALESCE($9, 75),  -- radius_m
+        $10,  -- starts_at
+        $11,  -- ends_at
         $12,
+        'live',
         $13,
         $14,
-        $15
+        $15,
+        $16
       )
       RETURNING *;
     `;
@@ -1247,16 +1255,17 @@ router.post('/', async (req, res) => {
       name,             // $3
       description,      // $4
       routeKey,         // $5
-      centerLat,        // $6
-      centerLon,        // $7
-      radiusM,          // $8
-      startsAt,         // $9
-      endsAt,           // $10
-      visibilityMode,   // $11
-      normalizedPartyType, // $12
-      noLateEntryFlag,  // $13
-      noReentryFlag,    // $14
-      graceMinutes,     // $15
+      vanityLane,       // $6
+      centerLat,        // $7
+      centerLon,        // $8
+      radiusM,          // $9
+      startsAt,         // $10
+      endsAt,           // $11
+      visibilityMode,   // $12
+      normalizedPartyType, // $13
+      noLateEntryFlag,  // $14
+      noReentryFlag,    // $15
+      graceMinutes,     // $16
     ];
 
     const { rows } = await pool.query(sql, params);
