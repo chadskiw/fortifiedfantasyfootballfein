@@ -174,6 +174,72 @@ function haversineSql(latParam, lonParam, latCol = 'lat', lonCol = 'lon') {
     )
   `;
 }
+/**
+ * Auto-complete bucket list items for a member that are within each item's auto_radius_m
+ * of the provided lat/lon.
+ *
+ * Returns the rows that were just completed.
+ */
+async function autoCompleteBucketItemsForMember(memberId, lat, lon) {
+  if (!memberId || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return [];
+  }
+
+  // distance in meters between (lat,lon) and c.target_lat/target_lon
+  const distanceExpr = haversineSql('$2', '$3', 'c.target_lat', 'c.target_lon');
+
+  const sql = `
+    WITH candidate AS (
+      SELECT
+        b.bucket_item_id,
+        b.auto_radius_m,
+        COALESCE(
+          b.lat,
+          p.lat,
+          pa.center_lat
+        ) AS target_lat,
+        COALESCE(
+          b.lon,
+          p.lon,
+          pa.center_lon
+        ) AS target_lon
+      FROM tt_bucket_list_item b
+      LEFT JOIN tt_photo p
+        ON b.photo_id = p.photo_id
+      LEFT JOIN tt_party pa
+        ON b.party_id = pa.party_id
+      WHERE
+        b.member_id = $1
+        AND b.status = 'active'
+    ),
+    matched AS (
+      SELECT
+        c.bucket_item_id
+      FROM candidate c
+      WHERE
+        c.target_lat IS NOT NULL
+        AND c.target_lon IS NOT NULL
+        AND ${distanceExpr} <= c.auto_radius_m
+    )
+    UPDATE tt_bucket_list_item b
+       SET status = 'completed',
+           completed_at = NOW(),
+           completed_source = COALESCE(completed_source, 'auto'),
+           updated_at = NOW()
+      WHERE b.bucket_item_id IN (SELECT bucket_item_id FROM matched)
+      RETURNING
+        b.bucket_item_id,
+        b.target_key,
+        b.kind,
+        b.label,
+        b.status,
+        b.completed_at,
+        b.completed_source;
+  `;
+
+  const { rows } = await pool.query(sql, [memberId, lat, lon]);
+  return rows || [];
+}
 
 function collectOwnerIds(rows = []) {
   return Array.from(
@@ -968,6 +1034,581 @@ router.post('/location/ping', jsonParser, async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: 'location_update_failed' });
+  }
+});
+router.post('/location/pulse', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.body?.member_id ||
+      req.body?.memberId ||
+      viewerId;
+
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    const lat = parseFloat(req.body.lat);
+    const lon = parseFloat(req.body.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ ok: false, error: 'invalid_coordinates' });
+    }
+
+    const accuracy = Number(
+      req.body?.accuracy ??
+      req.body?.accuracy_m ??
+      req.body?.accuracyMeters ??
+      req.body?.accuracy_meters
+    );
+
+    await updateQuickhitterLocation(
+      pool,
+      memberId,
+      {
+        lat,
+        lon,
+        accuracy: Number.isFinite(accuracy) ? accuracy : null,
+        source: req.body?.source || req.body?.location_source || 'device',
+      },
+      {
+        location_state: req.body?.location_state || null,
+      }
+    );
+
+    await pool.query(
+      `UPDATE ff_quickhitter SET last_seen_at = NOW() WHERE member_id = $1`,
+      [memberId]
+    );
+
+    // 💡 NEW: auto-complete bucket list items within each item's auto_radius_m
+    const autoCompleted = await autoCompleteBucketItemsForMember(memberId, lat, lon);
+
+    return res.json({
+      ok: true,
+      autoCompleted,
+    });
+  } catch (err) {
+    console.error('[trashtalk:location:pulse]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'location_update_failed' });
+  }
+});
+/**
+ * GET /api/trashtalk/bucketlist
+ * Optional query params:
+ *   lat, lon, radiusMeters  -> only items within radius of that point
+ *   includeCompleted=true   -> include completed items in results
+ */
+router.get('/bucketlist', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId =
+      req.query?.member_id ||
+      req.query?.memberId ||
+      viewerId;
+
+    if (!memberId || memberId !== viewerId) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const lat = req.query.lat != null ? parseFloat(req.query.lat) : null;
+    const lon = req.query.lon != null ? parseFloat(req.query.lon) : null;
+    const radiusMeters =
+      req.query.radiusMeters != null
+        ? parseFloat(req.query.radiusMeters)
+        : null;
+
+    const includeCompletedRaw = String(
+      req.query.includeCompleted ?? ''
+    ).toLowerCase();
+    const includeCompleted =
+      includeCompletedRaw === 'true' || includeCompletedRaw === '1';
+
+    const params = [memberId];
+    let sql;
+
+    const useRadius =
+      Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(radiusMeters);
+
+    if (useRadius) {
+      // Distance calculation on the derived target lat/lon
+      const distanceExpr = haversineSql('$2', '$3', 'target_lat', 'target_lon');
+      params.push(lat, lon, radiusMeters);
+
+      sql = `
+        WITH items AS (
+          SELECT
+            b.bucket_item_id,
+            b.member_id,
+            b.target_key,
+            b.kind,
+            b.status,
+            b.view_radius_m,
+            b.auto_radius_m,
+            b.label,
+            b.note,
+            b.photo_id,
+            b.party_id,
+            COALESCE(
+              b.lat,
+              p.lat,
+              pa.center_lat
+            ) AS target_lat,
+            COALESCE(
+              b.lon,
+              p.lon,
+              pa.center_lon
+            ) AS target_lon,
+            p.r2_key,
+            p.original_filename,
+            p.taken_at,
+            pa.name AS party_name,
+            ${distanceExpr} AS distance_m,
+            b.created_at,
+            b.completed_at,
+            b.completed_source,
+            b.updated_at
+          FROM tt_bucket_list_item b
+          LEFT JOIN tt_photo p
+            ON b.photo_id = p.photo_id
+          LEFT JOIN tt_party pa
+            ON b.party_id = pa.party_id
+          WHERE
+            b.member_id = $1
+            AND (
+              b.status = 'active'
+              OR (${includeCompleted ? 'TRUE' : 'FALSE'} AND b.status = 'completed')
+            )
+        )
+        SELECT *
+        FROM items
+        WHERE
+          target_lat IS NOT NULL
+          AND target_lon IS NOT NULL
+          AND distance_m <= $4
+        ORDER BY status, created_at DESC;
+      `;
+    } else {
+      sql = `
+        SELECT
+          b.bucket_item_id,
+          b.member_id,
+          b.target_key,
+          b.kind,
+          b.status,
+          b.view_radius_m,
+          b.auto_radius_m,
+          b.label,
+          b.note,
+          b.photo_id,
+          b.party_id,
+          b.lat AS explicit_lat,
+          b.lon AS explicit_lon,
+          p.r2_key,
+          p.original_filename,
+          p.taken_at,
+          p.lat AS photo_lat,
+          p.lon AS photo_lon,
+          pa.name AS party_name,
+          pa.center_lat,
+          pa.center_lon,
+          b.created_at,
+          b.completed_at,
+          b.completed_source,
+          b.updated_at
+        FROM tt_bucket_list_item b
+        LEFT JOIN tt_photo p
+          ON b.photo_id = p.photo_id
+        LEFT JOIN tt_party pa
+          ON b.party_id = pa.party_id
+        WHERE
+          b.member_id = $1
+          AND (
+            b.status = 'active'
+            OR (${includeCompleted ? 'TRUE' : 'FALSE'} AND b.status = 'completed')
+          )
+        ORDER BY b.status, b.created_at DESC;
+      `;
+    }
+
+    const { rows } = await pool.query(sql, params);
+
+    const items = rows.map((row) => {
+      const latFinal =
+        row.target_lat ??
+        row.photo_lat ??
+        row.center_lat ??
+        row.explicit_lat ??
+        null;
+      const lonFinal =
+        row.target_lon ??
+        row.photo_lon ??
+        row.center_lon ??
+        row.explicit_lon ??
+        null;
+
+      return {
+        bucket_item_id: row.bucket_item_id,
+        key: row.target_key,
+        kind: row.kind,
+        status: row.status,
+        label: row.label,
+        note: row.note,
+        lat: latFinal,
+        lon: lonFinal,
+        distance_m: row.distance_m ?? null,
+        view_radius_m: row.view_radius_m,
+        auto_radius_m: row.auto_radius_m,
+        photo: row.photo_id
+          ? {
+              photo_id: row.photo_id,
+              r2_key: row.r2_key,
+              original_filename: row.original_filename,
+              taken_at: row.taken_at,
+            }
+          : null,
+        party: row.party_id
+          ? {
+              party_id: row.party_id,
+              name: row.party_name,
+            }
+          : null,
+        created_at: row.created_at,
+        completed_at: row.completed_at,
+        completed_source: row.completed_source,
+        updated_at: row.updated_at,
+      };
+    });
+
+    return res.json({
+      ok: true,
+      member_id: memberId,
+      items,
+      lat: useRadius ? lat : null,
+      lon: useRadius ? lon : null,
+      radiusMeters: useRadius ? radiusMeters : null,
+    });
+  } catch (err) {
+    console.error('trashtalk.bucketlist list error', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || 'bucketlist_fetch_failed',
+    });
+  }
+});
+/**
+ * POST /api/trashtalk/bucketlist/toggle
+ *
+ * Body:
+ *   {
+ *     key: "photo:<photo_id>" | "business:<party_id>" | "coord:40.97,-76.85",
+ *     kind: "photo" | "business" | "party" | "location",
+ *     label?: string,
+ *     lat?: number,
+ *     lon?: number,
+ *     photo_id?: uuid,
+ *     party_id?: uuid,
+ *     view_radius_m?: number,
+ *     auto_radius_m?: number
+ *   }
+ *
+ * Behavior:
+ *   - If an active/completed item exists for (member_id, key) -> archive it (remove from list)
+ *   - If an archived/nonexistent item -> create/activate one
+ */
+router.post('/bucketlist/toggle', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId = viewerId;
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    const body = req.body || {};
+    const key = String(body.key || body.target_key || '').trim();
+    const kind = String(body.kind || body.type || '').toLowerCase();
+
+    if (!key || !kind) {
+      return res.status(400).json({ ok: false, error: 'key_and_kind_required' });
+    }
+
+    const labelRaw = typeof body.label === 'string' ? body.label : '';
+    const label = labelRaw.trim().slice(0, 200);
+
+    const photoId = body.photo_id || null;
+    const partyId = body.party_id || null;
+
+    const lat =
+      body.lat != null ? parseFloat(body.lat) : null;
+    const lon =
+      body.lon != null ? parseFloat(body.lon) : null;
+
+    const viewRadiusM = clampNumber(
+      body.view_radius_m || body.viewRadiusM,
+      1,
+      500000,
+      50000
+    );
+    const autoRadiusM = clampNumber(
+      body.auto_radius_m || body.autoRadiusM,
+      1,
+      200000,
+      100
+    );
+
+    // Check for existing item
+    const { rows: existingRows } = await pool.query(
+      `
+        SELECT bucket_item_id, status
+          FROM tt_bucket_list_item
+         WHERE member_id = $1
+           AND target_key = $2
+         LIMIT 1
+      `,
+      [memberId, key]
+    );
+
+    // If exists and not archived -> archive (remove)
+    if (existingRows.length && existingRows[0].status !== 'archived') {
+      const { rows: updated } = await pool.query(
+        `
+          UPDATE tt_bucket_list_item
+             SET status = 'archived',
+                 updated_at = NOW()
+           WHERE bucket_item_id = $1
+             AND member_id = $2
+           RETURNING bucket_item_id, target_key, kind, status, label;
+        `,
+        [existingRows[0].bucket_item_id, memberId]
+      );
+
+      return res.json({
+        ok: true,
+        mode: 'removed',
+        item: updated[0],
+      });
+    }
+
+    // Otherwise, (re)create / re-activate
+    const { rows: upserted } = await pool.query(
+      `
+        INSERT INTO tt_bucket_list_item (
+          member_id,
+          target_key,
+          kind,
+          photo_id,
+          party_id,
+          lat,
+          lon,
+          view_radius_m,
+          auto_radius_m,
+          status,
+          label,
+          note,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1, $2, $3,
+          $4, $5,
+          $6, $7,
+          $8, $9,
+          'active',
+          $10,
+          $11,
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT (member_id, target_key)
+        DO UPDATE SET
+          kind = EXCLUDED.kind,
+          photo_id = EXCLUDED.photo_id,
+          party_id = EXCLUDED.party_id,
+          lat = EXCLUDED.lat,
+          lon = EXCLUDED.lon,
+          view_radius_m = EXCLUDED.view_radius_m,
+          auto_radius_m = EXCLUDED.auto_radius_m,
+          label = EXCLUDED.label,
+          note = EXCLUDED.note,
+          status = 'active',
+          updated_at = NOW()
+        RETURNING
+          bucket_item_id,
+          target_key,
+          kind,
+          status,
+          label,
+          lat,
+          lon,
+          view_radius_m,
+          auto_radius_m;
+      `,
+      [
+        memberId,
+        key,
+        kind,
+        photoId,
+        partyId,
+        lat,
+        lon,
+        viewRadiusM,
+        autoRadiusM,
+        label,
+        body.note || null,
+      ]
+    );
+
+    return res.json({
+      ok: true,
+      mode: existingRows.length ? 'reactivated' : 'added',
+      item: upserted[0],
+    });
+  } catch (err) {
+    console.error('trashtalk.bucketlist toggle error', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || 'bucketlist_toggle_failed',
+    });
+  }
+});
+/**
+ * PATCH /api/trashtalk/bucketlist/:bucketItemId
+ *
+ * Body:
+ *   { action: "complete" | "reopen" | "archive" | "delete" }
+ */
+router.patch('/bucketlist/:bucketItemId', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId = viewerId;
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    const bucketItemId = (req.params.bucketItemId || '').trim();
+    if (!UUID_PATTERN.test(bucketItemId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_bucket_item_id' });
+    }
+
+    const rawAction = String(req.body?.action || '').toLowerCase();
+    const action = ['complete', 'reopen', 'archive', 'delete'].includes(rawAction)
+      ? rawAction
+      : null;
+
+    if (!action) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'invalid_or_missing_action' });
+    }
+
+    if (action === 'delete') {
+      const { rowCount } = await pool.query(
+        `
+          DELETE FROM tt_bucket_list_item
+           WHERE bucket_item_id = $1
+             AND member_id = $2
+        `,
+        [bucketItemId, memberId]
+      );
+
+      if (!rowCount) {
+        return res
+          .status(404)
+          .json({ ok: false, error: 'bucket_item_not_found' });
+      }
+
+      return res.json({ ok: true, deleted: true });
+    }
+
+    let statusUpdateSql;
+    if (action === 'complete') {
+      statusUpdateSql = `
+        UPDATE tt_bucket_list_item
+           SET status = 'completed',
+               completed_at = NOW(),
+               completed_source = 'manual',
+               updated_at = NOW()
+         WHERE bucket_item_id = $1
+           AND member_id = $2
+         RETURNING *;
+      `;
+    } else if (action === 'reopen') {
+      statusUpdateSql = `
+        UPDATE tt_bucket_list_item
+           SET status = 'active',
+               completed_at = NULL,
+               completed_source = NULL,
+               updated_at = NOW()
+         WHERE bucket_item_id = $1
+           AND member_id = $2
+         RETURNING *;
+      `;
+    } else if (action === 'archive') {
+      statusUpdateSql = `
+        UPDATE tt_bucket_list_item
+           SET status = 'archived',
+               updated_at = NOW()
+         WHERE bucket_item_id = $1
+           AND member_id = $2
+         RETURNING *;
+      `;
+    }
+
+    const { rows } = await pool.query(statusUpdateSql, [bucketItemId, memberId]);
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'bucket_item_not_found' });
+    }
+
+    return res.json({ ok: true, item: rows[0] });
+  } catch (err) {
+    console.error('trashtalk.bucketlist update error', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || 'bucketlist_update_failed',
+    });
+  }
+});
+/**
+ * POST /api/trashtalk/bucketlist/scan
+ * Body: { lat, lon }
+ *
+ * Uses same logic as /location/pulse but does NOT update ff_quickhitter location.
+ */
+router.post('/bucketlist/scan', async (req, res) => {
+  try {
+    const { viewerId } = await getViewerContext(req, { requireAuth: true });
+    const memberId = viewerId;
+    if (!memberId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    const lat = parseFloat(req.body.lat);
+    const lon = parseFloat(req.body.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'invalid_coordinates' });
+    }
+
+    const autoCompleted = await autoCompleteBucketItemsForMember(
+      memberId,
+      lat,
+      lon
+    );
+
+    return res.json({ ok: true, autoCompleted });
+  } catch (err) {
+    console.error('trashtalk.bucketlist scan error', err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || 'bucketlist_scan_failed',
+    });
   }
 });
 
