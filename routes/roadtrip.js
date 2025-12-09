@@ -171,15 +171,57 @@ const ROADTRIP_LAYOUT_SIZES = new Set([
 const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DIGIT_ID_RE = /^\d+$/;
 
 let layoutTableEnsured = false;
 let liveTablesEnsured = false;
+let cachedObjectIdColumnType = null;
+
+function normalizeObjectIdColumnType(rawType) {
+  if (!rawType) return 'UUID';
+  const val = String(rawType).toLowerCase().trim();
+  if (val === 'int8' || val === 'bigint') return 'BIGINT';
+  if (val === 'int4' || val === 'integer') return 'INTEGER';
+  if (val.includes('uuid')) return 'UUID';
+  return 'UUID';
+}
+
+async function resolveRoadtripObjectIdColumnType() {
+  if (cachedObjectIdColumnType) return cachedObjectIdColumnType;
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'tt_party_roadtrip_object'
+        AND column_name = 'object_id'
+      LIMIT 1
+      `
+    );
+    if (rows[0]) {
+      const detected = normalizeObjectIdColumnType(
+        rows[0].udt_name || rows[0].data_type
+      );
+      cachedObjectIdColumnType = detected;
+      return detected;
+    }
+  } catch (err) {
+    console.warn(
+      '[roadtrip] unable to introspect object_id type, defaulting to UUID',
+      err.message
+    );
+  }
+  cachedObjectIdColumnType = 'UUID';
+  return cachedObjectIdColumnType;
+}
 
 async function ensureRoadtripLayoutTable() {
   if (layoutTableEnsured) return;
+  const objectIdType = await resolveRoadtripObjectIdColumnType();
   const ddl = `
     CREATE TABLE IF NOT EXISTS tt_party_roadtrip_object_layout (
-      object_id UUID PRIMARY KEY REFERENCES tt_party_roadtrip_object(object_id) ON DELETE CASCADE,
+      object_id ${objectIdType} PRIMARY KEY REFERENCES tt_party_roadtrip_object(object_id) ON DELETE CASCADE,
       roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
       display_order INTEGER DEFAULT 0,
       size_hint TEXT DEFAULT 'medium',
@@ -270,6 +312,16 @@ function normalizeDisplayOrder(value) {
 function isValidUuid(value) {
   if (!value) return false;
   return UUID_RE.test(String(value));
+}
+
+function isValidObjectId(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'number' && Number.isFinite(value)) return true;
+  const str = String(value).trim();
+  if (!str) return false;
+  if (UUID_RE.test(str)) return true;
+  if (DIGIT_ID_RE.test(str)) return true;
+  return false;
 }
 
 function coerceIsoTimestamp(value) {
@@ -475,7 +527,7 @@ function mapLayoutRow(row) {
 }
 
 async function upsertLayoutRow(roadtripId, objectId, patch = {}) {
-  if (!isValidUuid(objectId)) {
+  if (!isValidObjectId(objectId)) {
     throw new Error('invalid_object_id');
   }
   await ensureRoadtripLayoutTable();
@@ -1611,7 +1663,7 @@ router.patch('/:roadtripId/objects/:objectId/layout', async (req, res) => {
       error: 'roadtripId and objectId are required',
     });
   }
-  if (!isValidUuid(objectId)) {
+  if (!isValidObjectId(objectId)) {
     return res.status(400).json({
       ok: false,
       error: 'Invalid objectId',
@@ -1671,7 +1723,7 @@ router.post('/:roadtripId/layout', async (req, res) => {
       if (!entry) continue;
       const objectId =
         entry.object_id || entry.objectId || entry.id;
-      if (!isValidUuid(objectId)) continue;
+      if (!isValidObjectId(objectId)) continue;
       const layoutRow = await upsertLayoutRow(roadtripId, objectId, entry);
       if (layoutRow) {
         applied.push(layoutRow);
