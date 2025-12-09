@@ -115,5 +115,53 @@ router.get('/admin/visitors/map', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'admin_visitors_failed' });
   }
 });
+router.get('/visitors/map', requireAdmin, async (req, res) => {
+  try {
+    const limitRaw = req.query.limit;
+    const limit = Math.min(
+      2000,
+      Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : 500
+    );
+
+    const { rows } = await pool.query(
+      `
+        SELECT
+          visitor_id,
+          potential_member_id,
+          source,
+          first_seen_at,
+          last_seen_at,
+          last_lat,
+          last_lon,
+          last_location_at,
+          has_location,
+          hit_count,
+          device_key,
+          converted_member_id
+        FROM tt_visitor
+        WHERE source = 'local.s1c.live'
+        ORDER BY last_seen_at DESC
+        LIMIT $1;
+      `,
+      [limit]
+    );
+
+    return res.json({
+      ok: true,
+      visitors: rows,
+      meta: {
+        total: rows.length,
+        with_location: rows.filter(v => v.has_location).length,
+        without_location: rows.filter(v => !v.has_location).length,
+      },
+    });
+  } catch (err) {
+    console.error('[admin:visitors:map]', err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'admin_visitors_failed',
+    });
+  }
+});
 
 module.exports = router;
