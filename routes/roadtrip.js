@@ -245,18 +245,19 @@ async function ensureRoadtripLayoutTable() {
 async function ensureRoadtripLiveTables() {
   if (liveTablesEnsured) return;
   const ddl = `
-    CREATE TABLE IF NOT EXISTS tt_party_roadtrip_session (
-      session_id UUID PRIMARY KEY,
-      roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
-      host_member_id UUID NOT NULL,
-      started_at TIMESTAMPTZ DEFAULT NOW(),
-      ended_at TIMESTAMPTZ,
-      state TEXT DEFAULT 'live',
-      last_lat DOUBLE PRECISION,
-      last_lon DOUBLE PRECISION,
-      last_ping_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
+CREATE TABLE IF NOT EXISTS tt_party_roadtrip_session (
+  session_id UUID PRIMARY KEY,
+  roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
+  host_member_id TEXT NOT NULL REFERENCES ff_member(member_id),
+  started_at TIMESTAMPTZ DEFAULT NOW(),
+  ended_at TIMESTAMPTZ,
+  state TEXT DEFAULT 'live',
+  last_lat DOUBLE PRECISION,
+  last_lon DOUBLE PRECISION,
+  last_ping_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
     CREATE INDEX IF NOT EXISTS tt_party_roadtrip_session_live_idx
       ON tt_party_roadtrip_session(roadtrip_id, state)
       WHERE state = 'live';
