@@ -1,6 +1,7 @@
 // routes/roadtrip.js
 const express = require('express');
 const pool = require('../src/db/pool'); // adjust path if needed
+const { getCurrentIdentity } = require('../services/identity');
 
 const router = express.Router();
 
@@ -53,6 +54,29 @@ function distanceOfPlannedPath(plannedPath) {
   return Math.round(total);
 }
 
+async function resolveMemberId(req) {
+  const inline =
+    req.member_id ||
+    req.ffMemberId ||
+    (req.ffMember && req.ffMember.member_id) ||
+    req.headers?.['x-ff-member-id'];
+  if (inline) return String(inline);
+
+  const cookieMemberId =
+    req.cookies?.ff_member_id ||
+    req.cookies?.ff_member ||
+    null;
+  if (cookieMemberId) return String(cookieMemberId);
+
+  try {
+    const identity = await getCurrentIdentity(req, pool);
+    if (identity?.member_id) return String(identity.member_id);
+  } catch (err) {
+    console.warn('[roadtrip] identity lookup failed', err.message);
+  }
+  return null;
+}
+
 /**
  * POST /api/roadtrip
  * Create a new roadtrip tied to a Party.
@@ -86,19 +110,57 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // TODO: derive from your auth middleware
-  // Example if you set req.ffMemberId earlier:
-  const hostMemberId =
-    req.ffMemberId ||
-    (req.ffMember && req.ffMember.member_id) ||
-    null;
+  let actorMemberId = null;
+  try {
+    actorMemberId = await resolveMemberId(req);
+  } catch (err) {
+    console.error('[roadtrip] failed to resolve member', err);
+  }
 
-  if (!hostMemberId) {
+  if (!actorMemberId) {
     return res.status(401).json({
       ok: false,
       error: 'Not authenticated: host_member_id missing',
     });
   }
+
+  let partyRow = null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT party_id, host_member_id FROM tt_party WHERE party_id = $1 LIMIT 1`,
+      [party_id]
+    );
+    partyRow = rows[0] || null;
+  } catch (err) {
+    console.error('[roadtrip] party lookup failed', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to verify party host',
+    });
+  }
+
+  if (!partyRow) {
+    return res.status(404).json({
+      ok: false,
+      error: 'Party not found',
+    });
+  }
+
+  const normalizedPartyHostId = partyRow.host_member_id
+    ? String(partyRow.host_member_id)
+    : null;
+
+  if (
+    normalizedPartyHostId &&
+    normalizedPartyHostId !== String(actorMemberId)
+  ) {
+    return res.status(403).json({
+      ok: false,
+      error: 'Only the party host can create a roadtrip for this party',
+    });
+  }
+
+  const hostMemberId = normalizedPartyHostId || String(actorMemberId);
 
   // Normalize planned_path: keep only {lat, lon, seq}
   let normalizedPath = null;
