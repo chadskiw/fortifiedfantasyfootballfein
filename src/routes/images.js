@@ -76,6 +76,18 @@ const MIME_EXTENSION_MAP = new Map([
   ['video/3gpp', '3gp'],
   ['video/3gpp2', '3g2'],
   ['video/x-msvideo', 'avi'],
+  ['audio/mpeg', 'mp3'],
+  ['audio/mp3', 'mp3'],
+  ['audio/wav', 'wav'],
+  ['audio/x-wav', 'wav'],
+  ['audio/wave', 'wav'],
+  ['audio/ogg', 'ogg'],
+  ['audio/opus', 'opus'],
+  ['audio/flac', 'flac'],
+  ['audio/x-flac', 'flac'],
+  ['audio/aac', 'aac'],
+  ['audio/x-m4a', 'm4a'],
+  ['audio/mp4', 'm4a'],
 ]);
 
 function detectExtension(file) {
