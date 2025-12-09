@@ -218,27 +218,51 @@ async function resolveRoadtripObjectIdColumnType() {
 
 async function ensureRoadtripLayoutTable() {
   if (layoutTableEnsured) return;
-  const objectIdType = await resolveRoadtripObjectIdColumnType();
-  const ddl = `
-    CREATE TABLE IF NOT EXISTS tt_party_roadtrip_object_layout (
-      object_id ${objectIdType} PRIMARY KEY REFERENCES tt_party_roadtrip_object(object_id) ON DELETE CASCADE,
-      roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
-      display_order INTEGER DEFAULT 0,
-      size_hint TEXT DEFAULT 'medium',
-      sticker_label TEXT,
-      sticker_color TEXT,
-      meta JSONB DEFAULT '{}'::jsonb,
-      deleted BOOLEAN DEFAULT FALSE,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS tt_party_roadtrip_object_layout_rid_idx
-      ON tt_party_roadtrip_object_layout(roadtrip_id, display_order);
-  `;
-  try {
+
+  const attemptEnsure = async () => {
+    const objectIdType = await resolveRoadtripObjectIdColumnType();
+    const ddl = `
+      CREATE TABLE IF NOT EXISTS tt_party_roadtrip_object_layout (
+        object_id ${objectIdType} PRIMARY KEY REFERENCES tt_party_roadtrip_object(object_id) ON DELETE CASCADE,
+        roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
+        display_order INTEGER DEFAULT 0,
+        size_hint TEXT DEFAULT 'medium',
+        sticker_label TEXT,
+        sticker_color TEXT,
+        meta JSONB DEFAULT '{}'::jsonb,
+        deleted BOOLEAN DEFAULT FALSE,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS tt_party_roadtrip_object_layout_rid_idx
+        ON tt_party_roadtrip_object_layout(roadtrip_id, display_order);
+    `;
     await pool.query(ddl);
     layoutTableEnsured = true;
+  };
+
+  try {
+    await attemptEnsure();
   } catch (err) {
-    console.error('[roadtrip] failed to ensure layout table', err);
+    const isTypeMismatch =
+      err?.code === '42804' ||
+      /incompatible types/i.test(err?.detail || '') ||
+      /incompatible types/i.test(err?.message || '');
+
+    if (!isTypeMismatch) {
+      console.error('[roadtrip] failed to ensure layout table', err);
+      return;
+    }
+
+    console.warn(
+      '[roadtrip] layout table DDL failed due to object_id type mismatch, retrying with fresh introspection'
+    );
+    cachedObjectIdColumnType = null;
+
+    try {
+      await attemptEnsure();
+    } catch (retryErr) {
+      console.error('[roadtrip] failed to ensure layout table after retry', retryErr);
+    }
   }
 }
 
