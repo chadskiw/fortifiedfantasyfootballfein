@@ -68,5 +68,52 @@ router.get('/members/map', ensureAdmin, async (req, res) => {
     });
   }
 });
+router.get('/admin/visitors/map', async (req, res) => {
+  try {
+    // You probably already have an isAdmin guard here; reuse it:
+    // if (!req.isAdmin) return res.status(403).json({ ok: false, error: 'forbidden' });
+
+    const limit = Math.min(
+      2000,
+      Number(req.query.limit || 500)
+    );
+
+    const { rows } = await pool.query(
+      `
+        SELECT
+          visitor_id,
+          potential_member_id,
+          source,
+          first_seen_at,
+          last_seen_at,
+          last_lat,
+          last_lon,
+          last_location_at,
+          has_location,
+          hit_count,
+          device_key,
+          converted_member_id
+        FROM tt_visitor
+        WHERE source = 'local.s1c.live'
+        ORDER BY last_seen_at DESC
+        LIMIT $1;
+      `,
+      [limit]
+    );
+
+    return res.json({
+      ok: true,
+      visitors: rows,
+      meta: {
+        total: rows.length,
+        with_location: rows.filter((v) => v.has_location).length,
+        without_location: rows.filter((v) => !v.has_location).length,
+      },
+    });
+  } catch (err) {
+    console.error('[admin:visitors:map]', err);
+    return res.status(500).json({ ok: false, error: 'admin_visitors_failed' });
+  }
+});
 
 module.exports = router;

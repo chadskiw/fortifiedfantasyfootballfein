@@ -491,6 +491,59 @@ async function fetchPartyMembership(partyId, handle) {
   );
   return rows[0] || null;
 }
+const urlParams = new URLSearchParams(window.location.search || '');
+const viewerId = urlParams.get('viewerId') || null;
+const isPublicGuest = viewerId === 'PUBGHOST';
+
+function getVisitorKey() {
+  try {
+    const existing = localStorage.getItem('tt_visitor_key');
+    if (existing) return existing;
+    const key =
+      (window.crypto?.randomUUID && window.crypto.randomUUID()) ||
+      `vk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    localStorage.setItem('tt_visitor_key', key);
+    return key;
+  } catch {
+    return null;
+  }
+}
+
+async function pingVisitor(lat, lon) {
+  const payload = {
+    source: 'local.s1c.live',
+    visitor_key: getVisitorKey(),
+    lat: lat ?? null,
+    lon: lon ?? null,
+    lang: navigator.language || null,
+    tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || null),
+    screen: {
+      w: window.screen?.width || null,
+      h: window.screen?.height || null,
+      dpr: window.devicePixelRatio || 1,
+    },
+    platform: navigator.platform || null,
+  };
+
+  try {
+    const res = await fetch('/api/trashtalk/visitor/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data?.visitor_key) {
+      try {
+        localStorage.setItem('tt_visitor_key', data.visitor_key);
+      } catch {}
+    }
+    // If you ever want the potential_member_id on the client:
+    // window.__potentialMemberId = data?.potential_member_id || null;
+  } catch (err) {
+    console.warn('visitor ping failed', err);
+  }
+}
 
 async function requirePartyAccess(req, res, next) {
   try {
@@ -2527,5 +2580,144 @@ router.delete('/photo/:photoId', async (req, res) => {
     return res.status(500).json({ error: 'Failed to delete photo.' });
   }
 });
+router.post('/visitor/ping', jsonParser, async (req, res) => {
+  try {
+    const now = new Date();
+
+    const source =
+      String(req.body?.source || 'local.s1c.live').slice(0, 200);
+
+    const visitorKeyRaw = (req.body?.visitor_key || '').toString().trim() || null;
+
+    const lat = req.body?.lat != null ? Number(req.body.lat) : null;
+    const lon = req.body?.lon != null ? Number(req.body.lon) : null;
+    const hasCoords = Number.isFinite(lat) && Number.isFinite(lon);
+
+    const userAgent = req.get('user-agent') || null;
+
+    const deviceMeta = {
+      lang: (req.body?.lang || '').toString().slice(0, 32) || null,
+      tz: (req.body?.tz || '').toString().slice(0, 64) || null,
+      screen: req.body?.screen || null,
+      platform: (req.body?.platform || '').toString().slice(0, 64) || null,
+    };
+
+    // Prefer CF-Connecting-IP if you’re on Cloudflare
+    const ip =
+      (req.headers['cf-connecting-ip'] || req.ip || null)?.toString() || null;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      let row = null;
+      if (visitorKeyRaw) {
+        const { rows } = await client.query(
+          `
+            SELECT *
+              FROM tt_visitor
+             WHERE device_key = $1
+             LIMIT 1
+          `,
+          [visitorKeyRaw]
+        );
+        row = rows[0] || null;
+      }
+
+      const deviceKey = visitorKeyRaw || `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      if (!row) {
+        const { rows: inserted } = await client.query(
+          `
+            INSERT INTO tt_visitor (
+              potential_member_id,
+              source,
+              first_seen_at,
+              last_seen_at,
+              last_lat,
+              last_lon,
+              last_location_at,
+              hit_count,
+              last_ip,
+              device_key,
+              user_agent,
+              device_meta
+            )
+            VALUES (
+              DEFAULT,           -- potential_member_id
+              $1,                -- source
+              NOW(),
+              NOW(),
+              $2,                -- last_lat
+              $3,                -- last_lon
+              $4,                -- last_location_at
+              1,
+              $5,                -- last_ip
+              $6,                -- device_key
+              $7,                -- user_agent
+              $8                 -- device_meta
+            )
+            RETURNING visitor_id, potential_member_id, device_key;
+          `,
+          [
+            source,
+            hasCoords ? lat : null,
+            hasCoords ? lon : null,
+            hasCoords ? now : null,
+            ip,
+            deviceKey,
+            userAgent,
+            deviceMeta,
+          ]
+        );
+        row = inserted[0];
+      } else {
+        const { rows: updated } = await client.query(
+          `
+            UPDATE tt_visitor
+               SET last_seen_at = NOW(),
+                   hit_count = hit_count + 1,
+                   last_ip = COALESCE($1, last_ip),
+                   user_agent = COALESCE($2, user_agent),
+                   device_meta = COALESCE($3, device_meta),
+                   last_lat = CASE WHEN $4 IS NOT NULL THEN $4 ELSE last_lat END,
+                   last_lon = CASE WHEN $5 IS NOT NULL THEN $5 ELSE last_lon END,
+                   last_location_at = CASE WHEN $6 IS NOT NULL THEN $6 ELSE last_location_at END,
+                   updated_at = NOW()
+             WHERE visitor_id = $7
+             RETURNING visitor_id, potential_member_id, device_key;
+          `,
+          [
+            ip,
+            userAgent,
+            deviceMeta,
+            hasCoords ? lat : null,
+            hasCoords ? lon : null,
+            hasCoords ? now : null,
+            row.visitor_id,
+          ]
+        );
+        row = updated[0];
+      }
+
+      await client.query('COMMIT');
+
+      return res.json({
+        ok: true,
+        visitor_key: row.device_key,
+        potential_member_id: row.potential_member_id,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[trashtalk:visitor:ping]', err);
+    return res.status(500).json({ ok: false, error: 'visitor_ping_failed' });
+  }
+});
+
 // in trashtalk.js (or wherever party routes live)
 module.exports = router;
