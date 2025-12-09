@@ -177,6 +177,7 @@ let layoutTableEnsured = false;
 let liveTablesEnsured = false;
 let cachedObjectIdColumnType = null;
 let mediaColumnsEnsured = false;
+let objectKindConstraintsEnsured = false;
 
 function normalizeObjectIdColumnType(rawType) {
   if (!rawType) return 'UUID';
@@ -322,6 +323,93 @@ CREATE TABLE IF NOT EXISTS tt_party_roadtrip_session (
   } catch (err) {
     console.error('[roadtrip] failed to ensure live tables', err);
   }
+}
+
+function quoteIdent(name) {
+  if (!name) return '""';
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+function quoteLiteral(value) {
+  if (value === null || value === undefined) return 'NULL';
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+async function ensureRoadtripObjectKindConstraints(force = false) {
+  if (objectKindConstraintsEnsured && !force) return;
+  const orderedKinds = Array.from(ROADTRIP_OBJECT_KINDS);
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT data_type, udt_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'tt_party_roadtrip_object'
+          AND column_name = 'kind'
+        LIMIT 1
+      `
+    );
+    const column = rows[0];
+    if (column && column.data_type === 'USER-DEFINED' && column.udt_name) {
+      const enumName = quoteIdent(column.udt_name);
+      for (const kind of orderedKinds) {
+        const literal = quoteLiteral(kind);
+        const sql = `
+          DO $$
+          BEGIN
+            ALTER TYPE ${enumName}
+              ADD VALUE IF NOT EXISTS ${literal};
+          EXCEPTION
+            WHEN duplicate_object THEN NULL;
+          END $$;
+        `;
+        await pool.query(sql);
+      }
+    }
+  } catch (err) {
+    console.warn('[roadtrip] unable to extend roadtrip object kind enum', err.message);
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT conname, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+        WHERE conrelid = 'tt_party_roadtrip_object'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) ILIKE '%kind%'
+      `
+    );
+    for (const row of rows) {
+      const definition = String(row.definition || '').toLowerCase();
+      const missingKind = orderedKinds.some(
+        (kind) => !definition.includes(`'${kind.toLowerCase()}'`)
+      );
+      if (!missingKind) continue;
+      const constraintName = row.conname
+        ? quoteIdent(row.conname)
+        : quoteIdent('tt_party_roadtrip_object_kind_check');
+      const allowedList = orderedKinds
+        .map((kind) => quoteLiteral(kind))
+        .join(', ');
+      await pool.query(
+        `ALTER TABLE tt_party_roadtrip_object DROP CONSTRAINT IF EXISTS ${constraintName}`
+      );
+      await pool.query(
+        `
+          ALTER TABLE tt_party_roadtrip_object
+          ADD CONSTRAINT ${constraintName}
+            CHECK (kind = ANY(ARRAY[${allowedList}]::text[]))
+        `
+      );
+      break;
+    }
+  } catch (err) {
+    console.warn('[roadtrip] unable to refresh roadtrip kind constraint', err.message);
+  }
+
+  objectKindConstraintsEnsured = true;
 }
 
 function coerceLayoutSize(input) {
@@ -1495,9 +1583,9 @@ router.post('/:roadtripId/objects', async (req, res) => {
       ? Math.round(mediaBytesNumber)
       : null;
 
-  try {
-    const insert = await pool.query(
-      `
+  await ensureRoadtripObjectKindConstraints();
+
+  const insertSql = `
       INSERT INTO tt_party_roadtrip_object (
         roadtrip_id, member_id, kind,
         lat, lon, at_time,
@@ -1507,27 +1595,44 @@ router.post('/:roadtripId/objects', async (req, res) => {
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING *;
-      `,
-      [
-        roadtripId,
-        memberId,
-        kind,
-        lat ?? null,
-        lon ?? null,
-        at_time || null,
-        title || null,
-        body || null,
-        photo_id || null,
-        video_r2_key || null,
-        media_kind,
-        mediaUrl,
-        mediaMime,
-        mediaBytes,
-      ]
-    );
+  `;
 
+  const insertValues = [
+    roadtripId,
+    memberId,
+    kind,
+    lat ?? null,
+    lon ?? null,
+    at_time || null,
+    title || null,
+    body || null,
+    photo_id || null,
+    video_r2_key || null,
+    media_kind,
+    mediaUrl,
+    mediaMime,
+    mediaBytes,
+  ];
+
+  try {
+    const insert = await pool.query(insertSql, insertValues);
     res.status(201).json({ ok: true, object: insert.rows[0] });
   } catch (err) {
+    const needsRetry =
+      err?.code === '22P02' ||
+      err?.code === '23514';
+    if (needsRetry) {
+      console.warn('[roadtrip] object insert failed due to kind validation, retrying', err.message);
+      objectKindConstraintsEnsured = false;
+      try {
+        await ensureRoadtripObjectKindConstraints(true);
+        const retry = await pool.query(insertSql, insertValues);
+        return res.status(201).json({ ok: true, object: retry.rows[0] });
+      } catch (retryErr) {
+        console.error('[roadtrip] failed to insert object after retry', retryErr);
+        return res.status(500).json({ ok: false, error: 'Failed to insert object' });
+      }
+    }
     console.error('[roadtrip] failed to insert object', err);
     res.status(500).json({ ok: false, error: 'Failed to insert object' });
   }
