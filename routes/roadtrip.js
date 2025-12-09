@@ -54,6 +54,100 @@ function distanceOfPlannedPath(plannedPath) {
   return Math.round(total);
 }
 
+function normalizePlannedPath(plannedPath) {
+  if (!Array.isArray(plannedPath) || plannedPath.length === 0) {
+    return null;
+  }
+
+  const normalized = plannedPath
+    .map((pt, idx) => {
+      if (!pt) return null;
+      const lat = Number(pt.lat ?? pt.latitude);
+      const lon = Number(pt.lon ?? pt.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      const seq =
+        typeof pt.seq === 'number'
+          ? pt.seq
+          : typeof pt.order_index === 'number'
+          ? pt.order_index
+          : idx + 1;
+      return { lat, lon, seq };
+    })
+    .filter(Boolean);
+
+  return normalized.length ? normalized : null;
+}
+
+async function ensureRoadtripHost(req, res, roadtripId) {
+  let actorMemberId = null;
+  try {
+    actorMemberId = await resolveMemberId(req);
+  } catch (err) {
+    console.error('[roadtrip] host resolution failed', err);
+  }
+
+  if (!actorMemberId) {
+    res.status(401).json({
+      ok: false,
+      error: 'Not authenticated: host_member_id missing',
+    });
+    return null;
+  }
+
+  let roadtripRow = null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT roadtrip_id, party_id, host_member_id FROM tt_party_roadtrip WHERE roadtrip_id = $1 LIMIT 1`,
+      [roadtripId]
+    );
+    roadtripRow = rows[0] || null;
+  } catch (err) {
+    console.error('[roadtrip] roadtrip lookup failed', err);
+    res.status(500).json({
+      ok: false,
+      error: 'Unable to load roadtrip',
+    });
+    return null;
+  }
+
+  if (!roadtripRow) {
+    res.status(404).json({
+      ok: false,
+      error: 'Roadtrip not found',
+    });
+    return null;
+  }
+
+  const normalizedHostId = roadtripRow.host_member_id
+    ? String(roadtripRow.host_member_id)
+    : null;
+
+  if (
+    normalizedHostId &&
+    normalizedHostId !== String(actorMemberId)
+  ) {
+    res.status(403).json({
+      ok: false,
+      error: 'Only the party host can modify this roadtrip',
+    });
+    return null;
+  }
+
+  return {
+    actorMemberId: String(actorMemberId),
+    roadtrip: roadtripRow,
+  };
+}
+
+const ROADTRIP_OBJECT_KINDS = new Set([
+  'planned_hype',
+  'live_drop',
+  'recap_note',
+]);
+
+const hasOwn = (obj, key) =>
+  Object.prototype.hasOwnProperty.call(obj || {}, key);
+
 async function resolveMemberId(req) {
   const inline =
     req.member_id ||
@@ -163,23 +257,7 @@ router.post('/', async (req, res) => {
   const hostMemberId = normalizedPartyHostId || String(actorMemberId);
 
   // Normalize planned_path: keep only {lat, lon, seq}
-  let normalizedPath = null;
-  if (Array.isArray(planned_path) && planned_path.length) {
-    normalizedPath = planned_path
-      .map((pt, idx) => {
-        const lat = Number(pt.lat ?? pt.latitude);
-        const lon = Number(pt.lon ?? pt.longitude);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-        const seq =
-          typeof pt.seq === 'number'
-            ? pt.seq
-            : typeof pt.order_index === 'number'
-            ? pt.order_index
-            : idx + 1;
-        return { lat, lon, seq };
-      })
-      .filter(Boolean);
-  }
+  const normalizedPath = normalizePlannedPath(planned_path);
 
   const plannedDistanceM = normalizedPath
     ? distanceOfPlannedPath(normalizedPath)
@@ -348,6 +426,341 @@ router.get('/', async (req, res) => {
       .status(500)
       .json({ ok: false, error: 'Internal server error' });
   }
+});
+
+router.put('/:roadtripId/plan', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const payload = req.body || {};
+  const fields = [];
+  const values = [];
+  let paramIndex = 1;
+
+  if (typeof payload.name === 'string' && payload.name.trim()) {
+    fields.push(`name = $${paramIndex++}`);
+    values.push(payload.name.trim());
+  }
+
+  if (hasOwn(payload, 'description')) {
+    fields.push(`description = $${paramIndex++}`);
+    values.push(
+      typeof payload.description === 'string' && payload.description.trim()
+        ? payload.description.trim()
+        : null
+    );
+  }
+
+  if (hasOwn(payload, 'starts_at')) {
+    fields.push(`starts_at = $${paramIndex++}`);
+    values.push(payload.starts_at || null);
+  }
+
+  if (hasOwn(payload, 'ends_at')) {
+    fields.push(`ends_at = $${paramIndex++}`);
+    values.push(payload.ends_at || null);
+  }
+
+  if (hasOwn(payload, 'state')) {
+    const normalizedState =
+      typeof payload.state === 'string' && payload.state.trim()
+        ? payload.state.trim().toLowerCase()
+        : null;
+    if (normalizedState) {
+      fields.push(`state = $${paramIndex++}`);
+      values.push(normalizedState);
+    }
+  }
+
+  if (hasOwn(payload, 'planned_path')) {
+    const normalizedPath = normalizePlannedPath(payload.planned_path);
+    const plannedDistanceM = normalizedPath
+      ? distanceOfPlannedPath(normalizedPath)
+      : null;
+    fields.push(`planned_path = $${paramIndex++}`);
+    values.push(normalizedPath ? JSON.stringify(normalizedPath) : null);
+    fields.push(`planned_distance_m = $${paramIndex++}`);
+    values.push(plannedDistanceM);
+  }
+
+  if (!fields.length) {
+    return res.status(400).json({
+      ok: false,
+      error: 'No updates provided for roadtrip plan',
+    });
+  }
+
+  const query = `
+    UPDATE tt_party_roadtrip
+    SET ${fields.join(', ')}
+    WHERE roadtrip_id = $${paramIndex}
+    RETURNING *
+  `;
+  values.push(roadtripId);
+
+  try {
+    const { rows } = await pool.query(query, values);
+    return res.json({
+      ok: true,
+      roadtrip: rows[0],
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to update plan', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to update roadtrip plan',
+    });
+  }
+});
+
+router.post('/:roadtripId/objects', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const {
+    kind,
+    title,
+    body,
+    lat,
+    lon,
+    at_time,
+    media_url,
+    photo_url,
+    image_url,
+  } = req.body || {};
+
+  const kindSlug =
+    typeof kind === 'string' && kind.trim()
+      ? kind.trim().toLowerCase()
+      : 'planned_hype';
+  const normalizedKind = ROADTRIP_OBJECT_KINDS.has(kindSlug)
+    ? kindSlug
+    : 'planned_hype';
+
+  const latNumber =
+    lat === undefined || lat === null || lat === ''
+      ? null
+      : Number(lat);
+  if (latNumber !== null && !Number.isFinite(latNumber)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'lat must be a valid number',
+    });
+  }
+
+  const lonNumber =
+    lon === undefined || lon === null || lon === ''
+      ? null
+      : Number(lon);
+  if (lonNumber !== null && !Number.isFinite(lonNumber)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'lon must be a valid number',
+    });
+  }
+
+  let atTimeIso = null;
+  if (at_time) {
+    const parsed = new Date(at_time);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid at_time value',
+      });
+    }
+    atTimeIso = parsed.toISOString();
+  }
+
+  const resolvedPhotoUrl =
+    (typeof photo_url === 'string' && photo_url.trim()) ||
+    (typeof media_url === 'string' && media_url.trim()) ||
+    (typeof image_url === 'string' && image_url.trim()) ||
+    null;
+
+  if (
+    !resolvedPhotoUrl &&
+    (title === undefined || title === null || title === '') &&
+    (body === undefined || body === null || body === '')
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Provide at least a title, body, or media_url',
+    });
+  }
+
+  try {
+    const insertResult = await pool.query(
+      `
+      INSERT INTO tt_party_roadtrip_object (
+        object_id,
+        roadtrip_id,
+        member_id,
+        kind,
+        title,
+        body,
+        photo_url,
+        lat,
+        lon,
+        at_time
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9
+      )
+      RETURNING *
+      `,
+      [
+        roadtripId,
+        hostContext.actorMemberId,
+        normalizedKind,
+        title || null,
+        body || null,
+        resolvedPhotoUrl,
+        latNumber,
+        lonNumber,
+        atTimeIso,
+      ]
+    );
+
+    return res.status(201).json({
+      ok: true,
+      object: insertResult.rows[0],
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to insert object', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to record hype drop',
+    });
+  }
+});
+
+router.delete('/:roadtripId/objects/:objectId', async (req, res) => {
+  const { roadtripId, objectId } = req.params || {};
+  if (!roadtripId || !objectId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId and objectId params are required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  try {
+    const result = await pool.query(
+      `DELETE FROM tt_party_roadtrip_object WHERE roadtrip_id = $1 AND object_id = $2`,
+      [roadtripId, objectId]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Roadtrip object not found',
+      });
+    }
+
+    return res.json({
+      ok: true,
+      deleted: result.rowCount,
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to delete object', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to delete hype drop',
+    });
+  }
+});
+
+router.delete('/:roadtripId/objects', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const resetPlan =
+    req.query?.reset_plan === '1' ||
+    req.query?.reset_plan === 'true';
+
+  let roadtripState = hostContext.roadtrip;
+
+  let deleted = 0;
+  try {
+    const { rowCount } = await pool.query(
+      `DELETE FROM tt_party_roadtrip_object WHERE roadtrip_id = $1`,
+      [roadtripId]
+    );
+    deleted = rowCount;
+  } catch (err) {
+    console.error('[roadtrip] failed to clear objects', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to clear hype drops',
+    });
+  }
+
+  if (resetPlan) {
+    try {
+      const resetResult = await pool.query(
+        `
+        UPDATE tt_party_roadtrip
+        SET planned_path = NULL,
+            planned_distance_m = NULL,
+            starts_at = NULL,
+            ends_at = NULL
+        WHERE roadtrip_id = $1
+        RETURNING *
+        `,
+        [roadtripId]
+      );
+      if (resetResult.rows[0]) {
+        roadtripState = resetResult.rows[0];
+      }
+    } catch (err) {
+      console.error('[roadtrip] failed to reset plan during cleanup', err);
+      return res.status(500).json({
+        ok: false,
+        error: 'Drops cleared but route reset failed',
+      });
+    }
+  }
+
+  return res.json({
+    ok: true,
+    deleted,
+    roadtrip: roadtripState,
+  });
 });
 
 module.exports = router;
