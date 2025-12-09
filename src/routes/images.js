@@ -17,8 +17,35 @@ const R2_ACCESS_KEY_ID    = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY= process.env.R2_SECRET_ACCESS_KEY;
 const R2_BUCKET           = process.env.R2_BUCKET || 'ff-media';
 const R2_REGION           = process.env.R2_REGION || 'auto';
+function normalizePublicBase(raw) {
+  const fallback = 'https://img.fortifiedfantasy.com';
+  let base = String(raw || fallback).trim();
+  if (!base) base = fallback;
+  if (base.startsWith('//')) {
+    base = `https:${base}`;
+  } else if (!/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+  }
+  return base.replace(/\/+$/, '');
+}
+
 // public CDN/base for viewing files (e.g. https://img.fortifiedfantasy.com or R2 custom domain)
-const PUBLIC_BASE         = (process.env.R2_PUBLIC_BASE || 'https://img.fortifiedfantasy.com').replace(/\/+$/,'');
+const PUBLIC_BASE = normalizePublicBase(process.env.R2_PUBLIC_BASE);
+
+function buildPublicUrl(keyOrPath) {
+  if (!keyOrPath) return null; // IMPORTANT: don't fall back to "/"
+  const trimmed = String(keyOrPath).replace(/^\/+/, ''); // strip leading slashes
+  return `${PUBLIC_BASE}/${trimmed}`;
+}
+
+// after uploading to R2:
+const objectKey = r2Key; // e.g. "roadtrip/abc123/myfile.mp4"
+
+res.json({
+  ok: true,
+  r2_key: objectKey,
+  public_url: buildPublicUrl(objectKey), // e.g. "https://img.fortifiedfantasy.com/roadtrip/abc123/myfile.mp4"
+});
 
 // If you use R2 "S3 API" endpoint with account id:
 const R2_ENDPOINT = process.env.R2_ENDPOINT
