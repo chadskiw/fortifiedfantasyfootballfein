@@ -1412,143 +1412,55 @@ router.post('/:roadtripId/objects', async (req, res) => {
     lat,
     lon,
     at_time,
-    photo_id,      // UUID from tt_photo (for images)
-    video_r2_key,  // R2 key for short video
-    live_session_id,
+    photo_id,      // UUID from tt_photo
+    video_r2_key,  // R2 key (short video)
   } = req.body || {};
 
   if (!roadtripId || !kind) {
-    return res.status(400).json({
-      ok: false,
-      error: 'roadtripId (in path) and kind (in body) are required',
-    });
+    return res.status(400).json({ ok: false, error: 'Missing roadtripId or kind' });
   }
 
-  // Optional: derive member_id from your auth middleware
-  const memberId =
-    req.ffMemberId ||
-    (req.ffMember && req.ffMember.member_id) ||
-    null;
+  const memberId = req.ffMemberId || (req.ffMember && req.ffMember.member_id) || null;
 
-  let latNumber =
-    lat === undefined || lat === null || lat === ''
-      ? null
-      : Number(lat);
-  if (latNumber !== null && !Number.isFinite(latNumber)) {
-    return res.status(400).json({
-      ok: false,
-      error: 'lat must be numeric',
-    });
-  }
-
-  let lonNumber =
-    lon === undefined || lon === null || lon === ''
-      ? null
-      : Number(lon);
-  if (lonNumber !== null && !Number.isFinite(lonNumber)) {
-    return res.status(400).json({
-      ok: false,
-      error: 'lon must be numeric',
-    });
-  }
-
-  let atTimeIso = null;
-  if (at_time) {
-    const parsed = new Date(at_time);
-    if (Number.isNaN(parsed.getTime())) {
-      return res.status(400).json({
-        ok: false,
-        error: 'Invalid at_time value',
-      });
-    }
-    atTimeIso = parsed.toISOString();
-  }
-
-  const liveSessionId =
-    typeof live_session_id === 'string' ? live_session_id.trim() : null;
-
-  if (
-    liveSessionId &&
-    isValidUuid(liveSessionId) &&
-    (!Number.isFinite(latNumber) ||
-      !Number.isFinite(lonNumber) ||
-      !atTimeIso)
-  ) {
-    try {
-      await ensureRoadtripLiveTables();
-      const { rows } = await pool.query(
-        `
-        SELECT session_id, last_lat, last_lon, last_ping_at
-        FROM tt_party_roadtrip_session
-        WHERE session_id = $1
-          AND roadtrip_id = $2
-        LIMIT 1
-        `,
-        [liveSessionId, roadtripId]
-      );
-      const liveSession = rows[0] || null;
-      if (liveSession) {
-        const sessionLat = Number(liveSession.last_lat);
-        const sessionLon = Number(liveSession.last_lon);
-        if (!Number.isFinite(latNumber) && Number.isFinite(sessionLat)) {
-          latNumber = sessionLat;
-        }
-        if (!Number.isFinite(lonNumber) && Number.isFinite(sessionLon)) {
-          lonNumber = sessionLon;
-        }
-        if (!atTimeIso && liveSession.last_ping_at) {
-          atTimeIso = coerceIsoTimestamp(liveSession.last_ping_at);
-        }
-      }
-    } catch (err) {
-      console.warn('[roadtrip] unable to hydrate drop from live session', err.message);
-    }
-  }
+  let media_kind = null;
+  if (photo_id && video_r2_key) media_kind = 'mixed';
+  else if (photo_id) media_kind = 'photo';
+  else if (video_r2_key) media_kind = 'video';
 
   try {
-    const result = await pool.query(
+    const insert = await pool.query(
       `
       INSERT INTO tt_party_roadtrip_object (
-        roadtrip_id,
-        member_id,
-        kind,
-        lat,
-        lon,
-        at_time,
-        title,
-        body,
-        photo_id,
-        video_r2_key
+        roadtrip_id, member_id, kind,
+        lat, lon, at_time,
+        title, body,
+        photo_id, video_r2_key, media_kind
       )
-      VALUES (
-        $1, $2, $3,
-        $4, $5, $6,
-        $7, $8,
-        $9, $10
-      )
-      RETURNING *
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      RETURNING *;
       `,
       [
         roadtripId,
         memberId,
         kind,
-        latNumber,
-        lonNumber,
-        atTimeIso,
+        lat ?? null,
+        lon ?? null,
+        at_time || null,
         title || null,
         body || null,
         photo_id || null,
         video_r2_key || null,
+        media_kind,
       ]
     );
 
-    const created = result.rows[0];
-    res.status(201).json({ ok: true, object: created });
+    res.status(201).json({ ok: true, object: insert.rows[0] });
   } catch (err) {
     console.error('[roadtrip] failed to insert object', err);
     res.status(500).json({ ok: false, error: 'Failed to insert object' });
   }
 });
+
 
 
 router.delete('/:roadtripId/objects/:objectId', async (req, res) => {
