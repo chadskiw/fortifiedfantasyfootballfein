@@ -1,22 +1,213 @@
 // routes/roadtrip.js
 const express = require('express');
-const pool = require('../src/db/pool'); // adjust path if your pool is elsewhere
+const pool = require('../src/db/pool'); // adjust path if needed
 
 const router = express.Router();
 
 /**
- * GET /road
- * Usage: s1c.live/road?trip=TripName
+ * Helper: slugify trip name -> trip_vanity
+ */
+function slugifyTripName(name) {
+  if (!name) return null;
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+/**
+ * Helper: compute distance of planned_path (simple haversine)
+ * plannedPath = [{lat, lon}, ...]
+ */
+function distanceOfPlannedPath(plannedPath) {
+  if (!Array.isArray(plannedPath) || plannedPath.length < 2) return 0;
+
+  const R = 6371e3; // meters
+  const toRad = (deg) => (deg * Math.PI) / 180;
+
+  let total = 0;
+  for (let i = 1; i < plannedPath.length; i++) {
+    const a = plannedPath[i - 1];
+    const b = plannedPath[i];
+    if (
+      typeof a.lat !== 'number' ||
+      typeof a.lon !== 'number' ||
+      typeof b.lat !== 'number' ||
+      typeof b.lon !== 'number'
+    ) {
+      continue;
+    }
+    const lat1 = toRad(a.lat);
+    const lat2 = toRad(b.lat);
+    const dLat = lat2 - lat1;
+    const dLon = toRad(b.lon - a.lon);
+    const sinDLat = Math.sin(dLat / 2);
+    const sinDLon = Math.sin(dLon / 2);
+    const h =
+      sinDLat * sinDLat +
+      Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon;
+    const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    total += R * c;
+  }
+  return Math.round(total);
+}
+
+/**
+ * POST /api/roadtrip
+ * Create a new roadtrip tied to a Party.
  *
- * Looks up a roadtrip by:
- *   - trip_vanity (preferred), or
- *   - name (fallback, case-insensitive)
+ * Body:
+ * {
+ *   party_id: UUID,
+ *   name: string,
+ *   description?: string,
+ *   trip_vanity?: string,
+ *   starts_at?: ISO string,
+ *   ends_at?: ISO string,
+ *   planned_path?: [{lat, lon, seq?}, ...]
+ * }
+ */
+router.post('/', async (req, res) => {
+  const {
+    party_id,
+    name,
+    description,
+    trip_vanity,
+    starts_at,
+    ends_at,
+    planned_path,
+  } = req.body || {};
+
+  if (!party_id || !name) {
+    return res.status(400).json({
+      ok: false,
+      error: 'party_id and name are required',
+    });
+  }
+
+  // TODO: derive from your auth middleware
+  // Example if you set req.ffMemberId earlier:
+  const hostMemberId =
+    req.ffMemberId ||
+    (req.ffMember && req.ffMember.member_id) ||
+    null;
+
+  if (!hostMemberId) {
+    return res.status(401).json({
+      ok: false,
+      error: 'Not authenticated: host_member_id missing',
+    });
+  }
+
+  // Normalize planned_path: keep only {lat, lon, seq}
+  let normalizedPath = null;
+  if (Array.isArray(planned_path) && planned_path.length) {
+    normalizedPath = planned_path
+      .map((pt, idx) => {
+        const lat = Number(pt.lat ?? pt.latitude);
+        const lon = Number(pt.lon ?? pt.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        const seq =
+          typeof pt.seq === 'number'
+            ? pt.seq
+            : typeof pt.order_index === 'number'
+            ? pt.order_index
+            : idx + 1;
+        return { lat, lon, seq };
+      })
+      .filter(Boolean);
+  }
+
+  const plannedDistanceM = normalizedPath
+    ? distanceOfPlannedPath(normalizedPath)
+    : null;
+
+  // Vanity slug
+  let vanity = (trip_vanity || '').trim();
+  if (!vanity) {
+    vanity = slugifyTripName(name);
+  }
+
+  try {
+    const insertResult = await pool.query(
+      `
+      INSERT INTO tt_party_roadtrip (
+        roadtrip_id,
+        party_id,
+        host_member_id,
+        name,
+        description,
+        trip_vanity,
+        state,
+        planned_path,
+        planned_distance_m,
+        starts_at,
+        ends_at
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        'planning',
+        $6,
+        $7,
+        $8,
+        $9
+      )
+      RETURNING *
+      `,
+      [
+        party_id,
+        hostMemberId,
+        name,
+        description || null,
+        vanity || null,
+        normalizedPath ? JSON.stringify(normalizedPath) : null,
+        plannedDistanceM,
+        starts_at || null,
+        ends_at || null,
+      ]
+    );
+
+    const roadtrip = insertResult.rows[0];
+
+    return res.status(201).json({
+      ok: true,
+      roadtrip,
+    });
+  } catch (err) {
+    console.error('Error creating roadtrip:', err);
+
+    // Handle unique violation on trip_vanity nicely
+    if (err.code === '23505' && err.constraint && err.constraint.includes('trip_vanity')) {
+      return res.status(409).json({
+        ok: false,
+        error: 'That trip slug is already in use. Try a different trip_vanity.',
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to create roadtrip',
+    });
+  }
+});
+
+/**
+ * GET /api/roadtrip?trip=TripName
+ * Look up a roadtrip by vanity or name, plus objects + playlist
  */
 router.get('/', async (req, res) => {
-  const trip = req.query.trip;
+  const trip = (req.query.trip || '').trim();
 
   if (!trip) {
-    return res.status(400).json({ ok: false, error: 'Missing trip parameter' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'Missing trip parameter' });
   }
 
   try {
@@ -39,12 +230,13 @@ router.get('/', async (req, res) => {
     );
 
     if (tripResult.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: 'Roadtrip not found' });
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Roadtrip not found' });
     }
 
     const roadtrip = tripResult.rows[0];
 
-    // Fetch attached objects (hype / live drops / recap notes, etc.)
     const objectsPromise = pool.query(
       `
       SELECT
@@ -59,7 +251,6 @@ router.get('/', async (req, res) => {
       [roadtrip.roadtrip_id]
     );
 
-    // Fetch playlist(s) + tracks, if any
     const playlistPromise = pool.query(
       `
       SELECT
@@ -80,42 +271,20 @@ router.get('/', async (req, res) => {
 
     const [objectsResult, playlistResult] = await Promise.all([
       objectsPromise,
-      playlistPromise
+      playlistPromise,
     ]);
 
-    const payload = {
+    return res.json({
       ok: true,
       roadtrip,
       objects: objectsResult.rows,
-      playlist: playlistResult.rows
-    };
-
-    const wantsJson =
-      (req.headers.accept && req.headers.accept.includes('application/json')) ||
-      req.query.format === 'json';
-
-    if (wantsJson) {
-      return res.json(payload);
-    }
-
-    // If you don’t use server-side views, you can:
-    // - send HTML here, OR
-    // - just always return JSON and let Cloudflare front-end consume it.
-    //
-    // For now, try to render a view called "roadtrip" if you have it:
-    try {
-      return res.render('roadtrip', {
-        trip: payload.roadtrip,
-        objects: payload.objects,
-        playlist: payload.playlist
-      });
-    } catch (e) {
-      // Fallback: JSON if no view exists
-      return res.json(payload);
-    }
+      playlist: playlistResult.rows,
+    });
   } catch (err) {
-    console.error('Error in GET /road:', err);
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
+    console.error('Error in GET /api/roadtrip:', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'Internal server error' });
   }
 });
 
