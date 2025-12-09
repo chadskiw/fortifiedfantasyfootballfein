@@ -115,7 +115,7 @@ router.get('/admin/visitors/map', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'admin_visitors_failed' });
   }
 });
-router.get('/visitors/map', requireAdmin, async (req, res) => {
+router.get('/visitors/map', ensureAdmin, async (req, res) => {
   try {
     const limitRaw = req.query.limit;
     const limit = Math.min(
