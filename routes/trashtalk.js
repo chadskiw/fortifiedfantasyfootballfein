@@ -491,60 +491,6 @@ async function fetchPartyMembership(partyId, handle) {
   );
   return rows[0] || null;
 }
-const urlParams = new URLSearchParams(window.location.search || '');
-const viewerId = urlParams.get('viewerId') || null;
-const isPublicGuest = viewerId === 'PUBGHOST';
-
-function getVisitorKey() {
-  try {
-    const existing = localStorage.getItem('tt_visitor_key');
-    if (existing) return existing;
-    const key =
-      (window.crypto?.randomUUID && window.crypto.randomUUID()) ||
-      `vk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    localStorage.setItem('tt_visitor_key', key);
-    return key;
-  } catch {
-    return null;
-  }
-}
-
-async function pingVisitor(lat, lon) {
-  const payload = {
-    source: 'local.s1c.live',
-    visitor_key: getVisitorKey(),
-    lat: lat ?? null,
-    lon: lon ?? null,
-    lang: navigator.language || null,
-    tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || null),
-    screen: {
-      w: window.screen?.width || null,
-      h: window.screen?.height || null,
-      dpr: window.devicePixelRatio || 1,
-    },
-    platform: navigator.platform || null,
-  };
-
-  try {
-    const res = await fetch('/api/trashtalk/visitor/ping', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data?.visitor_key) {
-      try {
-        localStorage.setItem('tt_visitor_key', data.visitor_key);
-      } catch {}
-    }
-    // If you ever want the potential_member_id on the client:
-    // window.__potentialMemberId = data?.potential_member_id || null;
-  } catch (err) {
-    console.warn('visitor ping failed', err);
-  }
-}
-
 async function requirePartyAccess(req, res, next) {
   try {
     const me = await getCurrentIdentity(req, pool);
