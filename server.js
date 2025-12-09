@@ -20,6 +20,10 @@ const videoRouter = require('./routes/video');
 const audioRouter     = require('./routes/audio');
 const adminConsoleRoutes = require('./routes/adminConsole');
 const tChannelRoutes = require('./routes/tChannel');
+const roomsRouter = require('./routes/rooms');
+const roadtripRoutes = require('./routes/roadtrip');
+
+
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -140,8 +144,12 @@ app.use('/', tChannelRoutes);     // this makes GET /t work
 
 // For the API: /api/t/...
 app.use('/api/t', tChannelRoutes); // this makes POST /api/t/kyo/login and GET /api/t/channel work
+// ...
+app.use('/api/rooms', roomsRouter);
 
 // ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
+
+app.use('/api/roadtrip', roadtripRoutes);
 
 // ... other app.use(...) lines
 
