@@ -60,6 +60,45 @@ function safeContentType(s) {
   return v;
 }
 
+const MIME_EXTENSION_MAP = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/jpg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/gif', 'gif'],
+  ['image/webp', 'webp'],
+  ['image/heic', 'heic'],
+  ['image/heif', 'heif'],
+  ['image/avif', 'avif'],
+  ['video/mp4', 'mp4'],
+  ['video/quicktime', 'mov'],
+  ['video/x-m4v', 'm4v'],
+  ['video/webm', 'webm'],
+  ['video/3gpp', '3gp'],
+  ['video/3gpp2', '3g2'],
+  ['video/x-msvideo', 'avi'],
+]);
+
+function detectExtension(file) {
+  if (!file) return 'bin';
+  const mime = String(file.mimetype || '').toLowerCase();
+  if (MIME_EXTENSION_MAP.has(mime)) {
+    return MIME_EXTENSION_MAP.get(mime);
+  }
+  if (mime.startsWith('image/')) {
+    return mime.slice('image/'.length).replace(/[^a-z0-9]/g, '') || 'img';
+  }
+  if (mime.startsWith('video/')) {
+    return mime.slice('video/'.length).replace(/[^a-z0-9]/g, '') || 'vid';
+  }
+  const original = String(file.originalname || '')
+    .split('.')
+    .pop();
+  if (original) {
+    return original.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
+  }
+  return 'bin';
+}
+
 function genKey({ kind='avatars', ext='webp' }) {
   const ts   = Date.now().toString(36);
   const rand = crypto.randomBytes(8).toString('hex').slice(0,12);
@@ -132,9 +171,7 @@ router.post('/presign', async (req, res) => {
       if (!req.file) return res.status(400).json({ ok:false, error:'no_file' });
       const member_id = req.cookies?.ff_member || null;
       const kind = normalizeKind(req.body?.kind || req.query?.kind || 'avatars');
-      const ext = (req.file.mimetype === 'image/png' ? 'png'
-                : req.file.mimetype === 'image/jpeg' ? 'jpg'
-                : 'webp');
+      const ext = detectExtension(req.file);
 
       const key = genKey({ kind, member_id, ext });
       await s3.send(new PutObjectCommand({
