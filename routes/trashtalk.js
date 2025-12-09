@@ -1319,6 +1319,7 @@ router.get('/bucketlist', async (req, res) => {
  *   - If an active/completed item exists for (member_id, key) -> archive it (remove from list)
  *   - If an archived/nonexistent item -> create/activate one
  */
+
 router.post('/bucketlist/toggle', async (req, res) => {
   try {
     const { viewerId } = await getViewerContext(req, { requireAuth: true });
@@ -1329,22 +1330,25 @@ router.post('/bucketlist/toggle', async (req, res) => {
 
     const body = req.body || {};
     const key = String(body.key || body.target_key || '').trim();
-    const kind = String(body.kind || body.type || '').toLowerCase();
+    const rawKind = String(body.kind || body.type || '').toLowerCase();
 
-    if (!key || !kind) {
+    if (!key || !rawKind) {
       return res.status(400).json({ ok: false, error: 'key_and_kind_required' });
     }
 
     const labelRaw = typeof body.label === 'string' ? body.label : '';
     const label = labelRaw.trim().slice(0, 200);
 
-    const photoId = body.photo_id || null;
-    const partyId = body.party_id || null;
+    let photoId = body.photo_id || null;
+    let partyId = body.party_id || null;
 
-    const lat =
+    let lat =
       body.lat != null ? parseFloat(body.lat) : null;
-    const lon =
+    let lon =
       body.lon != null ? parseFloat(body.lon) : null;
+
+    if (!Number.isFinite(lat)) lat = null;
+    if (!Number.isFinite(lon)) lon = null;
 
     const viewRadiusM = clampNumber(
       body.view_radius_m || body.viewRadiusM,
@@ -1358,6 +1362,40 @@ router.post('/bucketlist/toggle', async (req, res) => {
       200000,
       100
     );
+
+    // 🔧 Normalize kind + ids so we don't violate tt_bucket_list_item_target_ck
+    let kind = rawKind || 'photo';
+
+    // Photos: try to attach photo_id from key if missing
+    if (kind === 'photo') {
+      if (!photoId && UUID_PATTERN.test(key)) {
+        photoId = key;
+      }
+      // If we *still* don't have a photo_id but we do have coords, treat it as a pure location
+      if (!photoId && lat != null && lon != null) {
+        kind = 'location';
+      }
+    }
+
+    // Business / party: try to attach party_id from key if missing
+    if (kind === 'business' || kind === 'party') {
+      if (!partyId && UUID_PATTERN.test(key)) {
+        partyId = key;
+      }
+      if (!partyId && lat != null && lon != null) {
+        kind = 'location';
+      }
+    }
+
+    // Locations must always have coords to satisfy the check constraint
+    if (kind === 'location') {
+      if (lat == null || lon == null) {
+        return res.status(400).json({
+          ok: false,
+          error: 'location_requires_lat_lon',
+        });
+      }
+    }
 
     // Check for existing item
     const { rows: existingRows } = await pool.query(
@@ -1475,6 +1513,7 @@ router.post('/bucketlist/toggle', async (req, res) => {
     });
   }
 });
+
 /**
  * PATCH /api/trashtalk/bucketlist/:bucketItemId
  *
