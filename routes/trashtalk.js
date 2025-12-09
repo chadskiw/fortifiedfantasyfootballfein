@@ -1126,19 +1126,20 @@ router.get('/bucketlist', async (req, res) => {
     const includeCompleted =
       includeCompletedRaw === 'true' || includeCompletedRaw === '1';
 
-    const params = [memberId];
-    let sql;
-
     const useRadius =
       Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(radiusMeters);
 
+    let sql;
+    const params = [memberId];
+
     if (useRadius) {
-      // Distance calculation on the derived target lat/lon
-      const distanceExpr = haversineSql('$2', '$3', 'target_lat', 'target_lon');
+      // params: [1]=memberId, [2]=lat, [3]=lon, [4]=radiusMeters
       params.push(lat, lon, radiusMeters);
 
+      const distanceExpr = haversineSql('$2', '$3', 'c.target_lat', 'c.target_lon');
+
       sql = `
-        WITH items AS (
+        WITH candidate AS (
           SELECT
             b.bucket_item_id,
             b.member_id,
@@ -1151,6 +1152,10 @@ router.get('/bucketlist', async (req, res) => {
             b.note,
             b.photo_id,
             b.party_id,
+            b.created_at,
+            b.completed_at,
+            b.completed_source,
+            b.updated_at,
             COALESCE(
               b.lat,
               p.lat,
@@ -1164,12 +1169,7 @@ router.get('/bucketlist', async (req, res) => {
             p.r2_key,
             p.original_filename,
             p.taken_at,
-            pa.name AS party_name,
-            ${distanceExpr} AS distance_m,
-            b.created_at,
-            b.completed_at,
-            b.completed_source,
-            b.updated_at
+            pa.name AS party_name
           FROM tt_bucket_list_item b
           LEFT JOIN tt_photo p
             ON b.photo_id = p.photo_id
@@ -1177,17 +1177,24 @@ router.get('/bucketlist', async (req, res) => {
             ON b.party_id = pa.party_id
           WHERE
             b.member_id = $1
+            AND b.deleted_at IS NULL
             AND (
               b.status = 'active'
               OR (${includeCompleted ? 'TRUE' : 'FALSE'} AND b.status = 'completed')
             )
+        ),
+        items AS (
+          SELECT
+            c.*,
+            ${distanceExpr} AS distance_m
+          FROM candidate c
+          WHERE
+            c.target_lat IS NOT NULL
+            AND c.target_lon IS NOT NULL
         )
         SELECT *
         FROM items
-        WHERE
-          target_lat IS NOT NULL
-          AND target_lon IS NOT NULL
-          AND distance_m <= $4
+        WHERE distance_m <= $4
         ORDER BY status, created_at DESC;
       `;
     } else {
@@ -1204,20 +1211,25 @@ router.get('/bucketlist', async (req, res) => {
           b.note,
           b.photo_id,
           b.party_id,
-          b.lat AS explicit_lat,
-          b.lon AS explicit_lon,
-          p.r2_key,
-          p.original_filename,
-          p.taken_at,
-          p.lat AS photo_lat,
-          p.lon AS photo_lon,
-          pa.name AS party_name,
-          pa.center_lat,
-          pa.center_lon,
           b.created_at,
           b.completed_at,
           b.completed_source,
-          b.updated_at
+          b.updated_at,
+          COALESCE(
+            b.lat,
+            p.lat,
+            pa.center_lat
+          ) AS target_lat,
+          COALESCE(
+            b.lon,
+            p.lon,
+            pa.center_lon
+          ) AS target_lon,
+          NULL::double precision AS distance_m,
+          p.r2_key,
+          p.original_filename,
+          p.taken_at,
+          pa.name AS party_name
         FROM tt_bucket_list_item b
         LEFT JOIN tt_photo p
           ON b.photo_id = p.photo_id
@@ -1225,6 +1237,7 @@ router.get('/bucketlist', async (req, res) => {
           ON b.party_id = pa.party_id
         WHERE
           b.member_id = $1
+          AND b.deleted_at IS NULL
           AND (
             b.status = 'active'
             OR (${includeCompleted ? 'TRUE' : 'FALSE'} AND b.status = 'completed')
@@ -1235,52 +1248,37 @@ router.get('/bucketlist', async (req, res) => {
 
     const { rows } = await pool.query(sql, params);
 
-    const items = rows.map((row) => {
-      const latFinal =
-        row.target_lat ??
-        row.photo_lat ??
-        row.center_lat ??
-        row.explicit_lat ??
-        null;
-      const lonFinal =
-        row.target_lon ??
-        row.photo_lon ??
-        row.center_lon ??
-        row.explicit_lon ??
-        null;
-
-      return {
-        bucket_item_id: row.bucket_item_id,
-        key: row.target_key,
-        kind: row.kind,
-        status: row.status,
-        label: row.label,
-        note: row.note,
-        lat: latFinal,
-        lon: lonFinal,
-        distance_m: row.distance_m ?? null,
-        view_radius_m: row.view_radius_m,
-        auto_radius_m: row.auto_radius_m,
-        photo: row.photo_id
-          ? {
-              photo_id: row.photo_id,
-              r2_key: row.r2_key,
-              original_filename: row.original_filename,
-              taken_at: row.taken_at,
-            }
-          : null,
-        party: row.party_id
-          ? {
-              party_id: row.party_id,
-              name: row.party_name,
-            }
-          : null,
-        created_at: row.created_at,
-        completed_at: row.completed_at,
-        completed_source: row.completed_source,
-        updated_at: row.updated_at,
-      };
-    });
+    const items = rows.map((row) => ({
+      bucket_item_id: row.bucket_item_id,
+      key: row.target_key,
+      kind: row.kind,
+      status: row.status,
+      label: row.label,
+      note: row.note,
+      lat: row.target_lat,
+      lon: row.target_lon,
+      distance_m: row.distance_m ?? null,
+      view_radius_m: row.view_radius_m,
+      auto_radius_m: row.auto_radius_m,
+      photo: row.photo_id
+        ? {
+            photo_id: row.photo_id,
+            r2_key: row.r2_key,
+            original_filename: row.original_filename,
+            taken_at: row.taken_at,
+          }
+        : null,
+      party: row.party_id
+        ? {
+            party_id: row.party_id,
+            name: row.party_name,
+          }
+        : null,
+      created_at: row.created_at,
+      completed_at: row.completed_at,
+      completed_source: row.completed_source,
+      updated_at: row.updated_at,
+    }));
 
     return res.json({
       ok: true,
@@ -1299,6 +1297,7 @@ router.get('/bucketlist', async (req, res) => {
     });
   }
 });
+
 /**
  * POST /api/trashtalk/bucketlist/toggle
  *
