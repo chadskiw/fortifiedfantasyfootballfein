@@ -38,14 +38,7 @@ function buildPublicUrl(keyOrPath) {
   return `${PUBLIC_BASE}/${trimmed}`;
 }
 
-// after uploading to R2:
-const objectKey = r2Key; // e.g. "roadtrip/abc123/myfile.mp4"
 
-res.json({
-  ok: true,
-  r2_key: objectKey,
-  public_url: buildPublicUrl(objectKey), // e.g. "https://img.fortifiedfantasy.com/roadtrip/abc123/myfile.mp4"
-});
 
 // If you use R2 "S3 API" endpoint with account id:
 const R2_ENDPOINT = process.env.R2_ENDPOINT
@@ -219,9 +212,14 @@ router.post('/presign', async (req, res) => {
         Body: req.file.buffer,
         ContentType: req.file.mimetype || 'application/octet-stream',
       }));
-      const public_url = `${PUBLIC_BASE}/${key}`;
-      res.set('Cache-Control', 'no-store');
-      return res.json({ ok:true, key, public_url });
+// after uploading to R2:
+const objectKey = key; // e.g. "roadtrip/abc123/myfile.mp4"
+
+res.json({
+  ok: true,
+  r2_key: objectKey,
+  public_url: buildPublicUrl(objectKey), // e.g. "https://img.fortifiedfantasy.com/roadtrip/abc123/myfile.mp4"
+});
     } catch (e) {
       console.error('[images.upload] error:', e);
       return res.status(500).json({ ok:false, error:'upload_failed' });
