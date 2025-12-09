@@ -176,6 +176,7 @@ const DIGIT_ID_RE = /^\d+$/;
 let layoutTableEnsured = false;
 let liveTablesEnsured = false;
 let cachedObjectIdColumnType = null;
+let mediaColumnsEnsured = false;
 
 function normalizeObjectIdColumnType(rawType) {
   if (!rawType) return 'UUID';
@@ -263,6 +264,24 @@ async function ensureRoadtripLayoutTable() {
     } catch (retryErr) {
       console.error('[roadtrip] failed to ensure layout table after retry', retryErr);
     }
+  }
+}
+
+async function ensureRoadtripMediaColumns() {
+  if (mediaColumnsEnsured) return;
+  const ddl = `
+    ALTER TABLE tt_party_roadtrip_object
+      ADD COLUMN IF NOT EXISTS media_url TEXT;
+    ALTER TABLE tt_party_roadtrip_object
+      ADD COLUMN IF NOT EXISTS media_mime TEXT;
+    ALTER TABLE tt_party_roadtrip_object
+      ADD COLUMN IF NOT EXISTS media_bytes BIGINT;
+  `;
+  try {
+    await pool.query(ddl);
+    mediaColumnsEnsured = true;
+  } catch (err) {
+    console.error('[roadtrip] failed to ensure media columns', err);
   }
 }
 
@@ -861,30 +880,30 @@ router.get('/', async (req, res) => {
 
     await ensureRoadtripLayoutTable();
 
-    const objectsPromise = pool.query(
-      `
-      SELECT
-        o.*,
-        m.handle,
-        lay.display_order AS layout_order,
-        lay.size_hint   AS layout_size,
-        lay.sticker_label AS layout_sticker_label,
-        lay.sticker_color AS layout_sticker_color,
-        lay.meta AS layout_meta,
-        lay.deleted AS layout_deleted
-      FROM tt_party_roadtrip_object o
-      LEFT JOIN ff_member m
-        ON m.member_id = o.member_id
-      LEFT JOIN tt_party_roadtrip_object_layout lay
-        ON lay.object_id = o.object_id
-      WHERE o.roadtrip_id = $1
-      ORDER BY
-        COALESCE(lay.display_order, 1000000) ASC,
-        o.at_time ASC NULLS LAST,
-        o.object_id ASC
-      `,
-      [roadtrip.roadtrip_id]
-    );
+   const objectsPromise = pool.query(
+  `
+  SELECT
+    o.*,
+    m.handle,
+    lay.display_order AS layout_order,
+    lay.size_hint   AS layout_size,
+    lay.sticker_label AS layout_sticker_label,
+    lay.sticker_color AS layout_sticker_color,
+    lay.meta AS layout_meta,
+    lay.deleted AS layout_deleted
+  FROM tt_party_roadtrip_object o
+  LEFT JOIN ff_member m
+    ON m.member_id = o.member_id
+  LEFT JOIN tt_party_roadtrip_object_layout lay
+    ON lay.object_id = o.object_id
+  WHERE o.roadtrip_id = $1
+  ORDER BY
+    COALESCE(lay.display_order, 1000000) ASC,
+    o.at_time ASC NULLS LAST,
+    o.object_id ASC
+  `,
+  [roadtrip.roadtrip_id]
+);
 
     const playlistPromise = pool.query(
       `
@@ -1439,6 +1458,10 @@ router.post('/:roadtripId/objects', async (req, res) => {
     at_time,
     photo_id,      // UUID from tt_photo
     video_r2_key,  // R2 key (short video)
+    media_url,
+    media_mime,
+    media_bytes,
+    media_kind: bodyMediaKind,
   } = req.body || {};
 
   if (!roadtripId || !kind) {
@@ -1447,10 +1470,30 @@ router.post('/:roadtripId/objects', async (req, res) => {
 
   const memberId = req.ffMemberId || (req.ffMember && req.ffMember.member_id) || null;
 
+  await ensureRoadtripMediaColumns();
+
   let media_kind = null;
   if (photo_id && video_r2_key) media_kind = 'mixed';
   else if (photo_id) media_kind = 'photo';
   else if (video_r2_key) media_kind = 'video';
+
+  const normalizedBodyMediaKind = normalizeMediaKind(bodyMediaKind);
+  if (!media_kind && normalizedBodyMediaKind) {
+    media_kind = normalizedBodyMediaKind;
+  }
+
+  const mediaUrl =
+    typeof media_url === 'string' && media_url.trim() ? media_url.trim() : null;
+  const mediaMime =
+    typeof media_mime === 'string' && media_mime.trim() ? media_mime.trim() : null;
+  const mediaBytesNumber =
+    media_bytes != null && media_bytes !== ''
+      ? Number(media_bytes)
+      : null;
+  const mediaBytes =
+    Number.isFinite(mediaBytesNumber) && mediaBytesNumber >= 0
+      ? Math.round(mediaBytesNumber)
+      : null;
 
   try {
     const insert = await pool.query(
@@ -1459,9 +1502,10 @@ router.post('/:roadtripId/objects', async (req, res) => {
         roadtrip_id, member_id, kind,
         lat, lon, at_time,
         title, body,
-        photo_id, video_r2_key, media_kind
+        photo_id, video_r2_key, media_kind,
+        media_url, media_mime, media_bytes
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING *;
       `,
       [
@@ -1476,6 +1520,9 @@ router.post('/:roadtripId/objects', async (req, res) => {
         photo_id || null,
         video_r2_key || null,
         media_kind,
+        mediaUrl,
+        mediaMime,
+        mediaBytes,
       ]
     );
 
@@ -1716,3 +1763,14 @@ router.get('/:roadtripId/live', async (req, res) => {
 });
 
 module.exports = router;
+function normalizeMediaKind(value) {
+  if (!value) return null;
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'image') return 'photo';
+  if (raw === 'photo' || raw === 'pic' || raw === 'picture') return 'photo';
+  if (raw === 'video' || raw === 'clip') return 'video';
+  if (raw === 'audio' || raw === 'sound' || raw === 'voice') return 'audio';
+  if (raw === 'mixed' || raw === 'combo') return 'mixed';
+  return null;
+}
