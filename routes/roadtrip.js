@@ -21,11 +21,32 @@ function slugifyTripName(name) {
  * Helper: compute distance of planned_path (simple haversine)
  * plannedPath = [{lat, lon}, ...]
  */
-function distanceOfPlannedPath(plannedPath) {
-  if (!Array.isArray(plannedPath) || plannedPath.length < 2) return 0;
-
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return 0;
+  }
   const R = 6371e3; // meters
   const toRad = (deg) => (deg * Math.PI) / 180;
+  const latRad1 = toRad(lat1);
+  const latRad2 = toRad(lat2);
+  const dLat = latRad2 - latRad1;
+  const dLon = toRad(lon2 - lon1);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLon = Math.sin(dLon / 2);
+  const h =
+    sinDLat * sinDLat +
+    Math.cos(latRad1) * Math.cos(latRad2) * sinDLon * sinDLon;
+  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  return R * c;
+}
+
+function distanceOfPlannedPath(plannedPath) {
+  if (!Array.isArray(plannedPath) || plannedPath.length < 2) return 0;
 
   let total = 0;
   for (let i = 1; i < plannedPath.length; i++) {
@@ -39,17 +60,7 @@ function distanceOfPlannedPath(plannedPath) {
     ) {
       continue;
     }
-    const lat1 = toRad(a.lat);
-    const lat2 = toRad(b.lat);
-    const dLat = lat2 - lat1;
-    const dLon = toRad(b.lon - a.lon);
-    const sinDLat = Math.sin(dLat / 2);
-    const sinDLon = Math.sin(dLon / 2);
-    const h =
-      sinDLat * sinDLat +
-      Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon;
-    const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
-    total += R * c;
+    total += haversineMeters(a.lat, a.lon, b.lat, b.lon);
   }
   return Math.round(total);
 }
@@ -147,6 +158,398 @@ const ROADTRIP_OBJECT_KINDS = new Set([
 
 const hasOwn = (obj, key) =>
   Object.prototype.hasOwnProperty.call(obj || {}, key);
+
+const ROADTRIP_LAYOUT_SIZES = new Set([
+  'mini',
+  'small',
+  'medium',
+  'wide',
+  'tall',
+  'hero',
+]);
+
+const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+let layoutTableEnsured = false;
+let liveTablesEnsured = false;
+
+async function ensureRoadtripLayoutTable() {
+  if (layoutTableEnsured) return;
+  const ddl = `
+    CREATE TABLE IF NOT EXISTS tt_party_roadtrip_object_layout (
+      object_id UUID PRIMARY KEY REFERENCES tt_party_roadtrip_object(object_id) ON DELETE CASCADE,
+      roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
+      display_order INTEGER DEFAULT 0,
+      size_hint TEXT DEFAULT 'medium',
+      sticker_label TEXT,
+      sticker_color TEXT,
+      meta JSONB DEFAULT '{}'::jsonb,
+      deleted BOOLEAN DEFAULT FALSE,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS tt_party_roadtrip_object_layout_rid_idx
+      ON tt_party_roadtrip_object_layout(roadtrip_id, display_order);
+  `;
+  try {
+    await pool.query(ddl);
+    layoutTableEnsured = true;
+  } catch (err) {
+    console.error('[roadtrip] failed to ensure layout table', err);
+  }
+}
+
+async function ensureRoadtripLiveTables() {
+  if (liveTablesEnsured) return;
+  const ddl = `
+    CREATE TABLE IF NOT EXISTS tt_party_roadtrip_session (
+      session_id UUID PRIMARY KEY,
+      roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
+      host_member_id UUID NOT NULL,
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      ended_at TIMESTAMPTZ,
+      state TEXT DEFAULT 'live',
+      last_lat DOUBLE PRECISION,
+      last_lon DOUBLE PRECISION,
+      last_ping_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS tt_party_roadtrip_session_live_idx
+      ON tt_party_roadtrip_session(roadtrip_id, state)
+      WHERE state = 'live';
+
+    CREATE TABLE IF NOT EXISTS tt_party_roadtrip_trace (
+      trace_id UUID PRIMARY KEY,
+      roadtrip_id UUID NOT NULL REFERENCES tt_party_roadtrip(roadtrip_id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES tt_party_roadtrip_session(session_id) ON DELETE CASCADE,
+      recorded_at TIMESTAMPTZ DEFAULT NOW(),
+      lat DOUBLE PRECISION NOT NULL,
+      lon DOUBLE PRECISION NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS tt_party_roadtrip_trace_rid_idx
+      ON tt_party_roadtrip_trace(roadtrip_id, recorded_at);
+  `;
+  try {
+    await pool.query(ddl);
+    liveTablesEnsured = true;
+  } catch (err) {
+    console.error('[roadtrip] failed to ensure live tables', err);
+  }
+}
+
+function coerceLayoutSize(input) {
+  if (!input) return null;
+  const size = String(input).toLowerCase().trim();
+  if (ROADTRIP_LAYOUT_SIZES.has(size)) {
+    return size;
+  }
+  return null;
+}
+
+function sanitizeSticker(sticker) {
+  if (!sticker) return { label: null, color: null };
+  const label =
+    typeof sticker.label === 'string'
+      ? sticker.label.trim().slice(0, 80)
+      : null;
+  const rawColor =
+    typeof sticker.color === 'string' ? sticker.color.trim() : null;
+  const color = rawColor && HEX_COLOR_RE.test(rawColor) ? rawColor : null;
+  if (!label && !color) return { label: null, color: null };
+  return { label, color };
+}
+
+function normalizeDisplayOrder(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.round(num);
+}
+
+function isValidUuid(value) {
+  if (!value) return false;
+  return UUID_RE.test(String(value));
+}
+
+function coerceIsoTimestamp(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+async function loadRoadtripLiveState(roadtripId, sessionPreference) {
+  if (!roadtripId) {
+    return {
+      sessions: [],
+      trace: [],
+      trace_session_id: null,
+    };
+  }
+  await ensureRoadtripLiveTables();
+  const { rows: sessionRows } = await pool.query(
+    `
+    SELECT
+      session_id,
+      roadtrip_id,
+      host_member_id,
+      started_at,
+      ended_at,
+      state,
+      last_lat,
+      last_lon,
+      last_ping_at
+    FROM tt_party_roadtrip_session
+    WHERE roadtrip_id = $1
+    ORDER BY started_at DESC
+    LIMIT 12
+    `,
+    [roadtripId]
+  );
+  const sessions = sessionRows || [];
+
+  let traceSessionId = null;
+  if (sessionPreference && isValidUuid(sessionPreference)) {
+    traceSessionId =
+      sessions.find((session) => session.session_id === sessionPreference)
+        ?.session_id || null;
+  }
+  if (!traceSessionId && sessions.length) {
+    traceSessionId =
+      sessions.find((session) => session.state === 'live')?.session_id ||
+      sessions[0].session_id;
+  }
+
+  let trace = [];
+  if (traceSessionId) {
+    const { rows: traceRows } = await pool.query(
+      `
+      SELECT
+        trace_id,
+        session_id,
+        roadtrip_id,
+        recorded_at,
+        lat,
+        lon
+      FROM tt_party_roadtrip_trace
+      WHERE roadtrip_id = $1
+        AND session_id = $2
+      ORDER BY recorded_at ASC
+      LIMIT 2000
+      `,
+      [roadtripId, traceSessionId]
+    );
+    trace = traceRows || [];
+  }
+
+  return {
+    sessions,
+    trace,
+    trace_session_id: traceSessionId,
+  };
+}
+
+async function insertTracePointForSession({
+  roadtripId,
+  session,
+  lat,
+  lon,
+  recordedAtIso,
+}) {
+  if (
+    !session ||
+    !isValidUuid(session.session_id) ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon)
+  ) {
+    return null;
+  }
+  await ensureRoadtripLiveTables();
+  const prevLat = Number(session.last_lat);
+  const prevLon = Number(session.last_lon);
+  const prevPing = session.last_ping_at
+    ? new Date(session.last_ping_at)
+    : null;
+  const currentTs = recordedAtIso ? new Date(recordedAtIso) : new Date();
+  const currentIso = currentTs.toISOString();
+
+  if (
+    Number.isFinite(prevLat) &&
+    Number.isFinite(prevLon) &&
+    prevPing &&
+    !Number.isNaN(prevPing.getTime())
+  ) {
+    const distMeters = haversineMeters(prevLat, prevLon, lat, lon);
+    const deltaMs = Math.abs(currentTs.getTime() - prevPing.getTime());
+    if (distMeters < 5 && deltaMs < 4000) {
+      return null;
+    }
+  }
+
+  const { rows } = await pool.query(
+    `
+    INSERT INTO tt_party_roadtrip_trace (
+      trace_id,
+      roadtrip_id,
+      session_id,
+      recorded_at,
+      lat,
+      lon
+    )
+    VALUES (
+      gen_random_uuid(),
+      $1,
+      $2,
+      $3,
+      $4,
+      $5
+    )
+    RETURNING *
+    `,
+    [roadtripId, session.session_id, currentIso, lat, lon]
+  );
+  return rows[0] || null;
+}
+
+function shapeRoadtripObject(row) {
+  if (!row) return row;
+  const {
+    layout_order,
+    layout_size,
+    layout_sticker_label,
+    layout_sticker_color,
+    layout_meta,
+    layout_deleted,
+    ...rest
+  } = row;
+
+  const hasLayout =
+    layout_order !== null ||
+    !!layout_size ||
+    !!layout_sticker_label ||
+    !!layout_sticker_color ||
+    layout_meta != null ||
+    layout_deleted != null;
+
+  const layout = hasLayout
+    ? {
+        order: layout_order,
+        size: layout_size || null,
+        sticker:
+          layout_sticker_label || layout_sticker_color
+            ? {
+                label: layout_sticker_label || null,
+                color: layout_sticker_color || null,
+              }
+            : null,
+        meta: layout_meta || null,
+        deleted: Boolean(layout_deleted),
+      }
+    : null;
+
+  return {
+    ...rest,
+    layout,
+  };
+}
+
+function mapLayoutRow(row) {
+  if (!row) return null;
+  return {
+    object_id: row.object_id,
+    roadtrip_id: row.roadtrip_id,
+    order: row.display_order,
+    size: row.size_hint || null,
+    sticker:
+      row.sticker_label || row.sticker_color
+        ? {
+            label: row.sticker_label || null,
+            color: row.sticker_color || null,
+          }
+        : null,
+    meta: row.meta || null,
+    deleted: Boolean(row.deleted),
+    updated_at: row.updated_at || null,
+  };
+}
+
+async function upsertLayoutRow(roadtripId, objectId, patch = {}) {
+  if (!isValidUuid(objectId)) {
+    throw new Error('invalid_object_id');
+  }
+  await ensureRoadtripLayoutTable();
+  await pool.query(
+    `
+    INSERT INTO tt_party_roadtrip_object_layout (object_id, roadtrip_id)
+    VALUES ($1, $2)
+    ON CONFLICT (object_id) DO NOTHING
+    `,
+    [objectId, roadtripId]
+  );
+
+  const assignments = [];
+  const values = [];
+  let paramIndex = 3;
+
+  if (hasOwn(patch, 'order') || hasOwn(patch, 'display_order')) {
+    const orderValue = normalizeDisplayOrder(
+      hasOwn(patch, 'order') ? patch.order : patch.display_order
+    );
+    assignments.push(`display_order = $${paramIndex++}`);
+    values.push(orderValue);
+  }
+
+  if (hasOwn(patch, 'size') || hasOwn(patch, 'size_hint')) {
+    const sizeValue =
+      coerceLayoutSize(hasOwn(patch, 'size') ? patch.size : patch.size_hint) ||
+      null;
+    assignments.push(`size_hint = $${paramIndex++}`);
+    values.push(sizeValue);
+  }
+
+  if (hasOwn(patch, 'sticker')) {
+    const { label, color } = sanitizeSticker(patch.sticker);
+    assignments.push(`sticker_label = $${paramIndex++}`);
+    values.push(label);
+    assignments.push(`sticker_color = $${paramIndex++}`);
+    values.push(color);
+  }
+
+  if (hasOwn(patch, 'meta')) {
+    let metaString = null;
+    if (patch.meta && typeof patch.meta === 'object') {
+      try {
+        metaString = JSON.stringify(patch.meta);
+      } catch (err) {
+        metaString = null;
+      }
+    }
+    assignments.push(`meta = COALESCE($${paramIndex++}::jsonb, '{}'::jsonb)`);
+    values.push(metaString);
+  }
+
+  if (hasOwn(patch, 'deleted')) {
+    assignments.push(`deleted = $${paramIndex++}`);
+    values.push(Boolean(patch.deleted));
+  }
+
+  if (!assignments.length) {
+    return null;
+  }
+
+  const { rows } = await pool.query(
+    `
+    UPDATE tt_party_roadtrip_object_layout
+    SET ${assignments.join(', ')}, updated_at = NOW()
+    WHERE object_id = $1 AND roadtrip_id = $2
+    RETURNING *
+    `,
+    [objectId, roadtripId, ...values]
+  );
+
+  return mapLayoutRow(rows[0]);
+}
 
 async function resolveMemberId(req) {
   const inline =
@@ -343,6 +746,8 @@ router.post('/', async (req, res) => {
  */
 router.get('/', async (req, res) => {
   const trip = (req.query.trip || '').trim();
+  const liveSessionPreference =
+    req.query?.live_session || req.query?.liveSession || null;
 
   if (!trip) {
     return res
@@ -377,16 +782,29 @@ router.get('/', async (req, res) => {
 
     const roadtrip = tripResult.rows[0];
 
+    await ensureRoadtripLayoutTable();
+
     const objectsPromise = pool.query(
       `
       SELECT
         o.*,
-        m.handle
+        m.handle,
+        lay.display_order AS layout_order,
+        lay.size_hint   AS layout_size,
+        lay.sticker_label AS layout_sticker_label,
+        lay.sticker_color AS layout_sticker_color,
+        lay.meta AS layout_meta,
+        lay.deleted AS layout_deleted
       FROM tt_party_roadtrip_object o
       LEFT JOIN ff_member m
         ON m.member_id = o.member_id
+      LEFT JOIN tt_party_roadtrip_object_layout lay
+        ON lay.object_id = o.object_id
       WHERE o.roadtrip_id = $1
-      ORDER BY o.at_time ASC NULLS LAST, o.object_id ASC
+      ORDER BY
+        COALESCE(lay.display_order, 1000000) ASC,
+        o.at_time ASC NULLS LAST,
+        o.object_id ASC
       `,
       [roadtrip.roadtrip_id]
     );
@@ -414,11 +832,20 @@ router.get('/', async (req, res) => {
       playlistPromise,
     ]);
 
+    const objects = objectsResult.rows.map(shapeRoadtripObject);
+    const liveState = await loadRoadtripLiveState(
+      roadtrip.roadtrip_id,
+      liveSessionPreference
+    );
+
     return res.json({
       ok: true,
       roadtrip,
-      objects: objectsResult.rows,
+      objects,
       playlist: playlistResult.rows,
+      live_sessions: liveState.sessions,
+      live_trace: liveState.trace,
+      live_trace_session_id: liveState.trace_session_id,
     });
   } catch (err) {
     console.error('Error in GET /api/roadtrip:', err);
@@ -521,7 +948,7 @@ router.put('/:roadtripId/plan', async (req, res) => {
   }
 });
 
-router.post('/:roadtripId/objects', async (req, res) => {
+router.post('/:roadtripId/live/start', async (req, res) => {
   const { roadtripId } = req.params || {};
   if (!roadtripId) {
     return res.status(400).json({
@@ -533,6 +960,399 @@ router.post('/:roadtripId/objects', async (req, res) => {
   const hostContext = await ensureRoadtripHost(req, res, roadtripId);
   if (!hostContext) return;
 
+  const { lat, lon, at_time } = req.body || {};
+  let latNumber = null;
+  let lonNumber = null;
+
+  if (lat !== undefined && lat !== null && lat !== '') {
+    latNumber = Number(lat);
+    if (!Number.isFinite(latNumber)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'lat must be a valid number',
+      });
+    }
+  }
+
+  if (lon !== undefined && lon !== null && lon !== '') {
+    lonNumber = Number(lon);
+    if (!Number.isFinite(lonNumber)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'lon must be a valid number',
+      });
+    }
+  }
+
+  const recordedAtIso = coerceIsoTimestamp(at_time);
+
+  try {
+    await ensureRoadtripLiveTables();
+    let closedSessions = 0;
+    try {
+      const { rowCount } = await pool.query(
+        `
+        UPDATE tt_party_roadtrip_session
+        SET state = 'ended', ended_at = NOW()
+        WHERE roadtrip_id = $1
+          AND state = 'live'
+        `,
+        [roadtripId]
+      );
+      closedSessions = rowCount;
+    } catch (err) {
+      console.warn('[roadtrip] unable to close prior live sessions', err.message);
+    }
+
+    const insertResult = await pool.query(
+      `
+      INSERT INTO tt_party_roadtrip_session (
+        session_id,
+        roadtrip_id,
+        host_member_id,
+        started_at,
+        state,
+        last_lat,
+        last_lon,
+        last_ping_at
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        COALESCE($3, NOW()),
+        'live',
+        $4,
+        $5,
+        COALESCE($6, NOW())
+      )
+      RETURNING *
+      `,
+      [
+        roadtripId,
+        hostContext.actorMemberId,
+        recordedAtIso,
+        latNumber,
+        lonNumber,
+        recordedAtIso,
+      ]
+    );
+
+    const session = insertResult.rows[0] || null;
+    let tracePoint = null;
+    if (
+      session &&
+      Number.isFinite(latNumber) &&
+      Number.isFinite(lonNumber)
+    ) {
+      tracePoint = await insertTracePointForSession({
+        roadtripId,
+        session,
+        lat: latNumber,
+        lon: lonNumber,
+        recordedAtIso,
+      });
+    }
+
+    try {
+      await pool.query(
+        `
+        UPDATE tt_party_roadtrip
+        SET state = 'live'
+        WHERE roadtrip_id = $1
+        `,
+        [roadtripId]
+      );
+    } catch (stateErr) {
+      console.warn('[roadtrip] unable to bump roadtrip state', stateErr.message);
+    }
+
+    return res.status(201).json({
+      ok: true,
+      session,
+      trace_point: tracePoint,
+      closed_sessions: closedSessions,
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to start live session', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to start live session',
+    });
+  }
+});
+
+router.post('/:roadtripId/live/ping', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+  const { session_id } = req.body || {};
+  if (!isValidUuid(session_id)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'session_id is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const { lat, lon, recorded_at } = req.body || {};
+  const latNumber = Number(lat);
+  const lonNumber = Number(lon);
+  if (!Number.isFinite(latNumber) || !Number.isFinite(lonNumber)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'lat and lon must be numeric for live pings',
+    });
+  }
+
+  const pingIso = coerceIsoTimestamp(recorded_at) || new Date().toISOString();
+
+  try {
+    await ensureRoadtripLiveTables();
+    const { rows } = await pool.query(
+      `
+      SELECT *
+      FROM tt_party_roadtrip_session
+      WHERE session_id = $1
+        AND roadtrip_id = $2
+      LIMIT 1
+      `,
+      [session_id, roadtripId]
+    );
+    const session = rows[0] || null;
+    if (!session) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Live session not found',
+      });
+    }
+    if (session.state !== 'live') {
+      return res.status(409).json({
+        ok: false,
+        error: 'Session is no longer live',
+      });
+    }
+    const normalizedSessionHost = session.host_member_id
+      ? String(session.host_member_id)
+      : null;
+    if (
+      normalizedSessionHost &&
+      normalizedSessionHost !== hostContext.actorMemberId
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Session belongs to another host',
+      });
+    }
+
+    const tracePoint = await insertTracePointForSession({
+      roadtripId,
+      session,
+      lat: latNumber,
+      lon: lonNumber,
+      recordedAtIso: pingIso,
+    });
+
+    const { rows: updatedRows } = await pool.query(
+      `
+      UPDATE tt_party_roadtrip_session
+      SET
+        last_lat = $1,
+        last_lon = $2,
+        last_ping_at = $3
+      WHERE session_id = $4
+      RETURNING *
+      `,
+      [latNumber, lonNumber, pingIso, session_id]
+    );
+
+    return res.json({
+      ok: true,
+      session: updatedRows[0] || null,
+      trace_point: tracePoint,
+    });
+  } catch (err) {
+    console.error('[roadtrip] live ping failed', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to record live ping',
+    });
+  }
+});
+
+router.post('/:roadtripId/live/end', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const { session_id, lat, lon, recorded_at } = req.body || {};
+  let targetSessionId = null;
+  if (session_id && isValidUuid(session_id)) {
+    targetSessionId = session_id;
+  }
+  let latNumber = null;
+  let lonNumber = null;
+  if (lat !== undefined && lat !== null && lat !== '') {
+    latNumber = Number(lat);
+    if (!Number.isFinite(latNumber)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'lat must be numeric when provided',
+      });
+    }
+  }
+  if (lon !== undefined && lon !== null && lon !== '') {
+    lonNumber = Number(lon);
+    if (!Number.isFinite(lonNumber)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'lon must be numeric when provided',
+      });
+    }
+  }
+
+  const endIso = coerceIsoTimestamp(recorded_at) || new Date().toISOString();
+
+  try {
+    await ensureRoadtripLiveTables();
+    let sessionRow = null;
+    if (targetSessionId) {
+      const { rows } = await pool.query(
+        `
+        SELECT *
+        FROM tt_party_roadtrip_session
+        WHERE session_id = $1
+          AND roadtrip_id = $2
+        LIMIT 1
+        `,
+        [targetSessionId, roadtripId]
+      );
+      sessionRow = rows[0] || null;
+    }
+    if (!sessionRow) {
+      const { rows } = await pool.query(
+        `
+        SELECT *
+        FROM tt_party_roadtrip_session
+        WHERE roadtrip_id = $1
+          AND state = 'live'
+        ORDER BY started_at DESC
+        LIMIT 1
+        `,
+        [roadtripId]
+      );
+      sessionRow = rows[0] || null;
+    }
+    if (!sessionRow) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No live session to end',
+      });
+    }
+
+    const normalizedSessionHost = sessionRow.host_member_id
+      ? String(sessionRow.host_member_id)
+      : null;
+    if (
+      normalizedSessionHost &&
+      normalizedSessionHost !== hostContext.actorMemberId
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Session belongs to another host',
+      });
+    }
+
+    let tracePoint = null;
+    if (
+      Number.isFinite(latNumber) &&
+      Number.isFinite(lonNumber)
+    ) {
+      tracePoint = await insertTracePointForSession({
+        roadtripId,
+        session: sessionRow,
+        lat: latNumber,
+        lon: lonNumber,
+        recordedAtIso: endIso,
+      });
+    }
+
+    const { rows: updatedRows } = await pool.query(
+      `
+      UPDATE tt_party_roadtrip_session
+      SET
+        state = 'ended',
+        ended_at = $2,
+        last_lat = COALESCE($3, last_lat),
+        last_lon = COALESCE($4, last_lon),
+        last_ping_at = $5
+      WHERE session_id = $1
+      RETURNING *
+      `,
+      [
+        sessionRow.session_id,
+        endIso,
+        Number.isFinite(latNumber) ? latNumber : null,
+        Number.isFinite(lonNumber) ? lonNumber : null,
+        endIso,
+      ]
+    );
+
+    try {
+      const { rows } = await pool.query(
+        `
+        SELECT 1
+        FROM tt_party_roadtrip_session
+        WHERE roadtrip_id = $1
+          AND state = 'live'
+        LIMIT 1
+        `,
+        [roadtripId]
+      );
+      if (!rows.length) {
+        await pool.query(
+          `
+          UPDATE tt_party_roadtrip
+          SET state = 'recap'
+          WHERE roadtrip_id = $1
+          `,
+          [roadtripId]
+        );
+      }
+    } catch (stateErr) {
+      console.warn('[roadtrip] unable to finalize roadtrip state', stateErr.message);
+    }
+
+    return res.json({
+      ok: true,
+      session: updatedRows[0] || null,
+      trace_point: tracePoint,
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to end live session', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to end live session',
+    });
+  }
+});
+
+// POST /api/roadtrip/:roadtripId/objects
+router.post('/:roadtripId/objects', async (req, res) => {
+  const roadtripId = req.params.roadtripId;
   const {
     kind,
     title,
@@ -540,38 +1360,43 @@ router.post('/:roadtripId/objects', async (req, res) => {
     lat,
     lon,
     at_time,
-    media_url,
-    photo_url,
-    image_url,
+    photo_id,      // UUID from tt_photo (for images)
+    video_r2_key,  // R2 key for short video
+    live_session_id,
   } = req.body || {};
 
-  const kindSlug =
-    typeof kind === 'string' && kind.trim()
-      ? kind.trim().toLowerCase()
-      : 'planned_hype';
-  const normalizedKind = ROADTRIP_OBJECT_KINDS.has(kindSlug)
-    ? kindSlug
-    : 'planned_hype';
+  if (!roadtripId || !kind) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId (in path) and kind (in body) are required',
+    });
+  }
 
-  const latNumber =
+  // Optional: derive member_id from your auth middleware
+  const memberId =
+    req.ffMemberId ||
+    (req.ffMember && req.ffMember.member_id) ||
+    null;
+
+  let latNumber =
     lat === undefined || lat === null || lat === ''
       ? null
       : Number(lat);
   if (latNumber !== null && !Number.isFinite(latNumber)) {
     return res.status(400).json({
       ok: false,
-      error: 'lat must be a valid number',
+      error: 'lat must be numeric',
     });
   }
 
-  const lonNumber =
+  let lonNumber =
     lon === undefined || lon === null || lon === ''
       ? null
       : Number(lon);
   if (lonNumber !== null && !Number.isFinite(lonNumber)) {
     return res.status(400).json({
       ok: false,
-      error: 'lon must be a valid number',
+      error: 'lon must be numeric',
     });
   }
 
@@ -587,77 +1412,92 @@ router.post('/:roadtripId/objects', async (req, res) => {
     atTimeIso = parsed.toISOString();
   }
 
-  const resolvedPhotoUrl =
-    (typeof photo_url === 'string' && photo_url.trim()) ||
-    (typeof media_url === 'string' && media_url.trim()) ||
-    (typeof image_url === 'string' && image_url.trim()) ||
-    null;
+  const liveSessionId =
+    typeof live_session_id === 'string' ? live_session_id.trim() : null;
 
   if (
-    !resolvedPhotoUrl &&
-    (title === undefined || title === null || title === '') &&
-    (body === undefined || body === null || body === '')
+    liveSessionId &&
+    isValidUuid(liveSessionId) &&
+    (!Number.isFinite(latNumber) ||
+      !Number.isFinite(lonNumber) ||
+      !atTimeIso)
   ) {
-    return res.status(400).json({
-      ok: false,
-      error: 'Provide at least a title, body, or media_url',
-    });
+    try {
+      await ensureRoadtripLiveTables();
+      const { rows } = await pool.query(
+        `
+        SELECT session_id, last_lat, last_lon, last_ping_at
+        FROM tt_party_roadtrip_session
+        WHERE session_id = $1
+          AND roadtrip_id = $2
+        LIMIT 1
+        `,
+        [liveSessionId, roadtripId]
+      );
+      const liveSession = rows[0] || null;
+      if (liveSession) {
+        const sessionLat = Number(liveSession.last_lat);
+        const sessionLon = Number(liveSession.last_lon);
+        if (!Number.isFinite(latNumber) && Number.isFinite(sessionLat)) {
+          latNumber = sessionLat;
+        }
+        if (!Number.isFinite(lonNumber) && Number.isFinite(sessionLon)) {
+          lonNumber = sessionLon;
+        }
+        if (!atTimeIso && liveSession.last_ping_at) {
+          atTimeIso = coerceIsoTimestamp(liveSession.last_ping_at);
+        }
+      }
+    } catch (err) {
+      console.warn('[roadtrip] unable to hydrate drop from live session', err.message);
+    }
   }
 
   try {
-    const insertResult = await pool.query(
+    const result = await pool.query(
       `
       INSERT INTO tt_party_roadtrip_object (
-        object_id,
         roadtrip_id,
         member_id,
         kind,
-        title,
-        body,
-        photo_url,
         lat,
         lon,
-        at_time
+        at_time,
+        title,
+        body,
+        photo_id,
+        video_r2_key
       )
       VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        $7,
-        $8,
-        $9
+        $1, $2, $3,
+        $4, $5, $6,
+        $7, $8,
+        $9, $10
       )
       RETURNING *
       `,
       [
         roadtripId,
-        hostContext.actorMemberId,
-        normalizedKind,
-        title || null,
-        body || null,
-        resolvedPhotoUrl,
+        memberId,
+        kind,
         latNumber,
         lonNumber,
         atTimeIso,
+        title || null,
+        body || null,
+        photo_id || null,
+        video_r2_key || null,
       ]
     );
 
-    return res.status(201).json({
-      ok: true,
-      object: insertResult.rows[0],
-    });
+    const created = result.rows[0];
+    res.status(201).json({ ok: true, object: created });
   } catch (err) {
     console.error('[roadtrip] failed to insert object', err);
-    return res.status(500).json({
-      ok: false,
-      error: 'Unable to record hype drop',
-    });
+    res.status(500).json({ ok: false, error: 'Failed to insert object' });
   }
 });
+
 
 router.delete('/:roadtripId/objects/:objectId', async (req, res) => {
   const { roadtripId, objectId } = req.params || {};
@@ -761,6 +1601,129 @@ router.delete('/:roadtripId/objects', async (req, res) => {
     deleted,
     roadtrip: roadtripState,
   });
+});
+
+router.patch('/:roadtripId/objects/:objectId/layout', async (req, res) => {
+  const { roadtripId, objectId } = req.params || {};
+  if (!roadtripId || !objectId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId and objectId are required',
+    });
+  }
+  if (!isValidUuid(objectId)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Invalid objectId',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  try {
+    const layoutRow = await upsertLayoutRow(roadtripId, objectId, req.body || {});
+    if (!layoutRow) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No layout changes provided',
+      });
+    }
+    return res.json({
+      ok: true,
+      layout: layoutRow,
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to update layout', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to update layout',
+    });
+  }
+});
+
+router.post('/:roadtripId/layout', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  const hostContext = await ensureRoadtripHost(req, res, roadtripId);
+  if (!hostContext) return;
+
+  const updates = Array.isArray(req.body?.updates)
+    ? req.body.updates
+    : null;
+
+  if (!updates || !updates.length) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Provide at least one layout update',
+    });
+  }
+
+  const applied = [];
+  try {
+    for (const entry of updates) {
+      if (!entry) continue;
+      const objectId =
+        entry.object_id || entry.objectId || entry.id;
+      if (!isValidUuid(objectId)) continue;
+      const layoutRow = await upsertLayoutRow(roadtripId, objectId, entry);
+      if (layoutRow) {
+        applied.push(layoutRow);
+      }
+    }
+    if (!applied.length) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No valid layout updates applied',
+      });
+    }
+    return res.json({
+      ok: true,
+      layouts: applied,
+    });
+  } catch (err) {
+    console.error('[roadtrip] bulk layout update failed', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to apply layout updates',
+    });
+  }
+});
+
+router.get('/:roadtripId/live', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+  const sessionPreference =
+    req.query?.live_session || req.query?.session || null;
+  try {
+    const liveState = await loadRoadtripLiveState(
+      roadtripId,
+      sessionPreference
+    );
+    return res.json({
+      ok: true,
+      live_sessions: liveState.sessions,
+      live_trace: liveState.trace,
+      live_trace_session_id: liveState.trace_session_id,
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to fetch live sessions', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to load live tracking data',
+    });
+  }
 });
 
 module.exports = router;
