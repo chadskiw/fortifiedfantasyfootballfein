@@ -22,8 +22,7 @@ const adminConsoleRoutes = require('./routes/adminConsole');
 const tChannelRoutes = require('./routes/tChannel');
 const roomsRouter = require('./routes/rooms');
 const roadtripRoutes = require('./routes/roadtrip');
-
-
+const sensorRoutes = require('./routes/sensor');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -150,6 +149,10 @@ app.use('/api/rooms', roomsRouter);
 // ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
 
 app.use('/api/roadtrip', roadtripRoutes);
+
+
+// ...
+app.use('/api/sensor', sensorRoutes);
 
 // ... other app.use(...) lines
 
