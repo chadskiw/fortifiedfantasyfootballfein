@@ -1,6 +1,7 @@
 // routes/sensor.js
 const express = require('express');
 const router = express.Router();
+const pool = require('../src/db/pool'); // adjust path if needed
 
 /**
  * Expect req.app.get('db') to be a pg.Pool or pg.Client
@@ -12,7 +13,7 @@ function isFiniteNumber(n) {
 }
 
 router.post('/batch', async (req, res) => {
-  const db = req.app.get('db');
+  const db = pool;
 
   try {
     const {
