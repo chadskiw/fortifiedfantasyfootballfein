@@ -51,44 +51,48 @@ router.post('/batch', async (req, res) => {
     let idx = 1;
     const placeholders = [];
 
-    for (const p of points) {
-      if (!p || !isFiniteNumber(p.lat) || !isFiniteNumber(p.lon) || !p.t) {
-        continue;
-      }
+for (const p of points) {
+  if (!p || !isFiniteNumber(p.lat) || !isFiniteNumber(p.lon) || !p.t) {
+    continue;
+  }
 
-      const recordedAt = new Date(p.t);
-      if (Number.isNaN(recordedAt.getTime())) {
-        continue;
-      }
+  const recordedAt = new Date(p.t);
+  if (Number.isNaN(recordedAt.getTime())) {
+    continue;
+  }
 
-      const accuracy_m = isFiniteNumber(p.accuracy_m) ? p.accuracy_m : null;
-      const speed_mps = isFiniteNumber(p.speed_mps) ? p.speed_mps : null;
-      const heading_deg = isFiniteNumber(p.heading_deg) ? p.heading_deg : null;
-      const accel_x = p.accel && isFiniteNumber(p.accel.x) ? p.accel.x : null;
-      const accel_y = p.accel && isFiniteNumber(p.accel.y) ? p.accel.y : null;
-      const accel_z = p.accel && isFiniteNumber(p.accel.z) ? p.accel.z : null;
-      const raw_payload = p || null;
+  const accuracy_m = isFiniteNumber(p.accuracy_m) ? p.accuracy_m : null;
+  const speed_mps = isFiniteNumber(p.speed_mps) ? p.speed_mps : null;
+  const heading_deg = isFiniteNumber(p.heading_deg) ? p.heading_deg : null;
+  const accel_x = p.accel && isFiniteNumber(p.accel.x) ? p.accel.x : null;
+  const accel_y = p.accel && isFiniteNumber(p.accel.y) ? p.accel.y : null;
+  const accel_z = p.accel && isFiniteNumber(p.accel.z) ? p.accel.z : null;
+  const raw_payload = p || null;
 
-      placeholders.push(
-        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`,
-      );
+  // 👇 13 placeholders to match 13 values
+  placeholders.push(
+    `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, ` +
+    `$${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, ` +
+    `$${idx++}, $${idx++}, $${idx++})`,
+  );
 
-      values.push(
-        device_id,
-        member_id,
-        trip_id || null,
-        recordedAt.toISOString(),
-        p.lat,
-        p.lon,
-        accuracy_m,
-        speed_mps,
-        heading_deg,
-        accel_x,
-        accel_y,
-        accel_z,
-        raw_payload,
-      );
-    }
+  values.push(
+    device_id,                // 1
+    member_id,                // 2
+    trip_id || null,          // 3
+    recordedAt.toISOString(), // 4
+    p.lat,                    // 5
+    p.lon,                    // 6
+    accuracy_m,               // 7
+    speed_mps,                // 8
+    heading_deg,              // 9
+    accel_x,                  // 10
+    accel_y,                  // 11
+    accel_z,                  // 12
+    raw_payload,              // 13
+  );
+}
+
 
     if (placeholders.length === 0) {
       return res.status(400).json({
@@ -97,24 +101,25 @@ router.post('/batch', async (req, res) => {
       });
     }
 
-    const insertSql = `
-      INSERT INTO s1c_sensor_point (
-        device_id,
-        member_id,
-        trip_id,
-        recorded_at,
-        lat,
-        lon,
-        accuracy_m,
-        speed_mps,
-        heading_deg,
-        accel_x,
-        accel_y,
-        accel_z,
-        raw_payload
-      )
-      VALUES ${placeholders.join(', ')}
-    `;
+const insertSql = `
+  INSERT INTO s1c_sensor_point (
+    device_id,
+    member_id,
+    trip_id,
+    recorded_at,
+    lat,
+    lon,
+    accuracy_m,
+    speed_mps,
+    heading_deg,
+    accel_x,
+    accel_y,
+    accel_z,
+    raw_payload
+  )
+  VALUES ${placeholders.join(', ')}
+`;
+
 
     await db.query(insertSql, values);
 
