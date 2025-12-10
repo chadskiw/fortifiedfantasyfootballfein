@@ -1355,7 +1355,9 @@ router.post('/', async (req, res) => {
 });
 
 router.get('/resolve', async (req, res) => {
-  const routeKey = String(req.query?.rty || '').trim();
+  const routeKey = String(req.query?.rty || '')
+    .trim()
+    .toLowerCase();
   const partyIdParam = String(
     req.query?.party_id || req.query?.partyId || ''
   ).trim();
@@ -2947,6 +2949,42 @@ router.post('/:partyId/cut', async (req, res) => {
   }
 });
 
+async function loadPartyRoadtrips(client, partyId) {
+  if (!partyId) return [];
+  try {
+    const { rows } = await client.query(
+      `
+        SELECT
+          roadtrip_id,
+          party_id,
+          name,
+          description,
+          trip_vanity,
+          state,
+          starts_at,
+          ends_at,
+          planned_distance_m,
+          planned_path,
+          created_at,
+          updated_at
+        FROM tt_party_roadtrip
+        WHERE party_id = $1
+        ORDER BY
+          COALESCE(starts_at, created_at) ASC,
+          created_at ASC
+      `,
+      [partyId]
+    );
+    return rows;
+  } catch (err) {
+    console.error('[party:roadtrip:lookup]', {
+      partyId,
+      error: err.message,
+    });
+    return [];
+  }
+}
+
 router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
   const { partyId } = req.params;
   const memberId = req.member.member_id;
@@ -3090,6 +3128,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
     const recap = posts.filter(p => p.phase === 'recap');
 
     const audioPermissions = await fetchPartyAudioPermissions(partyId);
+    const roadtrips = await loadPartyRoadtrips(client, partyId);
     res.json({
       party,
       membership: serializeMembership(req.membership),
@@ -3097,6 +3136,7 @@ router.get('/:partyId/feed', requirePartyAccess, async (req, res, next) => {
       feed: live,
       recap,
       audio_permissions: audioPermissions,
+      roadtrips,
     });
   } catch (err) {
     next(err);
@@ -3273,6 +3313,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
     const recap = posts.filter((p) => p.phase === 'recap');
 
     const audioPermissions = await fetchPartyAudioPermissions(partyId);
+    const roadtrips = await loadPartyRoadtrips(client, partyId);
     return res.json({
       ok: true,
       party,
@@ -3281,6 +3322,7 @@ router.get('/:partyId/public-feed', async (req, res) => {
       feed: live,
       recap,
       audio_permissions: audioPermissions,
+      roadtrips,
     });
   } catch (err) {
     console.error('[party:public_feed]', err);
