@@ -246,6 +246,64 @@ router.get('/path', async (req, res) => {
   }
 });
 
+router.get('/path', async (req, res) => {
+  const db = pool;
+  const tripId = (req.query.trip_id || req.query.trip || '').trim();
+  if (!tripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'missing_trip_id',
+    });
+  }
+
+  const limitParam = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitParam) ? Math.max(1, Math.min(limitParam, 5000)) : 2000;
+
+  try {
+    const { rows } = await db.query(
+      `
+      SELECT lat, lon, recorded_at
+      FROM s1c_sensor_point
+      WHERE trip_id = $1
+        AND lat IS NOT NULL
+        AND lon IS NOT NULL
+      ORDER BY recorded_at ASC
+      LIMIT $2
+      `,
+      [tripId, limit],
+    );
+
+    const points = rows
+      .map((row) => {
+        const lat = typeof row.lat === 'number' ? row.lat : Number(row.lat);
+        const lon = typeof row.lon === 'number' ? row.lon : Number(row.lon);
+        const t =
+          row.recorded_at instanceof Date
+            ? row.recorded_at.toISOString()
+            : row.recorded_at
+              ? new Date(row.recorded_at).toISOString()
+              : null;
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || !t) {
+          return null;
+        }
+        return { lat, lon, t };
+      })
+      .filter(Boolean);
+
+    return res.json({
+      ok: true,
+      points,
+      total: points.length,
+    });
+  } catch (err) {
+    console.error('[sensor.path] error', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_error',
+    });
+  }
+});
+
 // Simple debug/heartbeat
 router.get('/heartbeat', (req, res) => {
   res.json({
