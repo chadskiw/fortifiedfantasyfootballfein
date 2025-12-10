@@ -3339,9 +3339,6 @@ router.get('/:partyId/guests', requirePartyAccess, async (req, res) => {
   if (!partyId) {
     return res.status(400).json({ ok: false, error: 'party_id_required' });
   }
-  if (!req.isPartyHost) {
-    return res.status(403).json({ ok: false, error: 'not_party_host' });
-  }
 
   try {
     const { rows } = await pool.query(
@@ -3359,17 +3356,23 @@ router.get('/:partyId/guests', requirePartyAccess, async (req, res) => {
           pm.handle ASC
       `,
       [partyId]
-    );
+      );
 
-    const hostHandle = (req.party?.host_handle || '').toLowerCase();
-    const guests = rows
-      .filter((row) => (row.handle || '').toLowerCase() !== hostHandle)
-      .map(serializeMembership);
+      const hostHandle = (req.party?.host_handle || '').toLowerCase();
+      const guests = rows
+        .filter((row) => (row.handle || '').toLowerCase() !== hostHandle)
+        .map((row) => {
+          const serialized = serializeMembership(row);
+          if (!req.isPartyHost) {
+            serialized.invite_token = null;
+          }
+          return serialized;
+        });
 
-    return res.json({ ok: true, guests });
-  } catch (err) {
-    console.error('[party:guests]', err);
-    return res.status(500).json({ ok: false, error: 'party_guests_failed' });
+      return res.json({ ok: true, guests });
+    } catch (err) {
+      console.error('[party:guests]', err);
+      return res.status(500).json({ ok: false, error: 'party_guests_failed' });
   }
 });
 
