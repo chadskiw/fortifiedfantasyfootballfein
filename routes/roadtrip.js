@@ -758,6 +758,65 @@ async function resolveMemberId(req) {
   return null;
 }
 
+async function resolveRoadtripViewer(req, roadtrip) {
+  let viewerMemberId = null;
+  try {
+    viewerMemberId = await resolveMemberId(req);
+  } catch (err) {
+    console.warn('[roadtrip] viewer identity lookup failed', err.message);
+  }
+
+  const viewer = {
+    member_id: viewerMemberId ? String(viewerMemberId) : null,
+    handle: null,
+    role: 'public',
+  };
+
+  if (!viewer.member_id || !roadtrip) {
+    return viewer;
+  }
+
+  const normalizedHostId = roadtrip.host_member_id
+    ? String(roadtrip.host_member_id)
+    : null;
+
+  if (normalizedHostId && normalizedHostId === viewer.member_id) {
+    viewer.role = 'host';
+  } else if (roadtrip.party_id) {
+    try {
+      const membership = await pool.query(
+        `
+          SELECT 1
+          FROM tt_party_member
+          WHERE party_id = $1
+            AND member_id = $2
+          LIMIT 1
+        `,
+        [roadtrip.party_id, viewer.member_id]
+      );
+      if (membership.rowCount) {
+        viewer.role = 'member';
+      }
+    } catch (err) {
+      console.warn('[roadtrip] viewer membership lookup failed', err.message);
+    }
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT handle FROM ff_member WHERE member_id = $1 LIMIT 1`,
+      [viewer.member_id]
+    );
+    if (rows[0]?.handle) {
+      viewer.handle = rows[0].handle;
+    }
+  } catch (err) {
+    console.warn('[roadtrip] viewer handle lookup failed', err.message);
+  }
+
+  return viewer;
+}
+
 /**
  * POST /api/roadtrip
  * Create a new roadtrip tied to a Party.
@@ -965,6 +1024,7 @@ router.get('/', async (req, res) => {
     }
 
     const roadtrip = tripResult.rows[0];
+    const viewer = await resolveRoadtripViewer(req, roadtrip);
 
     await ensureRoadtripLayoutTable();
 
@@ -1030,6 +1090,7 @@ router.get('/', async (req, res) => {
       live_sessions: liveState.sessions,
       live_trace: liveState.trace,
       live_trace_session_id: liveState.trace_session_id,
+      viewer,
     });
   } catch (err) {
     console.error('Error in GET /api/roadtrip:', err);
