@@ -5,6 +5,12 @@ const { getCurrentIdentity } = require('../services/identity');
 
 const router = express.Router();
 
+const PUBLIC_VIEWER_HANDLE = (
+  process.env.PUBLIC_VIEWER_HANDLE || 'PUBGHOST'
+)
+  .trim()
+  .toUpperCase();
+
 /**
  * Helper: slugify trip name -> trip_vanity
  */
@@ -333,6 +339,18 @@ function quoteIdent(name) {
 function quoteLiteral(value) {
   if (value === null || value === undefined) return 'NULL';
   return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function getPublicViewerOverride(req) {
+  if (!PUBLIC_VIEWER_HANDLE) return null;
+  const raw =
+    req.query?.viewerId ||
+    req.query?.viewer_id ||
+    req.headers?.['x-public-viewer'] ||
+    req.headers?.['x-public-viewer-id'];
+  if (!raw) return null;
+  const normalized = String(raw).trim().toUpperCase();
+  return normalized === PUBLIC_VIEWER_HANDLE ? PUBLIC_VIEWER_HANDLE : null;
 }
 
 async function ensureRoadtripObjectKindConstraints(force = false) {
@@ -759,6 +777,16 @@ async function resolveMemberId(req) {
 }
 
 async function resolveRoadtripViewer(req, roadtrip) {
+  const publicOverrideId = getPublicViewerOverride(req);
+  if (publicOverrideId) {
+    return {
+      member_id: publicOverrideId,
+      handle: PUBLIC_VIEWER_HANDLE,
+      role: 'public',
+      public_override: true,
+    };
+  }
+
   let viewerMemberId = null;
   try {
     viewerMemberId = await resolveMemberId(req);
