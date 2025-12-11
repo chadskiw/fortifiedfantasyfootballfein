@@ -33,6 +33,7 @@ const partyLandingRoutes = require('./routes/partyLanding');
 const trashtalkUserRoutes = require('./routes/trashtalk-user');
 const specialsRouter = require('./routes/specials');
 const privacyZonesRouter = require('./routes/privacyZones');
+const partyPeopleRoutes = require('./routes/partyPeople');
 
 
 // Routers (only require what you actually have in your repo)
@@ -656,6 +657,7 @@ app.use('/api/profile',  require('./src/routes/profile'));
 app.use('/api/session',  require('./routes/session')); // /check, /exists, /lookup, /avatar, /qh-upsert
 app.use('/api/quickhitter', qh);
 app.use('/api/identity',   qh); // alias for legacy FE calls
+app.use(partyPeopleRoutes);
 
 // ===== Compatibility shims the FE expects =====
 app.post('/api/verify/start',   (req, res) => res.redirect(307, '/api/identity/request-code'));
