@@ -24,6 +24,7 @@ const roomsRouter = require('./routes/rooms');
 const roadtripRoutes = require('./routes/roadtrip');
 const sensorRoutes = require('./routes/sensor');
 const momentsRouter = require('./routes/moments');
+const soundtrackRouter = require('./routes/soundtrack');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -152,6 +153,7 @@ app.use('/api/rooms', roomsRouter);
 
 app.use('/api/roadtrip', roadtripRoutes);
 app.use('/api/moments', momentsRouter);
+app.use('/api/soundtrack', soundtrackRouter);
 
 
 // ...
