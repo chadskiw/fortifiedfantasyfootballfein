@@ -153,6 +153,8 @@ app.use('/api/rooms', roomsRouter);
 // ⚠️ Mount routes BEFORE any "catch-all" handlers, and after json/cookie middlewares
 
 app.use('/api/roadtrip', roadtripRoutes);
+app.use('/api/roadtrips', roadtripRoutes);
+
 app.use('/api/moments', momentsRouter);
 app.use('/api/soundtrack', soundtrackRouter);
 app.use('/api/bandcamp', bandcampRouter);
