@@ -2032,6 +2032,15 @@ router.post('/default', async (req, res) => {
 
   async function ensureDefaultPartyId() {
     const partyName = `${base}-default-party`;
+    const centerLat = Number.isFinite(Number(body.center_lat))
+      ? Number(body.center_lat)
+      : 0;
+    const centerLon = Number.isFinite(Number(body.center_lon))
+      ? Number(body.center_lon)
+      : 0;
+    const radiusM = Number.isFinite(Number(body.radius_m))
+      ? Number(body.radius_m)
+      : 5000;
 
     // reuse
     const existing = await pool.query(
@@ -2044,10 +2053,18 @@ router.post('/default', async (req, res) => {
     const created = await pool.query(
       `
       INSERT INTO tt_party (party_id, host_member_id, name, description, center_lat, center_lon, radius_m, party_type, host_handle)
-      VALUES (gen_random_uuid(), $1, $2, $3, 0, 0, 5000, 'private', $4)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'private', $7)
       RETURNING party_id
       `,
-      [memberId, partyName, 'Auto-created container party for default roadtrip', handle]
+      [
+        memberId,
+        partyName,
+        'Auto-created container party for default roadtrip',
+        centerLat,
+        centerLon,
+        radiusM,
+        handle,
+      ]
     );
     return created.rows[0].party_id;
   }
@@ -2069,7 +2086,16 @@ router.post('/default', async (req, res) => {
     );
   }
 
-  // 5) Insert (try NULL party_id first; fallback if DB requires party_id)
+  if (!partyId) {
+    try {
+      partyId = await ensureDefaultPartyId();
+    } catch (err) {
+      console.error('[roadtrips/default] failed to ensure party', err);
+      return res.status(500).json({ ok: false, error: 'unable to ensure member party' });
+    }
+  }
+
+  // 5) Insert (try resolved party_id first; fallback only if constraint complains)
   try {
     const ins = await insertRoadtrip(partyId);
     return res.status(201).json({ ok: true, created: true, roadtrip: ins.rows[0] });
