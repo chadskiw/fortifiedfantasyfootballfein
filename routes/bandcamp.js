@@ -99,7 +99,8 @@ router.get('/search', async (req, res) => {
 });
 
 router.get('/track', async (req, res) => {
-  const trackUrl = String(req.query.url || '').trim();
+  const rawUrl = String(req.query.url || '').trim();
+  const trackUrl = decodeHtmlEntities(rawUrl).replace(/&amp;/g, '&');
   if (!trackUrl) {
     return res.status(400).json({ ok: false, error: 'missing_track_url' });
   }
