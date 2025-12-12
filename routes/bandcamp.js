@@ -57,12 +57,14 @@ function parseSearchResults(html, limit = 12) {
     const album = albumMatch ? decodeHtmlEntities(stripTags(albumMatch[1])).trim() : null;
     const artist = artistMatch ? decodeHtmlEntities(stripTags(artistMatch[1])).trim() : null;
     const title = decodeHtmlEntities(stripTags(titleRaw || '')).trim();
+    const sanitizedUrl = url ? decodeHtmlEntities(url) : null;
+    const art = artUrl ? decodeHtmlEntities(artUrl) : null;
     results.push({
       title,
       artist,
       album,
-      url,
-      art_url: artUrl ? decodeHtmlEntities(artUrl) : null,
+      url: sanitizedUrl,
+      art_url: art,
       release: decodeHtmlEntities(stripTags(releaseRaw)).replace(/^released\s+/i, '').trim() || null,
     });
   }
