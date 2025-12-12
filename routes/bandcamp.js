@@ -72,6 +72,36 @@ function parseSearchResults(html, limit = 12) {
 }
 
 function extractJsonBlock(html, key) {
+  const attribute = 'data-tralbum="';
+  const attrIndex = html.indexOf(attribute);
+  if (attrIndex !== -1) {
+    const start = attrIndex + attribute.length;
+    const end = html.indexOf('"', start);
+    if (end > start) {
+      try {
+        const encoded = html.slice(start, end);
+        const decoded = decodeHtmlEntities(encoded);
+        return JSON.parse(decoded);
+      } catch (err) {
+        console.warn('[bandcamp] failed to parse data-tralbum attribute');
+      }
+    }
+  } else {
+    const scriptIdx = html.indexOf(`data-tralbum='`);
+    if (scriptIdx !== -1) {
+      const start = scriptIdx + `data-tralbum='`.length;
+      const end = html.indexOf("'", start);
+      if (end > start) {
+        try {
+          const decoded = decodeHtmlEntities(html.slice(start, end));
+          return JSON.parse(decoded);
+        } catch (err) {
+          console.warn('[bandcamp] failed to parse single-quoted data-tralbum attribute');
+        }
+      }
+    }
+  }
+
   const marker = `var ${key}`;
   const idx = html.indexOf(marker);
   if (idx === -1) return null;
