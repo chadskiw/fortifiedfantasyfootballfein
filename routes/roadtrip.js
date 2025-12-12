@@ -1984,303 +1984,110 @@ router.get('/:roadtripId/live', async (req, res) => {
  *   radius_m?: number
  * }
  */
+// POST /api/roadtrips/default
 router.post('/default', async (req, res) => {
   const body = req.body || {};
+  const q = req.query || {};
 
-  // ---- resolve actor ----
-  let actorMemberId = null;
-  try {
-    actorMemberId = await resolveMemberId(req);
-  } catch (err) {
-    console.error('[roadtrip/default] failed to resolve member', err);
-  }
+  // 1) Identify member (use your existing identity if you have it)
+  // If your plural routes currently accept ?member_id=... keep that here.
+  const memberId = String(body.member_id || q.member_id || '').trim();
+  if (!memberId) return res.status(400).json({ ok: false, error: 'member_id required' });
 
-  // Optional dev-mode escape hatch if you *really* want query/body member_id support:
-  // (kept OFF unless you explicitly enable it)
-  if (
-    !actorMemberId &&
-    process.env.ALLOW_QUERY_MEMBER_ID === '1' &&
-    (body.member_id || req.query?.member_id)
-  ) {
-    actorMemberId = String(body.member_id || req.query.member_id);
-  }
-
-  if (!actorMemberId) {
-    return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  }
-
-  // ---- fetch handle (for slug + default naming) ----
+  // 2) Get handle for vanity naming (fallback to memberId)
   let handle = null;
   try {
-    const { rows } = await pool.query(
-      `SELECT handle FROM ff_member WHERE member_id = $1 LIMIT 1`,
-      [actorMemberId]
-    );
-    handle = rows?.[0]?.handle ? String(rows[0].handle) : null;
-  } catch (err) {
-    console.warn('[roadtrip/default] handle lookup failed', err.message);
+    const r = await pool.query(`SELECT handle FROM ff_member WHERE member_id=$1 LIMIT 1`, [memberId]);
+    handle = r.rows?.[0]?.handle ? String(r.rows[0].handle) : null;
+  } catch (e) {
+    console.warn('[roadtrips/default] handle lookup failed', e.message);
   }
 
-  const handleSlug =
-    slugifyTripName((handle || '').trim()) ||
-    slugifyTripName(String(actorMemberId)) ||
-    'trip';
+  const base = slugifyTripName(handle || memberId) || 'trip';
+  const tripVanity = `${base}-default-trip`;
+  const tripName = `${base} default trip`;
 
-  // ---- choose vanity + name ----
-  let vanity = String(
-    (body.trip_vanity || body.trip || req.query?.trip || '')
-  ).trim();
-
-  if (!vanity) vanity = `${handleSlug}-default-trip`;
-
-  const name =
-    String(body.name || `${handleSlug} default trip`).trim() || 'default trip';
-
-  const description =
-    body.description !== undefined && body.description !== null
-      ? String(body.description)
-      : null;
-
-  const startsAt = body.starts_at || null;
-  const endsAt = body.ends_at || null;
-
-  // ---- if exists, return/update ----
+  // 3) If exists, return it
   try {
-    const existingRes = await pool.query(
-      `
-      SELECT *
-      FROM tt_party_roadtrip
-      WHERE trip_vanity IS NOT NULL
-        AND lower(trip_vanity) = lower($1)
-      LIMIT 1
-      `,
-      [vanity]
+    const ex = await pool.query(
+      `SELECT * FROM tt_party_roadtrip WHERE trip_vanity IS NOT NULL AND lower(trip_vanity)=lower($1) LIMIT 1`,
+      [tripVanity]
     );
-
-    if (existingRes.rows.length) {
-      const existing = existingRes.rows[0];
-      const existingHost = existing.host_member_id
-        ? String(existing.host_member_id)
-        : null;
-
-      if (existingHost && existingHost !== String(actorMemberId)) {
-        return res.status(409).json({
-          ok: false,
-          error: 'trip_vanity is already owned by another host',
-        });
-      }
-
-      // optional "upsert" update (no updated_at assumptions)
-      const partyId = body.party_id || null;
-
-      const updateRes = await pool.query(
-        `
-        UPDATE tt_party_roadtrip
-        SET
-          party_id = COALESCE($2, party_id),
-          name = COALESCE($3, name),
-          description = COALESCE($4, description),
-          starts_at = COALESCE($5, starts_at),
-          ends_at = COALESCE($6, ends_at)
-        WHERE roadtrip_id = $1
-        RETURNING *
-        `,
-        [existing.roadtrip_id, partyId, name, description, startsAt, endsAt]
-      );
-
-      return res.json({
-        ok: true,
-        created: false,
-        roadtrip: updateRes.rows[0] || existing,
-      });
-    }
-  } catch (err) {
-    console.error('[roadtrip/default] existing lookup failed', err);
-    return res.status(500).json({ ok: false, error: 'Failed to upsert default roadtrip' });
+    if (ex.rows.length) return res.json({ ok: true, created: false, roadtrip: ex.rows[0] });
+  } catch (e) {
+    console.error('[roadtrips/default] select existing failed', e);
+    return res.status(500).json({ ok: false, error: 'select failed' });
   }
 
-  // ---- party validation if party_id provided ----
+  // 4) Optional: allow caller to attach to party_id if you want
   let partyId = body.party_id || null;
-  if (partyId) {
-    try {
-      const partyRes = await pool.query(
-        `SELECT party_id, host_member_id FROM tt_party WHERE party_id = $1 LIMIT 1`,
-        [partyId]
-      );
-      if (!partyRes.rows.length) {
-        return res.status(404).json({ ok: false, error: 'party not found' });
-      }
-      const partyHost = partyRes.rows[0].host_member_id
-        ? String(partyRes.rows[0].host_member_id)
-        : null;
 
-      if (partyHost && partyHost !== String(actorMemberId)) {
-        return res.status(403).json({
-          ok: false,
-          error: 'Only the party host can attach a roadtrip to this party',
-        });
-      }
-    } catch (err) {
-      console.error('[roadtrip/default] party validation failed', err);
-      return res.status(500).json({ ok: false, error: 'Failed to validate party_id' });
-    }
-  }
-
-  // ---- helper: create/reuse a "default party" if party_id is required ----
   async function ensureDefaultPartyId() {
-    const partyName = `${handleSlug}-default-party`;
+    const partyName = `${base}-default-party`;
 
-    // reuse if already created
+    // reuse
     const existing = await pool.query(
-      `
-      SELECT party_id
-      FROM tt_party
-      WHERE host_member_id = $1
-        AND lower(name) = lower($2)
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [actorMemberId, partyName]
+      `SELECT party_id FROM tt_party WHERE host_member_id=$1 AND lower(name)=lower($2) ORDER BY created_at DESC LIMIT 1`,
+      [memberId, partyName]
     );
     if (existing.rows.length) return existing.rows[0].party_id;
 
-    const centerLat = Number(body.center_lat ?? body.centerLat ?? 0);
-    const centerLon = Number(body.center_lon ?? body.centerLon ?? 0);
-    const radiusM = Number(body.radius_m ?? body.radiusM ?? 5000);
-
-    // NOTE: If your tt_party schema differs, adjust this insert column list accordingly.
+    // create (adjust columns to match your tt_party schema if needed)
     const created = await pool.query(
       `
-      INSERT INTO tt_party (
-        party_id,
-        host_member_id,
-        name,
-        description,
-        center_lat,
-        center_lon,
-        radius_m,
-        party_type,
-        host_handle
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        'private',
-        $7
-      )
+      INSERT INTO tt_party (party_id, host_member_id, name, description, center_lat, center_lon, radius_m, party_type, host_handle)
+      VALUES (gen_random_uuid(), $1, $2, $3, 0, 0, 5000, 'private', $4)
       RETURNING party_id
       `,
-      [
-        actorMemberId,
-        partyName,
-        'Auto-created container party for default roadtrip',
-        centerLat,
-        centerLon,
-        radiusM,
-        handle ? String(handle) : null,
-      ]
+      [memberId, partyName, 'Auto-created container party for default roadtrip', handle]
     );
-
     return created.rows[0].party_id;
   }
 
-  // ---- insert roadtrip (try NULL party_id first; fallback to default party if needed) ----
   async function insertRoadtrip(usePartyId) {
     return pool.query(
       `
       INSERT INTO tt_party_roadtrip (
-        roadtrip_id,
-        party_id,
-        host_member_id,
-        name,
-        description,
-        trip_vanity,
-        state,
-        planned_path,
-        planned_distance_m,
-        starts_at,
-        ends_at
+        roadtrip_id, party_id, host_member_id, name, description, trip_vanity, state,
+        planned_path, planned_distance_m, starts_at, ends_at
       )
       VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        'planning',
-        NULL,
-        NULL,
-        $6,
-        $7
+        gen_random_uuid(), $1, $2, $3, $4, $5, 'planning',
+        NULL, NULL, NOW(), NULL
       )
       RETURNING *
       `,
-      [usePartyId, actorMemberId, name, description, vanity, startsAt, endsAt]
+      [usePartyId, memberId, tripName, null, tripVanity]
     );
   }
 
+  // 5) Insert (try NULL party_id first; fallback if DB requires party_id)
   try {
-    // attempt 1: use provided party_id (or NULL)
-    const insertRes = await insertRoadtrip(partyId);
-    return res.status(201).json({
-      ok: true,
-      created: true,
-      roadtrip: insertRes.rows[0],
-    });
-  } catch (err) {
-    // race condition: someone inserted after our existence check
-    if (err.code === '23505') {
-      try {
-        const again = await pool.query(
-          `
-          SELECT *
-          FROM tt_party_roadtrip
-          WHERE trip_vanity IS NOT NULL
-            AND lower(trip_vanity) = lower($1)
-          LIMIT 1
-          `,
-          [vanity]
-        );
-        if (again.rows.length) {
-          return res.json({ ok: true, created: false, roadtrip: again.rows[0] });
-        }
-      } catch (_) {}
+    const ins = await insertRoadtrip(partyId);
+    return res.status(201).json({ ok: true, created: true, roadtrip: ins.rows[0] });
+  } catch (e) {
+    const partyNotNull = !partyId && (e.code === '23502' || /party_id/i.test(String(e.message || '')));
+    if (!partyNotNull) {
+      console.error('[roadtrips/default] insert failed', e);
+      return res.status(500).json({ ok: false, error: 'insert failed' });
     }
 
-    // If NULL party_id is not allowed, create/reuse default party and retry.
-    const looksLikePartyNotNull =
-      !partyId &&
-      (err.code === '23502' || /party_id/i.test(String(err.message || '')));
-
-    if (looksLikePartyNotNull) {
-      try {
-        const defaultPartyId = await ensureDefaultPartyId();
-        const insertRes2 = await insertRoadtrip(defaultPartyId);
-        return res.status(201).json({
-          ok: true,
-          created: true,
-          default_party_id: defaultPartyId,
-          roadtrip: insertRes2.rows[0],
-        });
-      } catch (err2) {
-        console.error('[roadtrip/default] fallback default party failed', err2);
-        return res.status(500).json({
-          ok: false,
-          error: 'Failed to create default roadtrip (fallback party)',
-        });
-      }
+    try {
+      const fallbackPartyId = await ensureDefaultPartyId();
+      const ins2 = await insertRoadtrip(fallbackPartyId);
+      return res.status(201).json({
+        ok: true,
+        created: true,
+        default_party_id: fallbackPartyId,
+        roadtrip: ins2.rows[0],
+      });
+    } catch (e2) {
+      console.error('[roadtrips/default] fallback party insert failed', e2);
+      return res.status(500).json({ ok: false, error: 'fallback insert failed' });
     }
-
-    console.error('[roadtrip/default] insert failed', err);
-    return res.status(500).json({ ok: false, error: 'Failed to create default roadtrip' });
   }
 });
+
 
 module.exports = router;
 
