@@ -1994,7 +1994,7 @@ router.post('/default', async (req, res) => {
   const memberId = String(body.member_id || q.member_id || '').trim();
   if (!memberId) return res.status(400).json({ ok: false, error: 'member_id required' });
 
-  // 2) Get handle for vanity naming (fallback to memberId)
+  // 2) Determine desired vanity/name
   let handle = null;
   try {
     const r = await pool.query(`SELECT handle FROM ff_member WHERE member_id=$1 LIMIT 1`, [memberId]);
@@ -2003,9 +2003,17 @@ router.post('/default', async (req, res) => {
     console.warn('[roadtrips/default] handle lookup failed', e.message);
   }
 
+  const providedVanityRaw =
+    body.trip_vanity ||
+    body.trip_id ||
+    q.trip_vanity ||
+    q.trip ||
+    null;
   const base = slugifyTripName(handle || memberId) || 'trip';
-  const tripVanity = `${base}-default-trip`;
-  const tripName = `${base} default trip`;
+  const tripVanity = slugifyTripName(providedVanityRaw) || `${base}-default-trip`;
+  const tripName =
+    (body.trip_name && body.trip_name.trim()) ||
+    `${handle || base} default trip`;
 
   // 3) If exists, return it
   try {
@@ -2090,4 +2098,3 @@ router.post('/default', async (req, res) => {
 
 
 module.exports = router;
-
