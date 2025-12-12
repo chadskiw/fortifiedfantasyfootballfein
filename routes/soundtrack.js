@@ -7,7 +7,7 @@ const router = express.Router();
 
 router.use(express.json({ limit: '4mb', strict: false }));
 
-const SHARE_HOST = (process.env.SOUNDTRACK_SHARE_HOST || 'https://soundtrackofmydaytriplife.com').replace(
+const SHARE_HOST = (process.env.SOUNDTRACK_SHARE_HOST || 'https://soundtrack-share.pages.dev').replace(
   /\/+$/,
   '',
 );
