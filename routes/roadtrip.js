@@ -70,7 +70,17 @@ function distanceOfPlannedPath(plannedPath) {
   }
   return Math.round(total);
 }
-
+function normalizeMediaKind(value) {
+  if (!value) return null;
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'image') return 'photo';
+  if (raw === 'photo' || raw === 'pic' || raw === 'picture') return 'photo';
+  if (raw === 'video' || raw === 'clip') return 'video';
+  if (raw === 'audio' || raw === 'sound' || raw === 'voice') return 'audio';
+  if (raw === 'mixed' || raw === 'combo') return 'mixed';
+  return null;
+}
 function normalizePlannedPath(plannedPath) {
   if (!Array.isArray(plannedPath) || plannedPath.length === 0) {
     return null;
@@ -1955,16 +1965,322 @@ router.get('/:roadtripId/live', async (req, res) => {
     });
   }
 });
+/**
+ * POST /api/roadtrip/default
+ * Upsert a per-user default roadtrip.
+ *
+ * Body (all optional unless noted):
+ * {
+ *   trip_vanity?: string,         // if omitted, becomes "<handle>-default-trip"
+ *   name?: string,
+ *   description?: string,
+ *   party_id?: uuid | null,       // optional; if omitted we try NULL, then fallback to default party if needed
+ *   starts_at?: timestamptz,
+ *   ends_at?: timestamptz,
+ *
+ *   // only used if we must auto-create a default party:
+ *   center_lat?: number,
+ *   center_lon?: number,
+ *   radius_m?: number
+ * }
+ */
+router.post('/default', async (req, res) => {
+  const body = req.body || {};
+
+  // ---- resolve actor ----
+  let actorMemberId = null;
+  try {
+    actorMemberId = await resolveMemberId(req);
+  } catch (err) {
+    console.error('[roadtrip/default] failed to resolve member', err);
+  }
+
+  // Optional dev-mode escape hatch if you *really* want query/body member_id support:
+  // (kept OFF unless you explicitly enable it)
+  if (
+    !actorMemberId &&
+    process.env.ALLOW_QUERY_MEMBER_ID === '1' &&
+    (body.member_id || req.query?.member_id)
+  ) {
+    actorMemberId = String(body.member_id || req.query.member_id);
+  }
+
+  if (!actorMemberId) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  // ---- fetch handle (for slug + default naming) ----
+  let handle = null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT handle FROM ff_member WHERE member_id = $1 LIMIT 1`,
+      [actorMemberId]
+    );
+    handle = rows?.[0]?.handle ? String(rows[0].handle) : null;
+  } catch (err) {
+    console.warn('[roadtrip/default] handle lookup failed', err.message);
+  }
+
+  const handleSlug =
+    slugifyTripName((handle || '').trim()) ||
+    slugifyTripName(String(actorMemberId)) ||
+    'trip';
+
+  // ---- choose vanity + name ----
+  let vanity = String(
+    (body.trip_vanity || body.trip || req.query?.trip || '')
+  ).trim();
+
+  if (!vanity) vanity = `${handleSlug}-default-trip`;
+
+  const name =
+    String(body.name || `${handleSlug} default trip`).trim() || 'default trip';
+
+  const description =
+    body.description !== undefined && body.description !== null
+      ? String(body.description)
+      : null;
+
+  const startsAt = body.starts_at || null;
+  const endsAt = body.ends_at || null;
+
+  // ---- if exists, return/update ----
+  try {
+    const existingRes = await pool.query(
+      `
+      SELECT *
+      FROM tt_party_roadtrip
+      WHERE trip_vanity IS NOT NULL
+        AND lower(trip_vanity) = lower($1)
+      LIMIT 1
+      `,
+      [vanity]
+    );
+
+    if (existingRes.rows.length) {
+      const existing = existingRes.rows[0];
+      const existingHost = existing.host_member_id
+        ? String(existing.host_member_id)
+        : null;
+
+      if (existingHost && existingHost !== String(actorMemberId)) {
+        return res.status(409).json({
+          ok: false,
+          error: 'trip_vanity is already owned by another host',
+        });
+      }
+
+      // optional "upsert" update (no updated_at assumptions)
+      const partyId = body.party_id || null;
+
+      const updateRes = await pool.query(
+        `
+        UPDATE tt_party_roadtrip
+        SET
+          party_id = COALESCE($2, party_id),
+          name = COALESCE($3, name),
+          description = COALESCE($4, description),
+          starts_at = COALESCE($5, starts_at),
+          ends_at = COALESCE($6, ends_at)
+        WHERE roadtrip_id = $1
+        RETURNING *
+        `,
+        [existing.roadtrip_id, partyId, name, description, startsAt, endsAt]
+      );
+
+      return res.json({
+        ok: true,
+        created: false,
+        roadtrip: updateRes.rows[0] || existing,
+      });
+    }
+  } catch (err) {
+    console.error('[roadtrip/default] existing lookup failed', err);
+    return res.status(500).json({ ok: false, error: 'Failed to upsert default roadtrip' });
+  }
+
+  // ---- party validation if party_id provided ----
+  let partyId = body.party_id || null;
+  if (partyId) {
+    try {
+      const partyRes = await pool.query(
+        `SELECT party_id, host_member_id FROM tt_party WHERE party_id = $1 LIMIT 1`,
+        [partyId]
+      );
+      if (!partyRes.rows.length) {
+        return res.status(404).json({ ok: false, error: 'party not found' });
+      }
+      const partyHost = partyRes.rows[0].host_member_id
+        ? String(partyRes.rows[0].host_member_id)
+        : null;
+
+      if (partyHost && partyHost !== String(actorMemberId)) {
+        return res.status(403).json({
+          ok: false,
+          error: 'Only the party host can attach a roadtrip to this party',
+        });
+      }
+    } catch (err) {
+      console.error('[roadtrip/default] party validation failed', err);
+      return res.status(500).json({ ok: false, error: 'Failed to validate party_id' });
+    }
+  }
+
+  // ---- helper: create/reuse a "default party" if party_id is required ----
+  async function ensureDefaultPartyId() {
+    const partyName = `${handleSlug}-default-party`;
+
+    // reuse if already created
+    const existing = await pool.query(
+      `
+      SELECT party_id
+      FROM tt_party
+      WHERE host_member_id = $1
+        AND lower(name) = lower($2)
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [actorMemberId, partyName]
+    );
+    if (existing.rows.length) return existing.rows[0].party_id;
+
+    const centerLat = Number(body.center_lat ?? body.centerLat ?? 0);
+    const centerLon = Number(body.center_lon ?? body.centerLon ?? 0);
+    const radiusM = Number(body.radius_m ?? body.radiusM ?? 5000);
+
+    // NOTE: If your tt_party schema differs, adjust this insert column list accordingly.
+    const created = await pool.query(
+      `
+      INSERT INTO tt_party (
+        party_id,
+        host_member_id,
+        name,
+        description,
+        center_lat,
+        center_lon,
+        radius_m,
+        party_type,
+        host_handle
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        'private',
+        $7
+      )
+      RETURNING party_id
+      `,
+      [
+        actorMemberId,
+        partyName,
+        'Auto-created container party for default roadtrip',
+        centerLat,
+        centerLon,
+        radiusM,
+        handle ? String(handle) : null,
+      ]
+    );
+
+    return created.rows[0].party_id;
+  }
+
+  // ---- insert roadtrip (try NULL party_id first; fallback to default party if needed) ----
+  async function insertRoadtrip(usePartyId) {
+    return pool.query(
+      `
+      INSERT INTO tt_party_roadtrip (
+        roadtrip_id,
+        party_id,
+        host_member_id,
+        name,
+        description,
+        trip_vanity,
+        state,
+        planned_path,
+        planned_distance_m,
+        starts_at,
+        ends_at
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        'planning',
+        NULL,
+        NULL,
+        $6,
+        $7
+      )
+      RETURNING *
+      `,
+      [usePartyId, actorMemberId, name, description, vanity, startsAt, endsAt]
+    );
+  }
+
+  try {
+    // attempt 1: use provided party_id (or NULL)
+    const insertRes = await insertRoadtrip(partyId);
+    return res.status(201).json({
+      ok: true,
+      created: true,
+      roadtrip: insertRes.rows[0],
+    });
+  } catch (err) {
+    // race condition: someone inserted after our existence check
+    if (err.code === '23505') {
+      try {
+        const again = await pool.query(
+          `
+          SELECT *
+          FROM tt_party_roadtrip
+          WHERE trip_vanity IS NOT NULL
+            AND lower(trip_vanity) = lower($1)
+          LIMIT 1
+          `,
+          [vanity]
+        );
+        if (again.rows.length) {
+          return res.json({ ok: true, created: false, roadtrip: again.rows[0] });
+        }
+      } catch (_) {}
+    }
+
+    // If NULL party_id is not allowed, create/reuse default party and retry.
+    const looksLikePartyNotNull =
+      !partyId &&
+      (err.code === '23502' || /party_id/i.test(String(err.message || '')));
+
+    if (looksLikePartyNotNull) {
+      try {
+        const defaultPartyId = await ensureDefaultPartyId();
+        const insertRes2 = await insertRoadtrip(defaultPartyId);
+        return res.status(201).json({
+          ok: true,
+          created: true,
+          default_party_id: defaultPartyId,
+          roadtrip: insertRes2.rows[0],
+        });
+      } catch (err2) {
+        console.error('[roadtrip/default] fallback default party failed', err2);
+        return res.status(500).json({
+          ok: false,
+          error: 'Failed to create default roadtrip (fallback party)',
+        });
+      }
+    }
+
+    console.error('[roadtrip/default] insert failed', err);
+    return res.status(500).json({ ok: false, error: 'Failed to create default roadtrip' });
+  }
+});
 
 module.exports = router;
-function normalizeMediaKind(value) {
-  if (!value) return null;
-  const raw = String(value).trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === 'image') return 'photo';
-  if (raw === 'photo' || raw === 'pic' || raw === 'picture') return 'photo';
-  if (raw === 'video' || raw === 'clip') return 'video';
-  if (raw === 'audio' || raw === 'sound' || raw === 'voice') return 'audio';
-  if (raw === 'mixed' || raw === 'combo') return 'mixed';
-  return null;
-}
+
