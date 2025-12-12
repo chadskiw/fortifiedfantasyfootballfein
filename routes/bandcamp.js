@@ -72,11 +72,51 @@ function parseSearchResults(html, limit = 12) {
 }
 
 function extractJsonBlock(html, key) {
-  const regex = new RegExp(`var\\s+${key}\\s*=\\s*(\\{[\\s\\S]*?\\});`);
-  const match = regex.exec(html);
-  if (!match) return null;
+  const marker = `var ${key}`;
+  const idx = html.indexOf(marker);
+  if (idx === -1) return null;
+  const braceStart = html.indexOf('{', idx);
+  if (braceStart === -1) return null;
+
+  let depth = 0;
+  let inString = null;
+  let escapeNext = false;
+  let end = braceStart;
+
+  for (let i = braceStart; i < html.length; i += 1) {
+    const ch = html[i];
+    if (inString) {
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (ch === '\\') {
+        escapeNext = true;
+      } else if (ch === inString) {
+        inString = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = ch;
+      continue;
+    }
+    if (ch === '{' || ch === '[') {
+      depth += 1;
+    } else if (ch === '}' || ch === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (depth !== 0) {
+    console.warn('[bandcamp] JSON block parse incomplete for', key);
+    return null;
+  }
+
   try {
-    return JSON.parse(match[1]);
+    return JSON.parse(html.slice(braceStart, end));
   } catch (err) {
     console.error(`[bandcamp] failed to parse ${key}`, err);
     return null;
