@@ -2126,6 +2126,49 @@ async function upsertTripRow({ tripId, memberId, tripName, partyId }) {
 
   return rows[0];
 }
+async function ensureRoadtripContainerForTrip({ tripId, memberId, tripName, partyId }) {
+  if (!tripId || !memberId || !partyId) return null;
+  const name = tripName || tripId;
+
+  const existing = await pool.query(
+    `SELECT roadtrip_id FROM public.tt_party_roadtrip
+     WHERE (trip_vanity IS NOT NULL AND lower(trip_vanity)=lower($1))
+        OR lower(name)=lower($1)
+     LIMIT 1`,
+    [tripId],
+  );
+
+  if (existing.rows.length) {
+    await pool.query(
+      `UPDATE public.tt_party_roadtrip
+         SET party_id = COALESCE($2, party_id),
+             host_member_id = COALESCE($3, host_member_id),
+             name = COALESCE($4, name),
+             updated_at = NOW()
+       WHERE roadtrip_id = $1`,
+      [existing.rows[0].roadtrip_id, partyId, memberId, name],
+    );
+    return existing.rows[0].roadtrip_id;
+  }
+
+  const inserted = await pool.query(
+    `INSERT INTO public.tt_party_roadtrip (
+         roadtrip_id, party_id, host_member_id, name, trip_vanity, state
+       )
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, 'planning')
+       ON CONFLICT (trip_vanity) DO NOTHING
+       RETURNING roadtrip_id`,
+    [partyId, memberId, name, tripId],
+  );
+  if (inserted.rows.length) return inserted.rows[0].roadtrip_id;
+
+  const retry = await pool.query(
+    `SELECT roadtrip_id FROM public.tt_party_roadtrip
+     WHERE lower(trip_vanity)=lower($1) LIMIT 1`,
+    [tripId],
+  );
+  return retry.rows[0]?.roadtrip_id || null;
+}
 
 /**
  * POST /api/roadtrips/default  (also works as /api/roadtrip/default if you mount it there)
@@ -2164,14 +2207,20 @@ router.post('/default', async (req, res) => {
       // ignore
     }
   }
-
+  
   const base = slugifyTripName(hostHandle || memberId) || 'trip';
   const tripIdRaw = String(body.trip_id || body.tripId || '').trim();
   const tripId = slugifyTripName(tripIdRaw) || `${base}-default-trip`;
   const tripName = String(body.trip_name || body.tripName || '').trim() || 'My Private Trip';
-
+  
   try {
     const partyId = await ensurePrivatePartyIdForHost(memberId, hostHandle);
+    await ensureRoadtripContainerForTrip({
+      tripId,
+      memberId,
+      tripName,
+      partyId,
+    });
 
     // Only one default per member
     await pool.query(
