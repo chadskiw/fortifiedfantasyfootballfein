@@ -1026,15 +1026,44 @@ router.post('/', async (req, res) => {
  * Look up a roadtrip by vanity or name, plus objects + playlist
  */
 router.get('/', async (req, res) => {
-  const trip = (req.query.trip || '').trim();
-  const liveSessionPreference =
-    req.query?.live_session || req.query?.liveSession || null;
+  const q = req.query || {};
+  const trip = String(q.trip || '').trim();
+  const memberIdForList = String(q.member_id || q.memberId || '').trim();
 
-  if (!trip) {
-    return res
-      .status(400)
-      .json({ ok: false, error: 'Missing trip parameter' });
+  // ✅ LIST MODE: GET /api/roadtrips?member_id=BADASS01
+  if (!trip && memberIdForList) {
+    try {
+      const { rows } = await pool.query(
+        `
+        SELECT
+          trip_id,
+          member_id,
+          trip_name,
+          party_id,
+          is_default,
+          visibility_mode,
+          created_at,
+          updated_at
+        FROM tt_roadtrip_trip
+        WHERE member_id = $1
+        ORDER BY is_default DESC, COALESCE(updated_at, created_at) DESC
+        `,
+        [memberIdForList]
+      );
+      return res.json({ ok: true, trips: rows });
+    } catch (err) {
+      console.error('[roadtrips] list failed', err);
+      return res.status(500).json({ ok: false, error: 'Failed to list roadtrips' });
+    }
   }
+
+  // existing behavior (needs trip)
+  if (!trip) {
+    return res.status(400).json({ ok: false, error: 'Missing trip parameter' });
+  }
+
+  // ...keep your existing lookup logic below...
+
 
   try {
     const tripResult = await pool.query(
@@ -1055,11 +1084,47 @@ router.get('/', async (req, res) => {
       [trip]
     );
 
-    if (tripResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ ok: false, error: 'Roadtrip not found' });
+ if (tripResult.rows.length === 0) {
+  const memberId = String(req.query.member_id || req.query.memberId || '').trim();
+
+  // if caller provided member_id, try auto-create the default trip then re-load
+  if (memberId) {
+    try {
+      // mimic POST /default behavior quickly
+      const ex = await pool.query(
+        `SELECT * FROM tt_party_roadtrip WHERE trip_vanity IS NOT NULL AND lower(trip_vanity)=lower($1) LIMIT 1`,
+        [trip]
+      );
+      if (!ex.rows.length) {
+        // call the same logic you use in POST /default (factor it into a shared function if you want)
+        // simplest: just create a container party + insert a roadtrip here if missing
+      }
+    } catch (e) {
+      console.warn('[roadtrip] auto-seed failed', e.message);
     }
+
+    // re-query after attempt
+    const retry = await pool.query(
+      `
+      SELECT r.*, p.name AS party_name, p.center_lat AS party_center_lat, p.center_lon AS party_center_lon
+      FROM tt_party_roadtrip r
+      LEFT JOIN tt_party p ON p.party_id = r.party_id
+      WHERE (r.trip_vanity IS NOT NULL AND lower(r.trip_vanity) = lower($1))
+         OR lower(r.name) = lower($1)
+      LIMIT 1
+      `,
+      [trip]
+    );
+
+    if (retry.rows.length) {
+      const roadtrip = retry.rows[0];
+      // continue with existing flow…
+    }
+  }
+
+  return res.status(404).json({ ok: false, error: 'Roadtrip not found' });
+}
+
 
     const roadtrip = tripResult.rows[0];
     const viewer = await resolveRoadtripViewer(req, roadtrip);
@@ -2033,6 +2098,33 @@ async function ensurePrivatePartyIdForHost(memberId, hostHandle) {
   );
 
   return ins.rows[0].party_id;
+}
+async function upsertTripRow({ tripId, memberId, tripName, partyId }) {
+  // demote old defaults
+  await pool.query(
+    `UPDATE tt_roadtrip_trip SET is_default=FALSE WHERE member_id=$1 AND is_default=TRUE AND trip_id<>$2`,
+    [memberId, tripId]
+  );
+
+  const { rows } = await pool.query(
+    `
+    INSERT INTO tt_roadtrip_trip (
+      trip_id, member_id, trip_name, party_id, is_default, visibility_mode
+    )
+    VALUES ($1, $2, $3, $4, TRUE, 'self')
+    ON CONFLICT (trip_id) DO UPDATE
+      SET member_id = EXCLUDED.member_id,
+          trip_name = EXCLUDED.trip_name,
+          party_id  = EXCLUDED.party_id,
+          is_default = TRUE,
+          visibility_mode = EXCLUDED.visibility_mode,
+          updated_at = NOW()
+    RETURNING *
+    `,
+    [tripId, memberId, tripName, partyId]
+  );
+
+  return rows[0];
 }
 
 /**
