@@ -1,10 +1,10 @@
-import express from "express";
+const express = require('express');
+const pool = require('../src/db/pool'); // adjust path if needed
 const router = express.Router();
 
 const TT_AI_URL = process.env.TT_AI_URL;           // e.g. https://tt-ai.YOUR.workers.dev/describe
 const TT_AI_TOKEN = process.env.TT_AI_TOKEN;       // same value as wrangler secret
 // assumes you already have `pool` (pg) wired in your server
-import { pool } from "../db.js";
 
 function vecLiteral(arr) {
   // pgvector accepts '[...]' text
@@ -70,4 +70,4 @@ router.post("/photos/:photo_id/ensure", async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;
