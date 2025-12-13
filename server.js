@@ -36,7 +36,7 @@ const trashtalkUserRoutes = require('./routes/trashtalk-user');
 const specialsRouter = require('./routes/specials');
 const privacyZonesRouter = require('./routes/privacyZones');
 const partyPeopleRoutes = require('./routes/partyPeople');
-const photoAI = require('./routes/photo_ai');
+const photoAI = require('./routes/photo-ai');
 const searchTT = equire('./routes/trashtalkSearch');
 
 
