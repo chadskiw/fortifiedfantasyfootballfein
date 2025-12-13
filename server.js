@@ -37,6 +37,7 @@ const specialsRouter = require('./routes/specials');
 const privacyZonesRouter = require('./routes/privacyZones');
 const partyPeopleRoutes = require('./routes/partyPeople');
 const photoAI = require('./routes/photo_ai');
+const searchTT = equire('./routes/trashtalkSearch');
 
 
 // Routers (only require what you actually have in your repo)
@@ -160,7 +161,7 @@ app.use('/api/moments', momentsRouter);
 app.use('/api/soundtrack', soundtrackRouter);
 app.use('/api/bandcamp', bandcampRouter);
 app.use("/api/ai", photoAI);
-app.use("/api/trashtalk", require("./routes/trashtalkSearch"));
+app.use("/api/trashtalk", searchTT);
 
 
 // ...
