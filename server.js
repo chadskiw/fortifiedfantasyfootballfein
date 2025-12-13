@@ -37,7 +37,7 @@ const specialsRouter = require('./routes/specials');
 const privacyZonesRouter = require('./routes/privacyZones');
 const partyPeopleRoutes = require('./routes/partyPeople');
 const photoAI = require('./routes/photo-ai');
-const searchTT = equire('./routes/trashtalkSearch');
+const searchTT = require('./routes/trashtalkSearch');
 
 
 // Routers (only require what you actually have in your repo)
