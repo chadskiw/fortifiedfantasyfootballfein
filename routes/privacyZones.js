@@ -6,7 +6,6 @@ const {
   loadZonesForMembers,
   parseZoneId,
 } = require('../utils/privacyZones');
-const { buildPrivacyDome, maskedPointInDome } = require('../utils/privacyDome');
 
 const router = express.Router();
 router.use(express.json({ limit: '256kb' }));

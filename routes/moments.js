@@ -2,6 +2,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const pool = require('../src/db/pool');
+const { getCurrentIdentity } = require('../services/identity');
+const { applyPrivacyToSharedCaptures } = require('../utils/privacyShare');
 
 const router = express.Router();
 
@@ -204,6 +206,27 @@ router.get('/', async (req, res) => {
     );
 
     const moments = rows.map(normalizeMomentRow);
+    const identity = await getCurrentIdentity(req).catch(() => null);
+    const viewerMemberId = identity?.memberId || identity?.member_id || null;
+    const capturesByOwner = new Map();
+    for (const moment of moments) {
+      const ownerId = moment.member_id || moment.memberId || null;
+      if (!ownerId) {
+        continue;
+      }
+      if (!capturesByOwner.has(ownerId)) {
+        capturesByOwner.set(ownerId, []);
+      }
+      capturesByOwner.get(ownerId).push(moment);
+    }
+    for (const [ownerId, ownerCaptures] of capturesByOwner.entries()) {
+      await applyPrivacyToSharedCaptures({
+        viewerMemberId,
+        ownerMemberId: ownerId,
+        captures: ownerCaptures,
+        db: pool,
+      });
+    }
     const nextCursor =
       moments.length === limit ? moments[moments.length - 1]?.timestamp || null : null;
 
