@@ -2,6 +2,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const pool = require('../src/db/pool');
+const { buildMuSongMapFromQueue } = require('../utils/muMapping'); // new util we’ll make
 
 const router = express.Router();
 
@@ -151,6 +152,118 @@ function sanitizeAudioSource(src) {
   }
   return Object.keys(result).length ? result : null;
 }
+function toFiniteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sanitizeMuMapping(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const cuts = Array.isArray(raw.cuts_ms) ? raw.cuts_ms : Array.isArray(raw.cutsMs) ? raw.cutsMs : null;
+  if (!cuts) return null;
+
+  const cutsMs = [];
+  for (const v of cuts) {
+    const n = toFiniteNumber(v);
+    if (n === null) continue;
+    const ms = Math.max(0, Math.round(n));
+    cutsMs.push(ms);
+    if (cutsMs.length > 2000) break; // guardrail
+  }
+  cutsMs.sort((a, b) => a - b);
+
+  // de-dupe
+  const deduped = [];
+  for (const ms of cutsMs) {
+    if (!deduped.length || deduped[deduped.length - 1] !== ms) deduped.push(ms);
+  }
+  if (deduped.length < 2) return null;
+
+  const out = { cuts_ms: deduped };
+
+  // optional songs passthrough (safe-ish)
+  if (Array.isArray(raw.songs)) {
+    out.songs = raw.songs
+      .filter(Boolean)
+      .slice(0, 500)
+      .map((s) => ({
+        title: typeof s.title === 'string' ? sanitizeText(s.title, 200) : null,
+        start_ms: Number.isFinite(Number(s.start_ms)) ? Math.max(0, Math.round(Number(s.start_ms))) : null,
+        end_ms: Number.isFinite(Number(s.end_ms)) ? Math.max(0, Math.round(Number(s.end_ms))) : null,
+      }));
+  }
+
+  if (typeof raw.total_ms === 'number' && Number.isFinite(raw.total_ms)) {
+    out.total_ms = Math.max(0, Math.round(raw.total_ms));
+  }
+
+  return out;
+}
+
+function buildMuSongMapFromQueue(queue = [], audioTrim = null) {
+  const tracks = Array.isArray(queue) ? queue.filter(Boolean) : [];
+  let cursorMs = 0;
+  const segments = [];
+
+  for (const t of tracks) {
+    const durSec =
+      Number(t.duration_seconds) ||
+      Number(t.durationSeconds) ||
+      Number(t.duration) ||
+      0;
+
+    const durMs = durSec > 0 ? Math.round(durSec * 1000) : 0;
+    if (!durMs) continue;
+
+    segments.push({
+      title: sanitizeText(t.title || t.name || '', 200) || null,
+      start_ms: cursorMs,
+      end_ms: cursorMs + durMs,
+      duration_ms: durMs,
+    });
+    cursorMs += durMs;
+    if (segments.length > 1000) break;
+  }
+
+  const totalRawMs = cursorMs;
+
+  const trimStartMs = audioTrim?.start_seconds ? Math.max(0, Math.round(Number(audioTrim.start_seconds) * 1000)) : 0;
+
+  // Prefer explicit end_seconds, else duration_seconds, else full length
+  let trimEndMs = totalRawMs;
+  if (audioTrim?.end_seconds && Number.isFinite(Number(audioTrim.end_seconds))) {
+    trimEndMs = Math.round(Number(audioTrim.end_seconds) * 1000);
+  } else if (audioTrim?.duration_seconds && Number.isFinite(Number(audioTrim.duration_seconds))) {
+    trimEndMs = trimStartMs + Math.round(Number(audioTrim.duration_seconds) * 1000);
+  }
+
+  trimEndMs = Math.max(trimStartMs, Math.min(trimEndMs, totalRawMs));
+  const totalMs = Math.max(0, trimEndMs - trimStartMs);
+
+  const cuts = new Set([0, totalMs]);
+  const songs = [];
+
+  for (const s of segments) {
+    const start = Math.max(s.start_ms, trimStartMs);
+    const end = Math.min(s.end_ms, trimEndMs);
+    if (end <= start) continue;
+
+    const relStart = start - trimStartMs;
+    const relEnd = end - trimStartMs;
+
+    cuts.add(relStart);
+    cuts.add(relEnd);
+
+    songs.push({
+      title: s.title,
+      start_ms: relStart,
+      end_ms: relEnd,
+      duration_ms: relEnd - relStart,
+    });
+  }
+
+  return { cuts_ms: Array.from(cuts).sort((a, b) => a - b), songs, total_ms: totalMs };
+}
 
 router.get('/share', async (req, res) => {
   const shareId = sanitizeToken(req.query.id || req.query.share_id || '', { lower: false });
@@ -275,6 +388,18 @@ router.post('/share', async (req, res) => {
     const audioSource = sanitizeAudioSource(body.audio_source || body.audioSource);
     const audioTrim = body.audio_trim && typeof body.audio_trim === 'object' ? body.audio_trim : audioSource?.trim || null;
     const audioUrl = audioSource?.url || null;
+    // Optional: if FE sent a track queue for MuMode
+const audioQueue = Array.isArray(body.audio_queue)
+  ? body.audio_queue
+  : Array.isArray(body.audioQueue)
+  ? body.audioQueue
+  : null;
+
+let muMapping =
+  sanitizeMuMapping(body.mu_mapping || body.muMapping || body.mu || null) ||
+  (audioQueue ? buildMuSongMapFromQueue(audioQueue, audioTrim) : null);
+
+
     const descriptor = deriveScopeDescriptor(scope, dayKey, tripRange);
     const title =
       sanitizeText(body.title, 240) ||
@@ -301,6 +426,9 @@ router.post('/share', async (req, res) => {
       description,
       cover_url: coverUrl,
       audio_url: audioUrl,
+      mu_mode: Boolean(muMapping),
+      mu_mapping: muMapping,
+
       audio_source: audioSource,
       audio_trim: audioTrim,
       captures,
