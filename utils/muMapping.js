@@ -3,6 +3,15 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
+function toMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.round(parsed);
+  }
+  return null;
+}
+
 function buildMuSongMapFromQueue(queue = [], trim = null) {
   const tracks = Array.isArray(queue) ? queue.filter(Boolean) : [];
   let cursorMs = 0;
@@ -20,12 +29,29 @@ function buildMuSongMapFromQueue(queue = [], trim = null) {
   }).filter((s) => s.duration_ms > 0);
 
   const totalRawMs = cursorMs;
-  const trimStartMs = Math.max(0, Math.round((trim?.start_seconds ?? 0) * 1000));
-  const trimEndMs = trim?.end_seconds
-    ? Math.round(trim.end_seconds * 1000)
-    : trim?.duration_seconds
-    ? trimStartMs + Math.round(trim.duration_seconds * 1000)
-    : totalRawMs;
+  const startMsFromTrim = toMs(trim?.start_ms);
+  const trimStartSeconds = Number(trim?.start_seconds);
+  const trimStartMs = Math.max(
+    0,
+    startMsFromTrim !== null
+      ? startMsFromTrim
+      : Number.isFinite(trimStartSeconds)
+      ? Math.round(trimStartSeconds * 1000)
+      : 0,
+  );
+  let trimEndMs;
+  const endMsFromTrim = toMs(trim?.end_ms);
+  if (endMsFromTrim !== null) {
+    trimEndMs = endMsFromTrim;
+  } else if (Number.isFinite(Number(trim?.end_seconds))) {
+    trimEndMs = Math.round(Number(trim.end_seconds) * 1000);
+  } else if (toMs(trim?.duration_ms) !== null) {
+    trimEndMs = trimStartMs + Math.max(0, toMs(trim.duration_ms));
+  } else if (Number.isFinite(Number(trim?.duration_seconds))) {
+    trimEndMs = trimStartMs + Math.max(0, Math.round(Number(trim.duration_seconds) * 1000));
+  } else {
+    trimEndMs = totalRawMs;
+  }
 
   const cuts = new Set([0]);
   const songs = [];
