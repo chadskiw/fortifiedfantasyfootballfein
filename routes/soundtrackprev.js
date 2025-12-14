@@ -199,7 +199,7 @@ function sanitizeMuMapping(raw) {
 
   return out;
 }
-
+/*
 function buildMuSongMapFromQueue(queue = [], audioTrim = null) {
   const tracks = Array.isArray(queue) ? queue.filter(Boolean) : [];
   let cursorMs = 0;
@@ -264,7 +264,7 @@ function buildMuSongMapFromQueue(queue = [], audioTrim = null) {
 
   return { cuts_ms: Array.from(cuts).sort((a, b) => a - b), songs, total_ms: totalMs };
 }
-
+*/
 router.get('/share', async (req, res) => {
   const shareId = sanitizeToken(req.query.id || req.query.share_id || '', { lower: false });
   if (!shareId) {
