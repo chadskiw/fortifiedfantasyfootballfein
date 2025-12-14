@@ -1,473 +1,295 @@
-// routes/soundtrack.js
-const express = require('express');
-const crypto = require('crypto');
-const pool = require('../src/db/pool');
-const { buildMuSongMapFromQueue } = require('../utils/muMapping'); // new util we’ll make
+const { randomUUID } = require('crypto');
 
-const router = express.Router();
+const DEFAULT_SHARE_HOST = process.env.SOUNDTRACK_SHARE_HOST || 'https://soundtrack-share.pages.dev';
+const shareStore = new Map();
 
-router.use(express.json({ limit: '4mb', strict: false }));
-
-const SHARE_HOST = (process.env.SOUNDTRACK_SHARE_HOST || 'https://soundtrack-share.pages.dev').replace(
-  /\/+$/,
-  '',
-);
-
-const ensureTablesPromise = (async () => {
-  const ddl = `
-    CREATE TABLE IF NOT EXISTS ff_soundtrack_shares (
-      share_id TEXT PRIMARY KEY,
-      member_id TEXT,
-      handle TEXT,
-      scope TEXT,
-      day_key TEXT,
-      trip_range JSONB,
-      payload JSONB NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-
-    CREATE INDEX IF NOT EXISTS ff_soundtrack_shares_member_idx ON ff_soundtrack_shares(member_id);
-    CREATE INDEX IF NOT EXISTS ff_soundtrack_shares_handle_idx ON ff_soundtrack_shares((LOWER(handle)));
-    CREATE INDEX IF NOT EXISTS ff_soundtrack_shares_scope_idx ON ff_soundtrack_shares(scope);
-  `;
-
-  try {
-    await pool.query(ddl);
-    console.log('[soundtrack] tables ensured');
-  } catch (err) {
-    console.error('[soundtrack] failed to ensure tables', err);
-    throw err;
+function registerSoundtrackRoutes(app) {
+  if (!app || typeof app.post !== 'function' || typeof app.get !== 'function') {
+    throw new Error('Soundtrack routes require an Express-style app instance.');
   }
-})();
 
-async function ensureReady() {
-  return ensureTablesPromise.catch((err) => {
-    console.error('[soundtrack] ensureReady error', err);
-    throw err;
+  app.post('/api/soundtrack/share', async (req, res) => {
+    try {
+      const payload = buildSharePayload(req?.body || {});
+      shareStore.set(payload.share_id, payload);
+      res.json({
+        ok: true,
+        share_id: payload.share_id,
+        share_url: payload.share_url,
+        share: payload,
+      });
+    } catch (err) {
+      console.warn('[soundtrack-share] failed to build payload', err);
+      res.status(400).json({ ok: false, error: err?.message || 'share_failed' });
+    }
+  });
+
+  app.get('/api/soundtrack/share/:id', (req, res) => {
+    const shareId = String(req.params?.id || '').trim();
+    if (!shareId || !shareStore.has(shareId)) {
+      res.status(404).json({ ok: false, error: 'share_not_found' });
+      return;
+    }
+    res.json({ ok: true, share: shareStore.get(shareId) });
   });
 }
 
-function sanitizeText(value, max = 500) {
-  if (typeof value !== 'string') return '';
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  if (trimmed.length <= max) return trimmed;
-  return trimmed.slice(0, max);
+function buildSharePayload(body = {}) {
+  const now = new Date().toISOString();
+  const shareId = String(body.share_id || createShareId());
+  const playbackMode = normalizePlaybackMode(body.playback_mode);
+  const playbackModeEffective = normalizePlaybackMode(body.playback_mode_effective || playbackMode);
+  const captures = normalizeCaptures(body.captures);
+  if (!captures.length) {
+    throw new Error('missing_captures');
+  }
+  const mediaIds = normalizeMediaIds(body.media_ids, captures);
+  const audioTrim = normalizeAudioTrim(body.audio_trim);
+  const clipRange = normalizeClipRange(body.clip_range);
+  const audioSource = normalizeAudioSource(body.audio_source);
+  const mu = normalizeMu(body.mu);
+  const payload = {
+    share_id: shareId,
+    member_id: body.member_id || null,
+    handle: sanitizeHandle(body.handle),
+    scope: sanitizeScope(body.scope),
+    scope_meta: buildScopeMeta(body.scope_meta),
+    playback_mode: playbackMode,
+    playback_mode_effective: playbackModeEffective,
+    media_ids: mediaIds,
+    captures,
+    clip_range: clipRange,
+    audio_trim: audioTrim,
+    audio_source: audioSource,
+    audio_queue: Array.isArray(body.audio_queue) ? body.audio_queue : undefined,
+    mu,
+    mu_segments: normalizeMuSegments(body.mu_segments),
+    client: body.client || 'unknown',
+    share_url: buildShareUrl(shareId, body.share_host),
+    created_at: body.created_at || now,
+    updated_at: now,
+  };
+  payload.mu_available = Boolean(mu?.cuts_ms?.length);
+  return payload;
 }
 
-function sanitizeToken(value, { lower = false } = {}) {
-  if (typeof value !== 'string') return '';
-  const cleaned = value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  return lower ? cleaned.toLowerCase() : cleaned;
+function normalizePlaybackMode(mode) {
+  return mode === 'mu' ? 'mu' : 'classic';
 }
 
-function isoDate(value) {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString();
+function sanitizeHandle(handle) {
+  if (!handle) return null;
+  const trimmed = String(handle).trim();
+  return trimmed ? trimmed.slice(0, 80) : null;
 }
 
-function dateOnly(value) {
-  const iso = isoDate(value);
-  return iso ? iso.split('T')[0] : null;
-}
-
-function normalizeScope(value) {
-  const normalized = String(value || '').toLowerCase();
-  if (['day', 'trip', 'life'].includes(normalized)) return normalized;
+function sanitizeScope(scope) {
+  if (scope === 'trip' || scope === 'life') {
+    return scope;
+  }
   return 'day';
 }
 
-function buildShareId({ memberId, handle, scope }) {
-  const base = sanitizeToken(handle || memberId || 'soundtrack');
-  const scopeToken = sanitizeToken(scope || 'mix', { lower: true }) || 'mix';
-  if (typeof crypto.randomUUID === 'function') {
-    return `${base || 'soundtrack'}-${scopeToken}-${crypto.randomUUID().slice(0, 8)}`;
+function buildScopeMeta(meta = {}) {
+  if (!meta || typeof meta !== 'object') {
+    return {};
   }
-  return `${base || 'soundtrack'}-${scopeToken}-${Date.now().toString(36)}`;
+  const captureCount = toInt(meta.capture_count);
+  return {
+    descriptor: meta.descriptor || null,
+    selected_day: meta.selected_day || null,
+    trip_range: meta.trip_range || null,
+    capture_count: captureCount !== null ? captureCount : null,
+  };
 }
 
-function resolveShareId(raw, fallbackMeta) {
-  const candidate = sanitizeToken(raw || '', { lower: false });
-  if (candidate) return candidate;
-  return buildShareId(fallbackMeta);
+function normalizeMediaIds(mediaIds, captures) {
+  if (Array.isArray(mediaIds) && mediaIds.length) {
+    return mediaIds.map((value) => String(value));
+  }
+  return captures.map((capture) => capture.id).filter(Boolean);
 }
 
-function deriveScopeDescriptor(scope, dayKey, tripRange) {
-  if (scope === 'day' && dayKey) {
-    return `Day ${dayKey}`;
+function normalizeCaptures(input) {
+  if (!Array.isArray(input)) {
+    return [];
   }
-  if (scope === 'trip' && tripRange?.start && tripRange?.end) {
-    return `${tripRange.start} → ${tripRange.end}`;
-  }
-  return 'Life mix';
+  return input
+    .map((item, idx) => {
+      if (!item) return null;
+      const url = item.url || item.uri;
+      if (!url) return null;
+      const type = item.type === 'video' ? 'video' : 'photo';
+      return {
+        id: item.id ? String(item.id) : `capture-${idx}`,
+        url,
+        uri: url,
+        type,
+        timestamp: item.timestamp || null,
+        label: item.label || null,
+        ordinal: typeof item.ordinal === 'number' ? item.ordinal : idx + 1,
+        thumbnail_url: item.thumbnail_url || item.thumbnail || null,
+      };
+    })
+    .filter(Boolean);
 }
 
-function formatCaptureTime(value) {
-  const iso = isoDate(value);
-  if (!iso) return null;
-  const date = new Date(iso);
-  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+function normalizeClipRange(range = {}) {
+  const start = clamp01(range.start);
+  const end = clamp01(range.end);
+  if (end <= start) {
+    return { start: 0, end: 1 };
+  }
+  return { start, end };
 }
 
-async function loadMoments(mediaIds) {
-  if (!mediaIds.length) return new Map();
-  const { rows } = await pool.query(
-    `
-      SELECT moment_id::text AS moment_id,
-             ts,
-             owner_label,
-             text,
-             source,
-             handle,
-             photo_url,
-             video_url,
-             media_meta
-        FROM ff_moments
-       WHERE moment_id::text = ANY($1)
-    `,
-    [mediaIds],
-  );
-  const map = new Map();
-  for (const row of rows) {
-    map.set(row.moment_id, row);
-  }
-  return map;
+function normalizeAudioTrim(trim = {}) {
+  const startMs = toInt(trim.start_ms ?? trim.startMs);
+  const endMs = toInt(trim.end_ms ?? trim.endMs);
+  const durationMs = toInt(trim.duration_ms ?? trim.durationMs);
+  return {
+    start_ms: startMs ?? null,
+    end_ms: endMs ?? null,
+    duration_ms: durationMs ?? (startMs !== null && endMs !== null ? Math.max(0, endMs - startMs) : null),
+    start_pct: clamp01(trim.start_pct),
+    end_pct: clamp01(trim.end_pct),
+  };
 }
 
-function sanitizeAudioSource(src) {
-  if (!src || typeof src !== 'object') return null;
-  const result = {};
-  if (typeof src.type === 'string') result.type = src.type;
-  if (typeof src.url === 'string') result.url = src.url;
-  if (typeof src.name === 'string') result.name = sanitizeText(src.name, 200);
-  if (src.trim && typeof src.trim === 'object') {
-    const trim = {};
-    if (Number.isFinite(src.trim.start_seconds)) trim.start_seconds = Number(src.trim.start_seconds);
-    if (Number.isFinite(src.trim.end_seconds)) trim.end_seconds = Number(src.trim.end_seconds);
-    if (Number.isFinite(src.trim.duration_seconds)) trim.duration_seconds = Number(src.trim.duration_seconds);
-    if (Object.keys(trim).length) result.trim = trim;
+function normalizeAudioSource(source) {
+  if (!source || typeof source !== 'object') {
+    return null;
   }
-  return Object.keys(result).length ? result : null;
-}
-function toFiniteNumber(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return {
+    kind: source.kind || null,
+    title: source.title || null,
+    artist: source.artist || null,
+    album: source.album || null,
+    url: source.url || null,
+    stream_url: source.stream_url || null,
+    track_id: source.track_id || null,
+    art_url: source.art_url || null,
+    duration_seconds: source.duration_seconds || null,
+    source: source.source || null,
+  };
 }
 
-function sanitizeMuMapping(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const cuts = Array.isArray(raw.cuts_ms) ? raw.cuts_ms : Array.isArray(raw.cutsMs) ? raw.cutsMs : null;
-  if (!cuts) return null;
-
-  const cutsMs = [];
-  for (const v of cuts) {
-    const n = toFiniteNumber(v);
-    if (n === null) continue;
-    const ms = Math.max(0, Math.round(n));
-    cutsMs.push(ms);
-    if (cutsMs.length > 2000) break; // guardrail
+function normalizeMu(mu) {
+  if (!mu || typeof mu !== 'object') {
+    return null;
   }
-  cutsMs.sort((a, b) => a - b);
-
-  // de-dupe
-  const deduped = [];
-  for (const ms of cutsMs) {
-    if (!deduped.length || deduped[deduped.length - 1] !== ms) deduped.push(ms);
-  }
-  if (deduped.length < 2) return null;
-
-  const out = { cuts_ms: deduped };
-
-  // optional songs passthrough (safe-ish)
-  if (Array.isArray(raw.songs)) {
-    out.songs = raw.songs
-      .filter(Boolean)
-      .slice(0, 500)
-      .map((s) => ({
-        title: typeof s.title === 'string' ? sanitizeText(s.title, 200) : null,
-        start_ms: Number.isFinite(Number(s.start_ms)) ? Math.max(0, Math.round(Number(s.start_ms))) : null,
-        end_ms: Number.isFinite(Number(s.end_ms)) ? Math.max(0, Math.round(Number(s.end_ms))) : null,
-      }));
-  }
-
-  if (typeof raw.total_ms === 'number' && Number.isFinite(raw.total_ms)) {
-    out.total_ms = Math.max(0, Math.round(raw.total_ms));
-  }
-
-  return out;
-}
-
-function buildMuSongMapFromQueue(queue = [], audioTrim = null) {
-  const tracks = Array.isArray(queue) ? queue.filter(Boolean) : [];
-  let cursorMs = 0;
-  const segments = [];
-
-  for (const t of tracks) {
-    const durSec =
-      Number(t.duration_seconds) ||
-      Number(t.durationSeconds) ||
-      Number(t.duration) ||
-      0;
-
-    const durMs = durSec > 0 ? Math.round(durSec * 1000) : 0;
-    if (!durMs) continue;
-
-    segments.push({
-      title: sanitizeText(t.title || t.name || '', 200) || null,
-      start_ms: cursorMs,
-      end_ms: cursorMs + durMs,
-      duration_ms: durMs,
-    });
-    cursorMs += durMs;
-    if (segments.length > 1000) break;
-  }
-
-  const totalRawMs = cursorMs;
-
-  const trimStartMs = audioTrim?.start_seconds ? Math.max(0, Math.round(Number(audioTrim.start_seconds) * 1000)) : 0;
-
-  // Prefer explicit end_seconds, else duration_seconds, else full length
-  let trimEndMs = totalRawMs;
-  if (audioTrim?.end_seconds && Number.isFinite(Number(audioTrim.end_seconds))) {
-    trimEndMs = Math.round(Number(audioTrim.end_seconds) * 1000);
-  } else if (audioTrim?.duration_seconds && Number.isFinite(Number(audioTrim.duration_seconds))) {
-    trimEndMs = trimStartMs + Math.round(Number(audioTrim.duration_seconds) * 1000);
-  }
-
-  trimEndMs = Math.max(trimStartMs, Math.min(trimEndMs, totalRawMs));
-  const totalMs = Math.max(0, trimEndMs - trimStartMs);
-
-  const cuts = new Set([0, totalMs]);
-  const songs = [];
-
-  for (const s of segments) {
-    const start = Math.max(s.start_ms, trimStartMs);
-    const end = Math.min(s.end_ms, trimEndMs);
-    if (end <= start) continue;
-
-    const relStart = start - trimStartMs;
-    const relEnd = end - trimStartMs;
-
-    cuts.add(relStart);
-    cuts.add(relEnd);
-
-    songs.push({
-      title: s.title,
-      start_ms: relStart,
-      end_ms: relEnd,
-      duration_ms: relEnd - relStart,
-    });
-  }
-
-  return { cuts_ms: Array.from(cuts).sort((a, b) => a - b), songs, total_ms: totalMs };
-}
-
-router.get('/share', async (req, res) => {
-  const shareId = sanitizeToken(req.query.id || req.query.share_id || '', { lower: false });
-  if (!shareId) {
-    return res.status(400).json({ ok: false, error: 'missing_share_id' });
-  }
-
-  try {
-    await ensureReady();
-    const { rows } = await pool.query(
-      `
-        SELECT share_id, payload
-          FROM ff_soundtrack_shares
-         WHERE share_id = $1
-      `,
-      [shareId],
-    );
-    if (!rows.length) {
-      return res.status(404).json({ ok: false, error: 'not_found' });
-    }
-    const payload = rows[0].payload || {};
-    if (SHARE_HOST && !payload.share_url) {
-      payload.share_url = `${SHARE_HOST}/s/${encodeURIComponent(rows[0].share_id)}`;
-    }
-    return res.json({ ok: true, share: payload });
-  } catch (err) {
-    console.error('[soundtrack] GET /share error', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-router.post('/share', async (req, res) => {
-  const body = req.body || {};
-  const memberId = sanitizeText(body.member_id || body.memberId || '', 120) || null;
-  const handleRaw = sanitizeText(body.handle || body.user_handle || '', 120);
-  const handle = handleRaw || null;
-  const scope = normalizeScope(body.scope);
-  const dayKey = dateOnly(body.day_key || body.dayKey);
-  const tripRangeRaw = body.trip_range || body.tripRange || null;
-  const tripRange = tripRangeRaw
-    ? {
-        start: dateOnly(tripRangeRaw.start),
-        end: dateOnly(tripRangeRaw.end),
-      }
-    : null;
-  const mediaIds = Array.isArray(body.media_ids)
-    ? body.media_ids
-        .map((value) => String(value || '').trim())
-        .filter((value) => Boolean(value))
+  const cuts = Array.isArray(mu.cuts_ms)
+    ? mu.cuts_ms
+        .map((value) => toInt(value))
+        .filter((value) => typeof value === 'number' && value >= 0)
+        .sort((a, b) => a - b)
     : [];
-  if (!mediaIds.length) {
-    return res.status(400).json({ ok: false, error: 'media_required' });
+  if (!cuts.length) {
+    return null;
   }
-
-  const mediaSourcesMap = new Map();
-  if (Array.isArray(body.media_sources)) {
-    for (const item of body.media_sources) {
-      if (item && item.id) {
-        mediaSourcesMap.set(String(item.id), item);
-      }
-    }
+  if (cuts[0] !== 0) {
+    cuts.unshift(0);
   }
+  const deduped = cuts.filter((value, index, array) => index === 0 || value !== array[index - 1]);
+  return {
+    cuts_ms: deduped,
+    transition_ms: toInt(mu.transition_ms),
+    strategy: typeof mu.strategy === 'string' ? mu.strategy : undefined,
+    songs: normalizeMuSongs(mu.songs),
+    window: mu.window && typeof mu.window === 'object'
+      ? {
+          start_ms: toInt(mu.window.start_ms),
+          end_ms: toInt(mu.window.end_ms),
+          duration_ms: toInt(mu.window.duration_ms),
+        }
+      : undefined,
+  };
+}
 
-  const shareId = resolveShareId(body.share_id || body.id, {
-    memberId: memberId || handle || 'soundtrack',
-    handle,
-    scope,
-  });
-
-  const shareIdProvided = Boolean(body.share_id || body.id);
-
-  try {
-    await ensureReady();
-    let preservedCreatedAt = null;
-    if (shareIdProvided) {
-      try {
-        const existing = await pool.query(
-          `SELECT payload->>'created_at' AS created_at FROM ff_soundtrack_shares WHERE share_id = $1`,
-          [shareId],
-        );
-        preservedCreatedAt = existing.rows[0]?.created_at || null;
-      } catch (err) {
-        console.warn('[soundtrack] prefetch share created_at failed', err);
-      }
-    }
-    const momentMap = await loadMoments(mediaIds);
-    const captures = [];
-    const missing = [];
-
-    for (const id of mediaIds) {
-      const row = momentMap.get(id);
-      if (!row) {
-        missing.push(id);
-        continue;
-      }
-      const mediaUrl = row.video_url || row.photo_url;
-      if (!mediaUrl) {
-        missing.push(id);
-        continue;
-      }
-      const metaSource = mediaSourcesMap.get(id);
-      const mediaMeta = row.media_meta || {};
-      captures.push({
-        id,
-        url: mediaUrl,
-        type: row.video_url ? 'video' : 'photo',
-        timestamp: isoDate(row.ts),
-        label: row.owner_label || row.text || null,
-        handle: row.handle || handle || null,
-        source: metaSource?.source || row.source || null,
-        media_meta: mediaMeta || null,
-        thumbnail_url:
-          metaSource?.thumbnail_url || mediaMeta?.thumbnail_url || (!row.video_url ? row.photo_url : null) || null,
-        taken_at_formatted: formatCaptureTime(row.ts),
-      });
-    }
-
-    if (!captures.length) {
-      return res.status(422).json({ ok: false, error: 'media_unavailable', missing_media_ids: missing });
-    }
-
-    const audioSource = sanitizeAudioSource(body.audio_source || body.audioSource);
-    const audioTrim = body.audio_trim && typeof body.audio_trim === 'object' ? body.audio_trim : audioSource?.trim || null;
-    const audioUrl = audioSource?.url || null;
-    // Optional: if FE sent a track queue for MuMode
-const audioQueue = Array.isArray(body.audio_queue)
-  ? body.audio_queue
-  : Array.isArray(body.audioQueue)
-  ? body.audioQueue
-  : null;
-
-let muMapping =
-  sanitizeMuMapping(body.mu_mapping || body.muMapping || body.mu || null) ||
-  (audioQueue ? buildMuSongMapFromQueue(audioQueue, audioTrim) : null);
-
-
-    const descriptor = deriveScopeDescriptor(scope, dayKey, tripRange);
-    const title =
-      sanitizeText(body.title, 240) ||
-      (handle ? `Soundtrack of @${handle}` : memberId ? `Soundtrack for ${memberId}` : 'Soundtrack Of My Day');
-    const description =
-      sanitizeText(body.description, 500) || `${descriptor}${memberId ? ` • ${memberId}` : ''}`.trim();
-    const coverUrl =
-      sanitizeText(body.cover_url || body.coverUrl || '', 2000) ||
-      captures[0].thumbnail_url ||
-      captures[0].url ||
-      null;
-    const nowIso = new Date().toISOString();
-    const createdAtIso = preservedCreatedAt || nowIso;
-    const shareUrl = `${SHARE_HOST}/s/${encodeURIComponent(shareId)}`;
-
-    const sharePayload = {
-      id: shareId,
-      member_id: memberId,
-      handle,
-      scope,
-      day_key: dayKey,
-      trip_range: tripRange,
-      title,
-      description,
-      cover_url: coverUrl,
-      audio_url: audioUrl,
-      mu_mode: Boolean(muMapping),
-      mu_mapping: muMapping,
-
-      audio_source: audioSource,
-      audio_trim: audioTrim,
-      captures,
-      media_count: captures.length,
-      missing_media_ids: missing,
-      share_url: shareUrl,
-      created_at: createdAtIso,
-      updated_at: nowIso,
-    };
-
-    const { rows } = await pool.query(
-      `
-        INSERT INTO ff_soundtrack_shares (share_id, member_id, handle, scope, day_key, trip_range, payload, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, now(), now())
-        ON CONFLICT (share_id)
-        DO UPDATE SET
-          member_id = EXCLUDED.member_id,
-          handle = EXCLUDED.handle,
-          scope = EXCLUDED.scope,
-          day_key = EXCLUDED.day_key,
-          trip_range = EXCLUDED.trip_range,
-          payload = EXCLUDED.payload,
-          updated_at = now()
-        RETURNING payload
-      `,
-      [shareId, memberId, handle, scope, dayKey, tripRange ? JSON.stringify(tripRange) : null, JSON.stringify(sharePayload)],
-    );
-
-    const saved = rows[0]?.payload || sharePayload;
-    return res.json({
-      ok: true,
-      share_id: shareId,
-      share_url: shareUrl,
-      share: saved,
-    });
-  } catch (err) {
-    console.error('[soundtrack] POST /share error', err);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+function normalizeMuSongs(list) {
+  if (!Array.isArray(list)) {
+    return undefined;
   }
-});
+  const songs = list
+    .map((song, index) => {
+      if (!song) return null;
+      const start = toInt(song.start_ms);
+      const end = toInt(song.end_ms);
+      if (start === null || end === null || end <= start) {
+        return null;
+      }
+      return {
+        index,
+        id: song.id || null,
+        track_id: song.track_id || null,
+        title: song.title || null,
+        artist: song.artist || null,
+        start_ms: start,
+        end_ms: end,
+        duration_ms: end - start,
+      };
+    })
+    .filter(Boolean);
+  return songs.length ? songs : undefined;
+}
 
-module.exports = router;
+function normalizeMuSegments(segments) {
+  if (!Array.isArray(segments)) {
+    return undefined;
+  }
+  const mapped = segments
+    .map((segment) => {
+      if (!segment) return null;
+      const index = typeof segment.index === 'number' ? segment.index : null;
+      const start = toInt(segment.startMs ?? segment.start_ms);
+      const end = toInt(segment.endMs ?? segment.end_ms);
+      if (start === null || end === null || end <= start) {
+        return null;
+      }
+      return {
+        index,
+        start_ms: start,
+        end_ms: end,
+        duration_ms: end - start,
+        captureIndex: segment.captureIndex ?? segment.capture_index ?? null,
+      };
+    })
+    .filter(Boolean);
+  return mapped.length ? mapped : undefined;
+}
+
+function buildShareUrl(shareId, preferredHost) {
+  const base = (preferredHost || DEFAULT_SHARE_HOST).replace(/\/+$/, '');
+  return `${base}/s/${encodeURIComponent(shareId)}`;
+}
+
+function clamp01(value) {
+  const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : null;
+  if (!Number.isFinite(num)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, num));
+}
+
+function toInt(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.round(parsed) : null;
+  }
+  return null;
+}
+
+function createShareId() {
+  if (typeof randomUUID === 'function') {
+    return randomUUID();
+  }
+  return `share-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+module.exports = {
+  registerSoundtrackRoutes,
+  buildSharePayload,
+};
