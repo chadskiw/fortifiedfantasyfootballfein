@@ -24,7 +24,7 @@ const roomsRouter = require('./routes/rooms');
 const roadtripRoutes = require('./routes/roadtrip');
 const sensorRoutes = require('./routes/sensor');
 const momentsRouter = require('./routes/moments');
-const soundtrackRouter = require('./routes/soundtrack');
+const soundtrackRouter = require('./routes/soundtrackprev');
 const bandcampRouter = require('./routes/bandcamp');
 
 // server.js
