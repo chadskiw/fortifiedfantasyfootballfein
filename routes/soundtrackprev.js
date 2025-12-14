@@ -199,6 +199,88 @@ function sanitizeMuMapping(raw) {
 
   return out;
 }
+function clamp01(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  if (num < 0) return 0;
+  if (num > 1) return 1;
+  return num;
+}
+
+function toInt(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.round(parsed) : null;
+  }
+  return null;
+}
+
+function normalizeAudioTrim(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const startMs =
+    toInt(raw.start_ms ?? raw.startMs) ??
+    (Number.isFinite(Number(raw.start_seconds ?? raw.startSeconds))
+      ? Math.round(Number(raw.start_seconds ?? raw.startSeconds) * 1000)
+      : null);
+  const endMs =
+    toInt(raw.end_ms ?? raw.endMs) ??
+    (Number.isFinite(Number(raw.end_seconds ?? raw.endSeconds))
+      ? Math.round(Number(raw.end_seconds ?? raw.endSeconds) * 1000)
+      : null);
+  const durationMsExplicit =
+    toInt(raw.duration_ms ?? raw.durationMs) ??
+    (Number.isFinite(Number(raw.duration_seconds ?? raw.durationSeconds))
+      ? Math.round(Number(raw.duration_seconds ?? raw.durationSeconds) * 1000)
+      : null);
+  const durationMs =
+    durationMsExplicit ??
+    (startMs !== null && endMs !== null ? Math.max(0, endMs - startMs) : null);
+  return {
+    start_ms: startMs,
+    end_ms: endMs,
+    duration_ms: durationMs,
+    start_pct: clamp01(raw.start_pct ?? raw.startPct ?? 0),
+    end_pct: clamp01(raw.end_pct ?? raw.endPct ?? 1),
+  };
+}
+
+function sanitizeClipRange(raw) {
+  if (!raw || typeof raw !== 'object') return { start: 0, end: 1 };
+  const start = clamp01(raw.start ?? raw.start_pct ?? raw.startPct ?? 0);
+  const end = clamp01(raw.end ?? raw.end_pct ?? raw.endPct ?? 1);
+  if (end <= start) {
+    return { start: 0, end: 1 };
+  }
+  return { start, end };
+}
+
+function sanitizeMuSegments(list) {
+  if (!Array.isArray(list)) return null;
+  const normalized = list
+    .map((segment) => {
+      if (!segment || typeof segment !== 'object') return null;
+      const start = toInt(segment.start_ms ?? segment.startMs);
+      const end = toInt(segment.end_ms ?? segment.endMs);
+      if (start === null || end === null || end <= start) return null;
+      const duration = toInt(segment.duration_ms ?? segment.durationMs) ?? Math.max(0, end - start);
+      const captureIndexRaw =
+        typeof segment.capture_index === 'number'
+          ? segment.capture_index
+          : typeof segment.captureIndex === 'number'
+          ? segment.captureIndex
+          : null;
+      return {
+        index: typeof segment.index === 'number' ? segment.index : null,
+        start_ms: start,
+        end_ms: end,
+        duration_ms: duration,
+        capture_index: captureIndexRaw,
+      };
+    })
+    .filter(Boolean);
+  return normalized.length ? normalized : null;
+}
 /*
 function buildMuSongMapFromQueue(queue = [], audioTrim = null) {
   const tracks = Array.isArray(queue) ? queue.filter(Boolean) : [];
@@ -386,7 +468,29 @@ router.post('/share', async (req, res) => {
     }
 
     const audioSource = sanitizeAudioSource(body.audio_source || body.audioSource);
-    const audioTrim = body.audio_trim && typeof body.audio_trim === 'object' ? body.audio_trim : audioSource?.trim || null;
+    const clipRange = sanitizeClipRange(body.clip_range || body.clipRange || {});
+    const audioTrimRaw =
+      (body.audio_trim && typeof body.audio_trim === 'object' && body.audio_trim) ||
+      (body.audioTrim && typeof body.audioTrim === 'object' && body.audioTrim) ||
+      (audioSource?.trim && typeof audioSource.trim === 'object' && audioSource.trim) ||
+      null;
+    const audioTrim = normalizeAudioTrim(audioTrimRaw);
+    if (audioSource && audioTrim) {
+      audioSource.trim = {
+        start_ms: audioTrim.start_ms ?? null,
+        end_ms: audioTrim.end_ms ?? null,
+        duration_ms: audioTrim.duration_ms ?? null,
+      };
+      if (typeof audioTrim.start_ms === 'number') {
+        audioSource.trim.start_seconds = audioTrim.start_ms / 1000;
+      }
+      if (typeof audioTrim.end_ms === 'number') {
+        audioSource.trim.end_seconds = audioTrim.end_ms / 1000;
+      }
+      if (typeof audioTrim.duration_ms === 'number') {
+        audioSource.trim.duration_seconds = audioTrim.duration_ms / 1000;
+      }
+    }
     const audioUrl = audioSource?.url || null;
     // Optional: if FE sent a track queue for MuMode
 const audioQueue = Array.isArray(body.audio_queue)
@@ -398,6 +502,7 @@ const audioQueue = Array.isArray(body.audio_queue)
 let muMapping =
   sanitizeMuMapping(body.mu_mapping || body.muMapping || body.mu || null) ||
   (audioQueue ? buildMuSongMapFromQueue(audioQueue, audioTrim) : null);
+    const muSegments = sanitizeMuSegments(body.mu_segments || body.muSegments);
 
 
     const descriptor = deriveScopeDescriptor(scope, dayKey, tripRange);
@@ -431,6 +536,8 @@ let muMapping =
 
       audio_source: audioSource,
       audio_trim: audioTrim,
+      clip_range: clipRange,
+      mu_segments: muSegments,
       captures,
       media_count: captures.length,
       missing_media_ids: missing,
