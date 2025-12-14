@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const pool = require('../src/db/pool');
 const { buildPrivacyDome, maskedPointInDome } = require('../utils/privacyDome');
 const { loadZonesForMembers } = require('../utils/privacyZones');
+const { getCurrentIdentity } = require('../services/identity');
 
 let buildMuSongMapFromQueue = null;
 try {
@@ -92,6 +93,7 @@ async function applyPrivacyToSharedCaptures({ viewerMemberId, ownerMemberId, cap
     const dome = domes.get(match.zone_id);
     if (!dome) continue;
     capture.privacy_zone = true;
+    capture.privacy_zone_id = match.zone_id || null;
     capture.privacy_dome = dome;
     capture.privacy_coarse = coarseLabel(match);
     const masked = maskedPointInDome({
@@ -104,6 +106,35 @@ async function applyPrivacyToSharedCaptures({ viewerMemberId, ownerMemberId, cap
     capture.lon = masked.lon;
   }
   return captures;
+}
+
+async function respondWithShare(req, res, shareId) {
+  if (!shareId || !shareStore.has(shareId)) {
+    return res.status(404).json({ ok: false, error: 'share_not_found' });
+  }
+  const shareEntry = shareStore.get(shareId);
+  const identity = await getCurrentIdentity(req, pool).catch(() => null);
+  const viewerMemberId = identity?.memberId || identity?.member_id || null;
+  const ownerMemberId = shareEntry?.member_id || shareEntry?.memberId || null;
+  const originalCaptures = Array.isArray(shareEntry?.captures) ? shareEntry.captures : [];
+  const capturesClone = originalCaptures.map((capture) => ({ ...capture }));
+  let capturesWithPrivacy = capturesClone;
+  try {
+    capturesWithPrivacy = await applyPrivacyToSharedCaptures({
+      viewerMemberId,
+      ownerMemberId,
+      captures: capturesClone,
+    });
+  } catch (err) {
+    console.warn('[soundtrack] privacy masking failed', err);
+  }
+  return res.json({
+    ok: true,
+    share: {
+      ...shareEntry,
+      captures: capturesWithPrivacy,
+    },
+  });
 }
 
 router.post('/share', async (req, res) => {
@@ -119,21 +150,15 @@ router.post('/share', async (req, res) => {
 });
 
 // supports your Cloudflare Pages fetch: /api/soundtrack/share?id=XYZ
-router.get('/share', (req, res) => {
+router.get('/share', async (req, res) => {
   const shareId = sanitizeToken(req.query?.id || req.query?.share_id || '');
-  if (!shareId || !shareStore.has(shareId)) {
-    return res.status(404).json({ ok: false, error: 'share_not_found' });
-  }
-  return res.json({ ok: true, share: shareStore.get(shareId) });
+  await respondWithShare(req, res, shareId);
 });
 
 // optional: /api/soundtrack/share/:id
-router.get('/share/:id', (req, res) => {
+router.get('/share/:id', async (req, res) => {
   const shareId = sanitizeToken(req.params?.id || '');
-  if (!shareId || !shareStore.has(shareId)) {
-    return res.status(404).json({ ok: false, error: 'share_not_found' });
-  }
-  return res.json({ ok: true, share: shareStore.get(shareId) });
+  await respondWithShare(req, res, shareId);
 });
 
 function pruneStore() {
