@@ -6,6 +6,7 @@ const {
   loadZonesForMembers,
   parseZoneId,
 } = require('../utils/privacyZones');
+const { buildPrivacyDome, maskedPointInDome } = require('../utils/privacyDome');
 
 const router = express.Router();
 router.use(express.json({ limit: '256kb' }));
@@ -20,6 +21,7 @@ const ALLOWED_KINDS = new Set([
   'other',
 ]);
 const ALLOWED_SHAPES = new Set(['circle', 'polygon']);
+
 
 function normalizeText(value) {
   if (typeof value === 'string' || typeof value === 'number') {
