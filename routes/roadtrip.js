@@ -1,6 +1,7 @@
 // routes/roadtrip.js
 const express = require('express');
 const pool = require('../src/db/pool'); // adjust path if needed
+const { ensurePrivatePartyForMember } = require('../services/personalParty');
 const { getCurrentIdentity } = require('../services/identity');
 
 const router = express.Router();
@@ -2057,53 +2058,7 @@ router.get('/:roadtripId/live', async (req, res) => {
  */
 // POST /api/roadtrips/default
 async function ensurePrivatePartyIdForHost(memberId, hostHandle) {
-  // Reuse newest private party if it exists
-  const ex = await pool.query(
-    `
-    SELECT party_id
-    FROM public.tt_party
-    WHERE host_member_id = $1
-      AND party_type = 'private'
-    ORDER BY created_at DESC
-    LIMIT 1
-    `,
-    [memberId]
-  );
-  if (ex.rows.length) return ex.rows[0].party_id;
-
-  // Create one if missing (provide center/radius to satisfy NOT NULL schemas safely)
-  const ins = await pool.query(
-    `
-    INSERT INTO public.tt_party (
-      party_id,
-      host_member_id,
-      name,
-      description,
-      center_lat,
-      center_lon,
-      radius_m,
-      party_type,
-      visibility_mode,
-      host_handle
-    )
-    VALUES (
-      gen_random_uuid(),
-      $1,
-      'Private Party',
-      'Auto-created private party',
-      0,
-      0,
-      5000,
-      'private',
-      'private',
-      $2
-    )
-    RETURNING party_id
-    `,
-    [memberId, hostHandle || null]
-  );
-
-  return ins.rows[0].party_id;
+  return ensurePrivatePartyForMember(memberId, hostHandle);
 }
 async function upsertTripRow({ tripId, memberId, tripName, partyId }) {
   // demote old defaults

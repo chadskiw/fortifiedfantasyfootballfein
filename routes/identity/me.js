@@ -8,6 +8,7 @@ const poolMod = require('../../src/db/pool');
 const pool    = poolMod.pool || poolMod;
 
 const cookies = require('../../lib/cookies'); // make sure these set *_id names
+const { ensurePrivatePartyForMember } = require('../../services/personalParty');
 
 const norm = v => (v == null ? '' : String(v)).trim();
 const makeSid = () => crypto.randomUUID(); // RFC4122
@@ -113,13 +114,33 @@ router.get('/me', async (req, res) => {
     const sidCookie = (req.cookies?.ff_session_id || req.cookies?.ff_session || '').trim();
     if (midCookie && sidCookie) {
       await ensureDbSession(sidCookie, midCookie); // idempotent
-      return res.status(200).json({ ok:true, member_id: midCookie });
+      const handleCandidate = req.cookies?.ff_handle || req.cookies?.handle || null;
+      const personalPartyId = await ensurePrivatePartyForMember(midCookie, handleCandidate);
+      return res.status(200).json({
+        ok: true,
+        member_id: midCookie,
+        personal_party_id: personalPartyId,
+        member: {
+          member_id: midCookie,
+          personal_party_id: personalPartyId,
+        },
+      });
     }
 
     // ... ESPN self-heal branch ...
-    return res.status(200).json({ ok:true, member_id: null });
+    return res.status(200).json({
+      ok: true,
+      member_id: null,
+      personal_party_id: null,
+      member: null,
+    });
   } catch (e) {
-    return res.status(200).json({ ok:true, member_id: null });
+    return res.status(200).json({
+      ok: true,
+      member_id: null,
+      personal_party_id: null,
+      member: null,
+    });
   }
 });
 
