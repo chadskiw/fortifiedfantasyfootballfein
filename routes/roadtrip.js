@@ -2060,10 +2060,9 @@ router.get('/:roadtripId/traces', async (req, res) => {
         SELECT roadtrip_id
         FROM tt_party_roadtrip
         WHERE
-          roadtrip_id = $1 OR
-          lower(trip_vanity::text) = lower($1) OR
-          lower(name) = lower($1) OR
-          lower(trip_vanity::text) = lower(replace($1, '-', ''))
+          lower(trip_vanity::text) = lower($1::text) OR
+          lower(name::text) = lower($1::text) OR
+          lower(trip_vanity::text) = lower(replace($1::text, '-', ''))
         LIMIT 1
         `,
         [roadtripId]
