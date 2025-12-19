@@ -2017,6 +2017,8 @@ router.get('/:roadtripId/live', async (req, res) => {
     });
   }
   const sessionPreference =
+    req.query?.session || req.query?.session_id || null;
+  const sessionPreference =
     req.query?.live_session || req.query?.session || null;
   try {
     const liveState = await loadRoadtripLiveState(
@@ -2034,6 +2036,44 @@ router.get('/:roadtripId/live', async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: 'Unable to load live tracking data',
+    });
+  }
+});
+
+router.get('/:roadtripId/traces', async (req, res) => {
+  const { roadtripId } = req.params || {};
+  if (!roadtripId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'roadtripId param is required',
+    });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        trace_id,
+        roadtrip_id,
+        session_id,
+        recorded_at,
+        lat,
+        lon
+      FROM tt_party_roadtrip_trace
+      WHERE roadtrip_id = $1
+      ORDER BY recorded_at ASC
+      `,
+      [roadtripId]
+    );
+    return res.json({
+      ok: true,
+      traces: rows || [],
+    });
+  } catch (err) {
+    console.error('[roadtrip] failed to fetch recorded traces', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Unable to load recorded traces',
     });
   }
 });
