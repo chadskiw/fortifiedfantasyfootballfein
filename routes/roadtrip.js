@@ -2056,14 +2056,14 @@ router.get('/:roadtripId/traces', async (req, res) => {
   } else {
     try {
       const { rows } = await pool.query(
-        `
+      `
         SELECT roadtrip_id
         FROM tt_party_roadtrip
         WHERE
           roadtrip_id = $1 OR
-          lower(trip_vanity) = lower($1) OR
+          lower(trip_vanity::text) = lower($1) OR
           lower(name) = lower($1) OR
-          lower(trip_vanity) = lower(replace($1, '-', ''))
+          lower(trip_vanity::text) = lower(replace($1, '-', ''))
         LIMIT 1
         `,
         [roadtripId]
