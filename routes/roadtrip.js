@@ -2082,7 +2082,7 @@ router.get('/:roadtripId/traces', async (req, res) => {
   }
 
   try {
-    const { rows } = await pool.query(
+      const { rows } = await pool.query(
       `
       SELECT
         trace_id,
@@ -2095,7 +2095,7 @@ router.get('/:roadtripId/traces', async (req, res) => {
       WHERE roadtrip_id = $1
       ORDER BY recorded_at ASC
       `,
-      [roadtripId]
+      [resolvedRoadtripId]
     );
     return res.json({
       ok: true,
