@@ -2018,7 +2018,7 @@ router.get('/:roadtripId/live', async (req, res) => {
   }
   const sessionPreference =
     req.query?.session || req.query?.session_id || null;
-  const sessionPreference =
+  const sessionPreference2 =
     req.query?.live_session || req.query?.session || null;
   try {
     const liveState = await loadRoadtripLiveState(
