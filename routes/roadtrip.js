@@ -2041,11 +2041,44 @@ router.get('/:roadtripId/live', async (req, res) => {
 });
 
 router.get('/:roadtripId/traces', async (req, res) => {
-  const { roadtripId } = req.params || {};
+  let { roadtripId } = req.params || {};
   if (!roadtripId) {
     return res.status(400).json({
       ok: false,
       error: 'roadtripId param is required',
+    });
+  }
+  roadtripId = String(roadtripId).trim();
+
+  let resolvedRoadtripId = null;
+  if (isValidUuid(roadtripId)) {
+    resolvedRoadtripId = roadtripId;
+  } else {
+    try {
+      const { rows } = await pool.query(
+        `
+        SELECT roadtrip_id
+        FROM tt_party_roadtrip
+        WHERE
+          roadtrip_id = $1 OR
+          lower(trip_vanity) = lower($1) OR
+          lower(name) = lower($1) OR
+          lower(trip_vanity) = lower(replace($1, '-', ''))
+        LIMIT 1
+        `,
+        [roadtripId]
+      );
+      resolvedRoadtripId = rows[0]?.roadtrip_id || null;
+    } catch (err) {
+      console.error('[roadtrip] failed to resolve slug to roadtrip', err);
+      resolvedRoadtripId = null;
+    }
+  }
+
+  if (!resolvedRoadtripId) {
+    return res.status(404).json({
+      ok: false,
+      error: 'Roadtrip not found',
     });
   }
 
