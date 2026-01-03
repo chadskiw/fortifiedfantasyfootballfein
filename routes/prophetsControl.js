@@ -71,9 +71,11 @@ const TourDateSchema = z.object({
   link: z.string().url().max(220).optional().nullable(),
 });
 
-const TourDateUpdateSchema = TourDateSchema.deepPartial().refine((value) => Object.keys(value).length > 0, {
-  message: 'At least one field is required',
-});
+const TourDateUpdateSchema = TourDateSchema.partial().refine(
+  (value) => Object.keys(value).length > 0,
+  { message: "At least one field is required" }
+);
+
 
 const AppearanceUpdateSchema = z.object({
   heroTitle: z.string().max(200).optional(),
