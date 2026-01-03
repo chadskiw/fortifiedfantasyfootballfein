@@ -47,12 +47,13 @@ const ffPointsRouter    = require('./routes/ffPoints');
 const espnRouter        = require('./routes/espn');
 const hydrateEspn       = require('./routes/espn/hydrate');
 const imagesPresign     = require('./routes/images/presign-r2');       // if used elsewhere
-const createImagesRouter= require('./src/routes/images');              // if used elsewhere
+//const createImagesRouter= require('./src/routes/images');              // if used elsewhere
 const pool              = require('./src/db/pool');
 // app.js / index.js
 const trashtalkRouter = require('./routes/trashtalk');
 const partyRouter = require('./routes/party');
 const contactRouter = require('./routes/contact');
+const intakeRouter = require('./routes/intake');
 
 
 
@@ -137,6 +138,7 @@ app.use('/api/trashtalk', trashtalkRouter);
 app.use('/api/party', partyRouter);
 app.use('/api/video', videoRouter);
 app.use('/api/contact', contactRouter);
+app.use('/api/intake', intakeRouter);
 app.use('/api/me/privacy-zones', privacyZonesRouter);
 app.use(userLandingRoutes);
 app.use(partyLandingRoutes);
@@ -625,8 +627,21 @@ app.get('/api/image/:id',                sendLogo); // generic alias
 app.use('/api/identity', require('./routes/identity/me'));
 app.use('/api/session', require('./routes/session')); // mount early
 app.use('/api/identity', require('./routes/identity-status'));
-app.use('/api/images', createImagesRouter());
-app.use('/api/images/convert', createImagesRouter());
+//app.use('/api/images', createImagesRouter());
+//app.use('/api/images/convert', createImagesRouter());
+// server.js (replace the two createImagesRouter() mounts)
+{
+  const imagesMod = require('./src/routes/images');
+
+  // if it's a factory, call it; if it's already a router, use it
+  const candidate = (typeof imagesMod === 'function') ? imagesMod() : imagesMod;
+
+  const imagesMw = asMiddleware(candidate);
+  if (!imagesMw) throw new Error('images export is not middleware/router');
+
+  app.use('/api/images', imagesMw);
+  app.use('/api/images/convert', imagesMw);
+}
 
 app.use('/api/identity', require('./routes/identity/logout'));
 // ===== FF points API =====
