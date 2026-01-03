@@ -54,6 +54,7 @@ const trashtalkRouter = require('./routes/trashtalk');
 const partyRouter = require('./routes/party');
 const contactRouter = require('./routes/contact');
 const intakeRouter = require('./routes/intake');
+const prophetsControlRoutes = require('./routes/prophetsControl');
 
 
 
@@ -139,6 +140,7 @@ app.use('/api/party', partyRouter);
 app.use('/api/video', videoRouter);
 app.use('/api/contact', contactRouter);
 app.use('/api/intake', intakeRouter);
+app.use('/api/prophets-control', prophetsControlRoutes);
 app.use('/api/me/privacy-zones', privacyZonesRouter);
 app.use(userLandingRoutes);
 app.use(partyLandingRoutes);
