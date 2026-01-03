@@ -23,6 +23,16 @@ async function ensureControlTables() {
     )
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS prophets_notification_requests (
+      id uuid PRIMARY KEY,
+      contact_type text NOT NULL CHECK (contact_type IN ('push', 'text', 'email')),
+      contact_value text NOT NULL,
+      channel_preference text NOT NULL,
+      note text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS prophets_appearance (
       id integer PRIMARY KEY,
       config jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -81,6 +91,11 @@ const AppearanceUpdateSchema = z.object({
   heroTitle: z.string().max(200).optional(),
   heroSubtitle: z.string().max(400).optional(),
   layoutMode: z.enum(['dark', 'light', 'auto']).optional(),
+  gradientFrom: z.string().max(30).optional(),
+  gradientTo: z.string().max(30).optional(),
+  gradientAngle: z.number().int().min(0).max(360).optional(),
+  movementIntensity: z.number().int().min(0).max(100).optional(),
+  effects: z.array(z.enum(['glow', 'parallax', 'pulse'])).optional(),
   palette: z
     .object({
       primary: z.string().max(30).optional(),
@@ -89,6 +104,13 @@ const AppearanceUpdateSchema = z.object({
     })
     .partial()
     .optional(),
+});
+
+const NotificationRequestSchema = z.object({
+  email: z.string().email().max(200).optional(),
+  phone: z.string().max(40).optional(),
+  pushToken: z.string().max(200).optional(),
+  note: z.string().max(400).optional(),
 });
 
 function formatTourRow(row) {
@@ -219,6 +241,11 @@ router.patch('/appearance', async (req, res) => {
   if (body.heroTitle) payload.heroTitle = body.heroTitle;
   if (body.heroSubtitle) payload.heroSubtitle = body.heroSubtitle;
   if (body.layoutMode) payload.layoutMode = body.layoutMode;
+  if (body.gradientFrom) payload.gradientFrom = body.gradientFrom;
+  if (body.gradientTo) payload.gradientTo = body.gradientTo;
+  if (typeof body.gradientAngle === 'number') payload.gradientAngle = body.gradientAngle;
+  if (typeof body.movementIntensity === 'number') payload.movementIntensity = body.movementIntensity;
+  if (Array.isArray(body.effects)) payload.effects = body.effects;
   if (body.palette) payload.palette = body.palette;
 
   if (!Object.keys(payload).length) {
@@ -240,6 +267,54 @@ router.patch('/appearance', async (req, res) => {
     appearance: rows[0]?.config || {},
     updatedAt: rows[0]?.updated_at || null,
   });
+});
+
+function resolveContactInfo(body) {
+  if (body.pushToken) {
+    return { contactType: 'push', value: body.pushToken, preference: 'push' };
+  }
+  if (body.phone) {
+    return { contactType: 'text', value: body.phone, preference: 'text' };
+  }
+  if (body.email) {
+    return { contactType: 'email', value: body.email, preference: 'email' };
+  }
+  return null;
+}
+
+router.post('/notifications', async (req, res) => {
+  const body = NotificationRequestSchema.parse(req.body);
+  const contact = resolveContactInfo(body);
+  if (!contact) {
+    return res.status(400).json({
+      error: 'contact_required',
+      message: 'Provide a push token, phone number, or email address.',
+    });
+  }
+
+  const id = crypto.randomUUID();
+  await pool.query(
+    `
+      INSERT INTO prophets_notification_requests
+        (id, contact_type, contact_value, channel_preference, note)
+      VALUES ($1,$2,$3,$4,$5)
+    `,
+    [id, contact.contactType, contact.value, contact.preference, body.note ?? null],
+  );
+
+  res.status(201).json({ ok: true, id });
+});
+
+router.get('/notifications', requireProphetPin, async (_req, res) => {
+  const { rows } = await pool.query(
+    `
+      SELECT id, contact_type, contact_value, channel_preference, note, created_at
+      FROM prophets_notification_requests
+      ORDER BY created_at DESC
+      LIMIT 100
+    `,
+  );
+  res.json({ notifications: rows });
 });
 
 module.exports = router;
