@@ -26,6 +26,7 @@ const sensorRoutes = require('./routes/sensor');
 const momentsRouter = require('./routes/moments');
 const soundtrackRouter = require('./routes/soundtrackprev');
 const bandcampRouter = require('./routes/bandcamp');
+const venuesRouter = require('./routes/venues');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -148,6 +149,7 @@ app.use(trashtalkUserRoutes);
 // ...
 app.use(specialsRouter);
 app.use('/api/audio', audioRouter);
+app.use('/api/venues', venuesRouter);
 // For the HTML page: /t?kyo=...
 app.use('/', tChannelRoutes);     // this makes GET /t work
 
