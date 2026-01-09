@@ -11,6 +11,7 @@ const DEFAULT_ALLOWED = [
   'http://127.0.0.1:3000',
   'https://fortifiedfantasy.com',
   'https://fortifiedfantasy4.pages.dev',
+  'https://inventory-store.pages.dev',
 ];
 
 const ALLOWED = [...new Set([...DEFAULT_ALLOWED, ...ENV_ALLOWED])];
