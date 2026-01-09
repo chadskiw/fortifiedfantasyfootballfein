@@ -27,6 +27,7 @@ const momentsRouter = require('./routes/moments');
 const soundtrackRouter = require('./routes/soundtrackprev');
 const bandcampRouter = require('./routes/bandcamp');
 const venuesRouter = require('./routes/venues');
+const marketplaceRouter = require('./routes/marketplace');
 
 // server.js
 const playerh2h = require('./routes/playerh2h');
@@ -50,6 +51,7 @@ const hydrateEspn       = require('./routes/espn/hydrate');
 const imagesPresign     = require('./routes/images/presign-r2');       // if used elsewhere
 //const createImagesRouter= require('./src/routes/images');              // if used elsewhere
 const pool              = require('./src/db/pool');
+const { corsMiddleware } = require('./src/cors');
 // app.js / index.js
 const trashtalkRouter = require('./routes/trashtalk');
 const partyRouter = require('./routes/party');
@@ -100,6 +102,7 @@ const widgetRouter = require('./routes/widget');
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.use(corsMiddleware());
 app.use(express.json());
 app.use('/api/modal-lab', modelLabRouter);
 app.use('/api/widget', widgetRouter);
@@ -150,6 +153,7 @@ app.use(trashtalkUserRoutes);
 app.use(specialsRouter);
 app.use('/api/audio', audioRouter);
 app.use('/api/venues', venuesRouter);
+app.use('/api/marketplaces', marketplaceRouter);
 // For the HTML page: /t?kyo=...
 app.use('/', tChannelRoutes);     // this makes GET /t work
 
